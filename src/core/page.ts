@@ -178,6 +178,21 @@ export class BrowserPage {
         }
     }
 
+    /**
+     * Captures the viewport as a JPEG.
+     *
+     * JPEG rather than PNG, and quality well below default, because the bytes travel through a
+     * model's context window: an exact-pixel PNG costs several times more for no decision value.
+     */
+    async captureScreenshot(options: { fullPage: boolean }): Promise<{ data: string }> {
+        const result = await this.session.send<{ data: string }>('Page.captureScreenshot', {
+            format: 'jpeg',
+            quality: 60,
+            captureBeyondViewport: options.fullPage,
+        });
+        return { data: result.data };
+    }
+
     async snapshot(options: CaptureOptions): Promise<PageSnapshot> {
         return this.state.capture(this.session, options);
     }
