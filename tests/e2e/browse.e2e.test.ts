@@ -5,10 +5,11 @@ import { loadConfig } from '../../src/core/config.js';
 import { CdpSessionPool } from '../../src/core/context.js';
 import type { BrowserPage } from '../../src/core/page.js';
 import { SteelRestClient } from '../../src/core/steel/rest.js';
-import { describeStack, E2E_ENV, FIXTURE_BASE_URL, FIXTURE_PROBE_URL, stackIsUp } from './stack.js';
+import { announceStack, describeStack, E2E_ENV, FIXTURE_BASE_URL, FIXTURE_PROBE_URL, stackIsUp } from './stack.js';
 
 const available = await stackIsUp();
 const reason = describeStack(available);
+announceStack(available, 'browse E2E');
 
 const config = loadConfig(E2E_ENV);
 const api = new SteelRestClient(config);

@@ -39,7 +39,23 @@ export async function stackIsUp(): Promise<boolean> {
     return browser && fixture;
 }
 
-/** A human-readable reason, printed in the suite name so a skip is never silent. */
+const START_COMMAND = 'docker compose -f tests/e2e/docker-compose.yml up -d';
+
+/** A human-readable reason, used in the suite name so a skip is visible in the report. */
 export function describeStack(up: boolean): string {
-    return up ? 'live steel-browser' : 'SKIPPED: start it with docker compose -f tests/e2e/docker-compose.yml up -d';
+    return up ? 'live steel-browser' : `SKIPPED: start it with ${START_COMMAND}`;
+}
+
+/**
+ * Writes the skip reason to stderr.
+ *
+ * Vitest does not print the names of skipped suites at default verbosity, so without this an
+ * unavailable stack looks exactly like a suite nobody wrote.
+ */
+export function announceStack(up: boolean, suite: string): void {
+    if (up) return;
+    process.stderr.write(
+        `\n  SKIPPED ${suite}: the E2E stack is not reachable at ${STEEL_BASE_URL} and ${FIXTURE_PROBE_URL}.\n` +
+            `  Start it with: ${START_COMMAND}\n\n`
+    );
 }

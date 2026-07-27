@@ -7,11 +7,12 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import { SteelRestClient } from '../../src/core/steel/rest.js';
-import { describeStack, E2E_ENV, STEEL_BASE_URL, stackIsUp } from './stack.js';
+import { announceStack, describeStack, E2E_ENV, STEEL_BASE_URL, stackIsUp } from './stack.js';
 
 const BINARY = fileURLToPath(new URL('../../dist/stdio.js', import.meta.url));
 const available = (await stackIsUp()) && existsSync(BINARY);
 const reason = describeStack(available);
+announceStack(available, 'leak E2E');
 
 const api = new SteelRestClient(loadConfig(E2E_ENV));
 
