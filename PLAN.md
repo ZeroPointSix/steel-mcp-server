@@ -1,173 +1,235 @@
-# Steel MCP Server v2 — Hosted Streamable-HTTP Design Plan
+# Steel MCP Server v2 — Implementation Plan
 
 **Status:** Draft for review
 **Branch:** `niko/steel-mcp-server-v2`
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
+**Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
 ---
 
 ## 1. Goals
 
-1. **One canonical Steel MCP server** that serves every MCP host — Claude Desktop/Code, Cursor, Goose, ChatGPT connectors, Buzz — instead of per-host forks.
-2. **Hosted-first**: a multi-tenant Streamable-HTTP endpoint at `https://mcp.steel.dev/mcp`. Zero install, auth via Steel API key. Tool-surface improvements ship continuously without anyone updating a binary.
-3. **Same core runs locally**: a stdio entrypoint from the identical tool implementation, for self-hosters (local `steel-browser` Docker) and stdio-only hosts (Buzz brains today).
-4. **Scrape-first, token-cheap tool surface**: markdown reads as the primary primitive; screenshots and CDP interaction as escalation, not default.
-5. **Server-side session lifecycle**: browser sessions are created lazily and torn down by the server (MCP session end, idle reaper, hard TTL). The billed-session-leak risk class is eliminated structurally, not by hoping every host's stop-hook fires.
+1. **One canonical Steel MCP server** serving every MCP host — Claude Code/Desktop, Cursor, VS Code, Goose, ChatGPT connectors, custom agents, CI pipelines — from one core.
+2. **Hosted-first**: a multi-tenant Streamable-HTTP endpoint at `https://mcp.steel.dev/mcp`. Zero install, tool improvements ship continuously.
+3. **Same core over stdio**: for MCPB bundles, `npx` users, self-hosters running the steel-browser Docker image, CI pipelines, and every host that spawns subprocesses. Also the cheapest way to test the core.
+4. **Token-cheap by construction, and provably so.** Markdown scrape as the primary read; accessibility snapshots for interaction; screenshots as resource links. We publish measured numbers — nobody in this category does.
+5. **Never leak a billed browser session**, guaranteed server-side rather than by client cooperation.
 
 ## 2. Non-goals
 
-- Not an agent/brain. No LLM calls, no orchestration. The host's model decides *when*; we execute *how*.
-- No Buzz-specific artifact in this repo. The Buzz persona pack lives with the Buzz integration and merely points at this server (hosted URL, or `npx`/binary for stdio).
-- No bundled Chromium. The browser is always a Steel session (cloud or self-hosted); we use `puppeteer-core` purely as a CDP client.
-- No v1 feature parity for its own sake. The Web-Voyager numbered-screenshot loop is replaced, not ported.
+- Not an agent. No LLM inference inside the product — no `run_task(natural_language)`. The host's model decides *when*; we execute *how*, deterministically and reproducibly.
+- No bundled Chromium. The browser is always a Steel session (cloud or self-hosted).
+- No feature parity with v1. The Web-Voyager numbered-screenshot loop is replaced, not ported.
+- No single-consumer special-casing. Every design choice must earn its place for the general Steel user.
 
-## 3. Protocol targets (verified 2026-07-27)
+## 3. Protocol and dependency targets
 
-| Thing | Version | Notes |
+| Thing | Target | Notes |
 |---|---|---|
-| MCP spec | **2025-11-25** (current) | Negotiate down to 2025-06-18 for older clients |
-| `@modelcontextprotocol/sdk` | ^1.29.0 | `StreamableHTTPServerTransport` + `StdioServerTransport` |
-| `steel-sdk` | ^0.18.0 | Sessions + scrape/screenshot/pdf REST |
-| Spec features we use | Streamable HTTP, `Mcp-Session-Id`, SSE polling/resumption (SEP-1699), RFC 9728 protected-resource metadata, tool icons | Experimental `tasks` (SEP-1686) deferred — see §12 |
+| MCP spec | **2026-07-28** primary | Publishes 2026-07-28; RC locked 2026-05-21. Largest revision since launch. 2025-11-25 and 2025-06-18 served via the SDK legacy shim |
+| SDK | `@modelcontextprotocol/server@^2` + `@modelcontextprotocol/node` | v2 (`2.0.0-beta.5`, going stable alongside the spec) is the only line implementing the new wire format. The v1 line still gets maintenance (1.30.0 shipped 2026-07-27) but is frozen at the legacy protocol — do not build on it |
+| Runtime | **Node ≥20, Zod ≥4.2, `"type": "module"`** | ESM-first with a CJS build available. Painful to retrofit — commit at P0 |
+| Steel access | `steel-sdk@^0.18` **plus a thin typed REST layer** | SDK published 2026-03-16, missing `inactivityTimeout`, `browserMode`, `caCertificates`, and the `/agent-traces`, `/logs`, `/hls`, `/v1/projects` endpoint families |
+| Conformance | `@modelcontextprotocol/conformance` | Replaces hand-rolled protocol tests; the same harness Tier-1 SDKs are measured against |
+
+**Spec changes that shape this design** (full list in RESEARCH.md §2.1): protocol sessions, `Mcp-Session-Id`, and the `initialize` handshake are removed (SEP-2567/2575); `GET`/`DELETE` on the MCP endpoint answer `405`; SSE resumability and `Last-Event-ID` are gone; `server/discover` is a new MUST; every POST carries `MCP-Protocol-Version` (plus `Mcp-Method`/`Mcp-Name` on calls); results carry required `resultType`, and list results require `ttlMs` + `cacheScope`; Roots, Sampling and Logging are deprecated; Tasks moved out of core into the `io.modelcontextprotocol/tasks` extension (SEP-2663).
+
+> **Verify on the day.** As of 2026-07-27 the versioning page still lists 2025-11-25 as current and `/specification/2026-07-28` 404s; only the `2026-07-28-RC` tag exists. Confirm the final tag before merging this plan.
 
 ## 4. Architecture
 
 ```
- MCP host (Claude / Cursor / Goose / Buzz brain)
-   │  Streamable HTTP  (POST /mcp, GET /mcp SSE, DELETE /mcp)
-   │  Authorization: Bearer <STEEL_API_KEY>   or OAuth token (later)
+ MCP host (Claude Code / Cursor / VS Code / Goose / ChatGPT / CI)
+   │  Streamable HTTP: POST /mcp     (GET, DELETE -> 405)
+   │  Authorization: Bearer <STEEL_API_KEY>   or  ?apiKey=  fallback
    ▼
- mcp.steel.dev  — this server, N stateless-ish replicas
-   ├─ AuthN/AuthZ: key → Steel org, plan limits
-   ├─ SessionBinder: Mcp-Session-Id ⇄ Steel session id (Redis)
-   ├─ Tool layer (shared core, transport-agnostic)
-   │    ├─ one-shot reads ──► Steel REST  POST /v1/scrape | /screenshot | /pdf
-   │    └─ stateful browse ──► Steel session + CDP  wss://connect.steel.dev?sessionId=…
-   └─ Reaper: idle timeout + hard TTL → POST /v1/sessions/{id}/release
+ mcp.steel.dev — stateless Node replicas, round-robin, no sticky routing
+   ├─ Auth: key -> project within org, plan limits from GET /v1/details
+   ├─ Handle registry (Redis): session_id -> {steel_session_id, org, project, timestamps}
+   ├─ Tool layer (transport-agnostic core)
+   │    ├─ stateless reads ──► POST /v1/scrape | /v1/screenshot | /v1/pdf
+   │    ├─ structured browse ──► CDP  wss://connect.steel.dev?apiKey=<key>&sessionId=<id>
+   │    └─ vision profile ──► POST /v1/sessions/{id}/computer
+   └─ Reaper: sweeps orphaned handles -> POST /v1/sessions/{id}/release
 ```
 
-**Package shape** — one npm package, three entrypoints, one core:
+**Package shape** — one repo, three entrypoints, one core:
 
 ```
 src/
   core/
-    server.ts          # buildServer(deps): McpServer with all tools registered
-    tools/
-      scrape.ts        # steel_scrape (stateless REST)
-      screenshot.ts    # steel_screenshot
-      pdf.ts           # steel_pdf
-      browse.ts        # steel_navigate, steel_click, steel_type, steel_scroll,
-                       #   steel_wait_for, steel_go_back, steel_page_read
-      session.ts       # steel_session_info, steel_release_session
-    session-binder.ts  # MCP session ⇄ Steel session mapping + lazy create + reaper
-    steel-client.ts    # thin wrapper over steel-sdk + puppeteer-core CDP connect
-    page-snapshot.ts   # a11y-tree text snapshot with stable element refs
-  http.ts              # Streamable HTTP entrypoint (hosted + self-host)
-  stdio.ts             # stdio entrypoint (bin: steel-mcp)
-  config.ts            # env parsing: STEEL_API_KEY, STEEL_BASE_URL, mode flags
+    tools/           # scrape, screenshot, pdf, session, navigate, snapshot, find, act, wait, diagnostics, batch
+    profiles.ts      # scrape | browse | vision | full
+    snapshot.ts      # a11y tree, @eN refs keyed on (loaderId, backendNodeId), versioned
+    settle.ts        # WaitForHelper: frame-navigation + MutationObserver quiescence
+    untrusted.ts     # provenance fencing, invisible-content stripping, password redaction
+    registry.ts      # handle registry + reaper
+    steel/           # typed REST layer over /v1 + CDP client
+    errors.ts        # Steel failure -> actionable tool-execution error
+  http.ts            # Streamable HTTP entrypoint
+  stdio.ts           # stdio entrypoint (bin: steel-mcp)
 ```
 
-`buildServer(deps)` takes an injected Steel client so every tool is unit-testable without the network.
+**Dependency-injection shape:** module-scope pools, clients and registry, closed over by a **per-request server factory** — `createMcpHandler` runs its factory once per HTTP request. This is not the long-lived `buildServer(deps)` singleton an earlier draft assumed.
 
-## 5. Transport & session model
+**A third entrypoint to decide on:** both Microsoft and Google hedged their browser MCP servers with a CLI + skills within four months of each other, on token grounds. Steel already ships a Rust CLI and five skills. Either wire them to this core or write down why not — shipping two divergent implementations of the same semantics is the failure mode.
 
-**Streamable HTTP (hosted + self-host HTTP mode)**
-- `POST /mcp` for client→server messages; server may reply JSON or open SSE.
-- `GET /mcp` for the standalone SSE stream; support **polling mode** (SEP-1699) — we may disconnect at will; event IDs encode stream identity for resumption.
-- `DELETE /mcp` ends the MCP session → immediately releases any bound Steel session.
-- Validate `Origin`, reply `403` on mismatch (spec requirement, and our DNS-rebinding guard for self-host).
-- `Mcp-Session-Id` issued at `initialize`. Session state (bound Steel session id, event log for resumption, last-activity timestamp) lives in **Redis** so replicas are interchangeable — no sticky routing.
+## 5. State model — explicit handles
 
-**Steel session binding (the core invariant)**
-- **Lazy**: no Steel session exists until the first tool that needs a live browser (`steel_navigate` etc.). `steel_scrape`/`steel_screenshot`/`steel_pdf` on a bare URL use the stateless REST endpoints — no session, no per-minute billing.
-- **One Steel session per MCP session**, reused across tool calls (cold-start cost + state continuity).
-- **Teardown, in order of preference**: client `DELETE` → idle reaper (default 5 min without a tool call) → hard TTL (default 30 min) → Steel-side session timeout as final backstop. Every path calls `POST /v1/sessions/{id}/release` and records which path fired (leak metric).
+There is no protocol session to hang state on. `steel_session_create` mints a handle; every stateful tool takes `session_id` as an ordinary argument. This is the spec's prescribed replacement, and its worked example is literally an open browser context.
 
-**stdio mode**
-- Same core; the "MCP session" is the process lifetime. Release on shutdown signal and on `close`. This is what the Buzz persona pack points at: the Buzz path is stdio-only for MCP (verified — see §12 #1), so through Buzz every brain receives a `McpServerStdio` entry regardless of what its own CLI supports.
+Consequences, all good: no Redis event store, no sticky routing, no `Mcp-Session-Id`, replicas fully interchangeable, and **multiple concurrent browsers per client** become possible (capped by plan concurrency, not by structure). It is also the only model that works on ChatGPT and claude.ai, which already close the MCP session between consecutive tool calls.
+
+**Handles are not capabilities.** Namespace as `<org_id>:<handle>`, ≥128 bits of CSPRNG entropy, opaque `sess_` prefix, never derived from org id or timestamp. Re-authorize `(handle, org)` on **every single call** from that request's own credential — never from anything cached at creation. A leaked handle otherwise grants a stranger a live, possibly logged-in browser.
+
+### Never leaking a billed session
+
+Five layers. The strongest is not ours:
+
+| # | Layer | Survives |
+|---|---|---|
+| 1 | **Steel `inactivityTimeout`** (~120s) set on every create | our process dying, replica rescheduling, network partition, client vanishing. **This is the guarantee** |
+| 2 | **Steel `timeout`** hard cap, derived from `GET /v1/details` — never hardcoded (15 min on Launch, 1 hr on Scale) | same |
+| 3 | **Client-minted `sessionId` UUID** passed on create | the create-then-crash gap: we know the id before create returns |
+| 4 | **`steel_session_release`** tool, idempotent, retention policy stated in `steel_session_create`'s description so the model can see the cost | fast path |
+| 5 | **Abort on stream close** — plumb the request abort signal into every CDP call | closing the SSE stream *is* cancellation now; `notifications/cancelled` survives only on stdio. A client hang-up mid-navigate otherwise burns minutes with nobody listening |
+| 6 | **Our reaper** over the handle registry | reclaims concurrency slots faster than Steel's timeout would |
+
+Instrument a counter per release path and alert on the Steel-backstop count — that is the leak metric. Publish it as an SLO: a local MCP server structurally cannot offer this.
+
+**Framing note:** a fully leaked 15-minute Launch session costs $0.025. The scarce resource is the **10-concurrent-session cap and the 20 RPM Browser Tools limit**, not dollars. Frame the reaper as slot reclamation.
 
 ## 6. Auth
 
-| Phase | Mechanism | Serves |
+| Tier | Mechanism | Reaches |
 |---|---|---|
-| Launch | `Authorization: Bearer <STEEL_API_KEY>` — validated against Steel Cloud, resolves to org + plan | Claude Code, Cursor, Goose, any client that supports custom headers |
-| Launch | No-auth mode (`STEEL_LOCAL=true` self-host, binds localhost, Origin-checked) | steel-browser Docker users |
-| Later | OAuth 2.1 resource server: RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`, pointing at Steel's authorization server; incremental scope consent via `WWW-Authenticate` | claude.ai / ChatGPT consumer connectors that require OAuth |
+| **A — ships now** | `Authorization: Bearer <STEEL_API_KEY>`, with a `?apiKey=` query-param fallback (precedence: header → query → OAuth) | Claude Code, Cursor, VS Code, Zed, Goose, CI, the Official MCP Registry, Cursor Marketplace |
+| **A — self-host** | No-auth mode, localhost-bound, Origin+Host validated | steel-browser Docker users |
+| **B — later** | OAuth 2.1 resource server: **Client ID Metadata Documents, not DCR** (RFC 7591 DCR is deprecated), RFC 9728 metadata, RFC 8707 audience binding, RFC 9207 `iss`, S256 PKCE | Anthropic Connectors Directory, OpenAI Plugins Directory |
 
-OAuth is deliberately **not** a launch blocker: it depends on Steel platform shipping an OAuth AS in front of existing identity (open question §12). API-key bearer covers every developer-tool host on day one.
+The query param is not optional politeness — Browserbase, Bright Data and Browserless all ship it because many hosts still cannot set headers. Issue **scoped, revocable MCP-specific keys** for it so a leaked URL is cheap to rotate, and redact in every log line.
+
+**OAuth deferral is a distribution decision, not a technical one.** Tier A covers the developer surfaces; it does not reach the two largest consumer directories. Say so out loud when sequencing.
 
 ## 7. Tool surface
 
-Design principles: **cheapest sufficient read wins**; text snapshots before pixels; explicit token budgets on every text-returning tool; every session-touching result includes the live session-viewer URL so users can watch.
+**Position: low-level primitives plus batching.** Not natural-language actions. The only measured evidence for the high-level architecture attributes its win to round-trip elimination, which `steel_batch` captures without putting an LLM in the product — and without the inference cost, nondeterminism, and hidden failure modes.
 
-### One-shot reads (no session, REST-backed)
+**Position: ship a vision surface, opt-in, never default.** Computer use is a native interleavable tool in 2026 frontier models, so a host can hold both surfaces at once and we don't have to choose. Back it with Steel's `POST /v1/sessions/{id}/computer`, downscale server-side at 1280×720, include `zoom(region)`. No coordinate grids or tiled images — measured no consistent uplift.
 
-| Tool | Input | Output | Notes |
-|---|---|---|---|
-| `steel_scrape` | `url`, `formats[]` (markdown \| html \| links \| readability), `max_tokens?`, `cursor?` | markdown/etc. + pagination cursor | **The primary read.** Truncates at budget with a cursor to continue — never silently clips |
-| `steel_screenshot` | `url?` (or current session page), `full_page?` | MCP image content block | |
-| `steel_pdf` | `url?` (or current session page) | PDF resource | |
+### Default `browse` profile
 
-### Stateful browsing (lazily binds a Steel session)
+All tools `openWorldHint: true`, all carry `title` and `readOnlyHint`/`destructiveHint` (an Anthropic review requirement).
 
-| Tool | Maps to | Notes |
+| Tool | Returns | Why it earns its slot |
 |---|---|---|
-| `steel_navigate` | CDP `Page.navigate` + wait for load/network-idle | Returns page snapshot (below) |
-| `steel_page_read` | a11y tree + DOM walk | Text snapshot with stable numeric element refs (`[12] link "Pricing"`), Playwright-MCP style. Replaces v1's vision-first numbered screenshots |
-| `steel_click` / `steel_type` / `steel_scroll` | CDP `Input.*` targeting a snapshot ref | `steel_type` supports `submit?: bool` |
-| `steel_wait_for` | selector / text / network-idle / timeout | Replaces blind `wait` |
-| `steel_go_back` | CDP history | |
-| `steel_session_info` | — | Session id, viewer URL, region, expiry |
-| `steel_release_session` | `POST /v1/sessions/{id}/release` | Optional early release; lifecycle works without it |
+| `steel_scrape` | fenced content + always-present `links[]` + `metadata`, cursor-paginated | **Primary read.** No session, no billing, no leak risk. Param is `format` (array-valued, singular name); values `html`\|`readability`\|`cleaned_html`\|`markdown` |
+| `steel_screenshot` | **resource link** by default, inline base64 only on request | "Screenshot causes context overflow by default" is a real filed issue against Playwright MCP. Don't repeat it |
+| `steel_pdf` | resource link | `/v1/screenshot` and `/v1/pdf` return `{url}`, not bytes |
+| `steel_session_create` | `{session_id, viewer_url, expires_at, plan_limits}` | **Explicit, not lazy** — the model must see that a billed resource started, name it, and release it |
+| `steel_session_release` | confirmation + captured session context | Captures context *before* release so the ordering trap can't bite |
+| `steel_navigate` | final URL, title, status, `navigated`, `dom_changed` | `include_snapshot` **false** by default |
+| `steel_snapshot` | a11y tree with `@eN` refs + `snapshot_id` | The core structured read. Budget knobs mandatory |
+| `steel_find` | matching nodes + refs + context | **Highest-ROI tool in the category.** Most turns need one element, not the page |
+| `steel_act` | outcome + change signal | One action enum (`click`\|`type`\|`fill_form`\|`select`\|`hover`\|`scroll`\|`press`\|`go_back`\|`dismiss_overlays`). `target` accepts a ref **or** a selector — agents guess selectors constantly |
+| `steel_wait_for` | outcome | Explicit waits only. **No `networkidle`** |
+| `steel_session_diagnostics` | timeline from `/agent-traces` + `/logs` | **P1, not polish.** Nobody else can build this |
+| `steel_batch` | one snapshot at the end, stops at first failure | Where the round-trip win lives |
 
-Deliberately excluded for launch: `steel_execute_js` (arbitrary eval on a multi-tenant endpoint needs its own security review), file upload/download, profiles/credentials (Steel features worth exposing later, each behind its own design note).
+Plus a **server `instructions` string** (≤2KB) as a reviewed deliverable. Claude Code enables MCP tool search by default, which makes this the primary discovery surface. Write it in the user's language — JS-rendered pages, sites that block plain fetch, login-gated content, CAPTCHAs, multi-step forms — not Steel's architecture.
 
-Every tool: zod input schema → JSON Schema 2020-12; input-validation failures return **tool execution errors**, not protocol errors (SEP-1303, lets the model self-correct); tool icons set (spec 2025-11-25).
+### Profiles
 
-## 8. Multi-tenancy & operations
+Named presets, selected by credential or URL (`tools/list` must not vary per-connection, though it may vary by authorization):
 
-- **Limits**: per-org concurrent-session and requests/min caps derived from Steel plan; `429` with `Retry-After`.
-- **Metrics** (Prometheus): sessions created/released by teardown path, *leaked* (backstop-fired) count — the alerting metric, tool latency histograms, scrape token counts, active MCP sessions.
-- **Logging**: structured JSON to stderr (stdio mode: stderr is spec-sanctioned for all logging), request-id + org-id on every line, no page-content in logs.
-- **Deploy**: containerized Node service in Steel Cloud infra alongside the API gateway (exact placement = platform-team conversation, §12). Staging env first. Redis for session binding + SSE event store.
-- **Self-host**: same image, `STEEL_BASE_URL` pointed at local steel-browser, Redis optional (in-memory binder for single replica).
+`scrape` (3 stateless tools, zero billing) · **`browse`** (default, the 12 above) · `vision` (+ coordinate tools) · `full` (+ `steel_execute_js`, self-host/stdio only)
 
-## 9. Testing (TDD, red→green→refactor, no exceptions)
+Design profiles at P0 when it's free, not later when it's breaking.
 
-| Layer | What | How |
+### Deliberately not shipping
+
+`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · file upload/download · recording retrieval (return `sessionViewerUrl` instead) · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
+
+## 8. Page representation and token economics
+
+**A11y snapshot for interaction, markdown for reads, screenshots as links.** Playwright's own docs: 200–400 tokens versus 3,000–5,000. Anthropic's number for a computer-use screenshot is 1,000–1,800 input tokens plus ~500 of system overhead — so the honest ratio is 4–9×, which makes vision affordable as a per-step *escalation* and wrong as a default.
+
+**Element refs** (this closes the old open question on ref stability):
+- Key on **`(loaderId, backendNodeId)`** — Chrome DevTools MCP's model. Playwright invalidates when the ARIA role *or accessible name* changes, so a button whose label flips `Save` → `Saving…` silently gets a new ref mid-flow.
+- Assign refs **only to nodes that are visible and receive pointer events** — non-interactable nodes appear in the text with no ref, so the model structurally cannot target them.
+- Keep off-screen and hidden nodes *in the text* (whole-page comprehension is the advantage over screenshots); mark in-viewport status.
+- **Version every ref** as `(snapshot_id, ref)` and return a precise staleness error naming the reason and the recovery action. Everyone else handles staleness with "re-snapshot and hope."
+- Use the **`@eN` vocabulary** — Steel's CLI and all five installed skills already teach it. A second incompatible idiom means neither gets good.
+- Synthesize names for unnamed nodes and flag them inferred: per WebAIM 2026, 30–46% of buttons and links have no accessible name.
+
+**Context discipline:**
+- Post-action snapshots **off** by default; return a one-line outcome plus a change signal.
+- Every text tool budgeted well under the 25,000-token host cap, with a cursor.
+- Reference-over-value via **resource links + short-lived signed CDN URLs** (competitors write to the client's disk; a hosted endpoint cannot). Pair with a `preview: <N chars>` so it isn't blind.
+- **Auto-settle after every action** (frame-navigation watch + MutationObserver quiescence, budgets scaled by a network multiplier since Steel runs through proxies). Without it agents defensively call `wait_for` after everything.
+- **Never return a bare "success"** from an interaction. If a click produced no navigation, no mutation and no focus change, say so — silent input loss makes the model conclude the app is broken.
+- CI assertions on **both** `tools/list` bytes and reference-page snapshot bytes. Nobody measures response bytes, which is where the real cost is.
+
+## 9. Security
+
+Full threat table in RESEARCH.md §7. The load-bearing items:
+
+**Prompt injection via page content is our worst threat and has no protocol answer.** The spec's security page doesn't mention it; five competing SEPs are still in review; Google measured a 32% relative increase in malicious injected content between Nov 2025 and Feb 2026. Our mitigations: strip zero-width characters, hidden nodes and HTML comments before the snapshot leaves the server; fence all page-derived text with a provenance header (final URL after redirects, fetch timestamp) and an explicit data-not-instructions statement; repeat that standing instruction in `instructions`; never echo page content into tool *descriptions*; never render it into a markdown image or link; optional `allowed_origins`. Document the residual risk plainly — this reduces, it does not eliminate.
+
+This is also the clearest differentiator available. Both category leaders explicitly disclaim injection safety, and third parties are publicly security-grading MCP servers. We will be scanned the week we ship.
+
+**Also mandatory:** per-call handle re-authorization (§5); `cacheScope: 'private'` on every result derived from an authenticated principal (the required new `ttlMs`/`cacheScope` fields are a spec-mandated footgun — this is exactly the Asana cross-tenant cache incident); redact `input[type=password]` from snapshots; Origin and Host validation in middleware (the SDK handler validates nothing).
+
+**Human-in-the-loop as a feature, not just a mitigation.** On a login wall or CAPTCHA, return `resultType: "input_required"` with an elicit-URL pointing at Steel's interactive live viewer. The client retries with a new request id. This is arguably the highest-value thing a browser MCP server can do that a scraper API cannot — schedule it at P2/P3, not as polish.
+
+**Error content is where the value lives.** Picking the mechanism (tool-execution errors) without specifying content wastes Steel's biggest existing asset: five skills encoding a bot-detection/proxy/auth taxonomy, standardized `{message, error, linkToDocs}` errors, and agent traces. Concretely: translate `402` into the verified-balance requirement for managed proxies; say *which* limit a `429` hit; recognize Cloudflare/DataDome/PerimeterX markers and name the mitigation ladder rung (identity → pacing → proxies → CAPTCHA → stealth, never all at once); name the covering element on a blocked click; give self-host capability gaps named errors (**self-hosted Steel is concurrency 1**).
+
+## 10. Testing
+
+TDD throughout, red → green → refactor. Test output pristine.
+
+| Layer | What |
+|---|---|
+| Unit | Every tool handler; handle-registry state machine (create, reaper ordering, double-release idempotency); snapshot ref stability across DOM mutation; untrusted-content stripping; error mapping. Injected fake Steel client |
+| Conformance | `@modelcontextprotocol/conformance --include-stateless-checks` at **both protocol eras**, replacing hand-rolled protocol assertions |
+| Integration | Real SDK client ↔ our server over HTTP and stdio: `server/discover`, header-vs-body mismatch → `400`/`-32020`, **two-replica no-sticky-routing**, **cross-org handle rejection**, **abort-on-stream-close releases the Steel session**, header survives on `tools/call` (not just connect) |
+| E2E | Docker-composed steel-browser + server + an **adversarial** fixture site: cookie banner, mid-task modal, infinite scroll, login wall, 429 with `Retry-After`, unnamed buttons. Plus a leak test: kill the client mid-session, assert release |
+| Budget | CI fails on `tools/list` byte regression per profile and on reference-page snapshot regression |
+| Agentic eval | Wire the server into Steel's own leaderboard harness. No browser MCP server publishes a reproducible success rate; Steel already owns the infrastructure |
+
+## 11. Delivery phases
+
+Distribution prerequisites with external queue time start **in parallel with P1**, not after P3.
+
+- **P0 — Scaffold** (day 1). New `src/` layout, `@modelcontextprotocol/server@2` beta, Node 20 / ESM / Zod 4.2, Vitest, CI with conformance + byte budgets. Profiles designed in now. This plan and RESEARCH.md merged.
+- **P1 — Core over stdio** (week 1). The §7 surface against local steel-browser. Snapshot pipeline measured against a hostile-site corpus — this is the highest technical risk in the plan.
+  - **In parallel (⏱ external lead time):** claim the registry namespace and npm name (registry names are immutable, no unpublish); add `mcpName` to package.json; file the DNS verification ticket; provision `mcp.steel.dev` (currently NXDOMAIN); start the Claude Team org and OpenAI identity verification; publish a privacy policy; build the MFA-free demo account; **fix the live PulseMCP listing that advertises a v1 install path for a package never published to npm.**
+- **P2 — Streamable HTTP** (week 2). Transport, handle registry, reaper, bearer + query-param auth, Origin/Host validation, cost-weighted rate limiting, OpenTelemetry with `_meta` trace propagation. MRTR human-in-the-loop.
+- **P3 — Hosted** (week 3). Staging, leak-path metrics and alerting, soak test, then `mcp.steel.dev`.
+- **P4 — Distribution.** Official Registry record (both `remotes[]` and `packages[]`; no OAuth needed, and it transitively feeds the GitHub registry → VS Code gallery), `mcp-publisher` wired into release CI, README to the Playwright MCP bar with one-click badges, **the published token-economics table**, self-hosted Claude plugin marketplace, MCPB bundle → Smithery + Claude Desktop, Cursor Marketplace.
+- **P5 — Gated on OAuth.** Anthropic Connectors Directory, OpenAI Plugins Directory. Then Tasks extension when the SDK ships it, MCP Apps live-session-viewer UI, masking-based injection defense.
+
+**Worth doing early, cheaply:** document "Playwright MCP / chrome-devtools-mcp pointed at a Steel CDP URL" as a supported path. It costs a README section, covers the power-user surface we're deliberately not building, and hedges the snapshot-quality risk. And consider a **keyless, per-IP-rate-limited `scrape` profile** — those tools consume no session-minutes by construction, Firecrawl proved the funnel, and no browser-infra competitor offers it.
+
+## 12. Naming and packaging
+
+`@steel-dev/mcp-server` **was never published to npm** — there is no installed base, no breaking change, and no migration to manage. Recommend **`steel-mcp`** unscoped for `npx steel-mcp` ergonomics, registry namespace `dev.steel/mcp-server`. Ship an MCPB bundle (the OAuth-free route onto both Claude Desktop and Smithery) and a Docker image. Do **not** point header-less hosts at `mcp-remote` — it is unmaintained since 2026-02-05 and will not speak the new protocol; point them at our own stdio binary.
+
+## 13. Open questions
+
+| # | Question | Who answers |
 |---|---|---|
-| Unit | Every tool handler, session binder state machine (lazy create, reaper ordering, double-release idempotency), config parsing, snapshot ref stability | Vitest, injected fake Steel client |
-| Integration | Real MCP client (`@modelcontextprotocol/sdk` `Client`) ↔ our server over in-process Streamable HTTP **and** stdio: initialize/negotiate (both spec revisions), session id issuance, SSE resumption after drop, `DELETE` → release observed on the fake | Vitest, fake Steel REST/CDP at the HTTP boundary |
-| E2E | Docker-composed local `steel-browser` + our server + static fixture site: scrape → navigate → snapshot → click → screenshot → session provably released; leak test (kill client mid-session, assert reaper fires) | CI job, gated nightly + on release |
-
-Test output pristine; expected-error paths capture and assert on logs.
-
-## 10. Delivery phases
-
-- **P0 — Scaffold** (day 1): fresh `src/` per §4 layout, strict TS, Vitest, CI (lint + unit + integration), CLAUDE.md, this plan merged. v1 stays untouched on `main` until P4.
-- **P1 — Core over stdio** (week 1): tool surface of §7 against local steel-browser Docker. *This alone completes Buzz Phase-0/1 — a Buzz persona can spawn it via stdio with zero upstream changes beyond their gap-#3 PR.*
-- **P2 — Streamable HTTP** (week 2): transport, `Mcp-Session-Id` + Redis binder, reaper, API-key auth, Origin checks, rate limits.
-- **P3 — Hosted** (week 3): staging deploy, metrics/alerts (leak metric), load + soak test, then `mcp.steel.dev`.
-- **P4 — Ecosystem**: MCP registry + Smithery listings, docs on steel.dev, v1 deprecation notice on `main` README, npm publish (`@steel-dev/mcp-server@2.0.0`, bin `steel-mcp`), hand the hosted URL + stdio command to the Buzz persona pack.
-- **P5 — Later**: OAuth resource-server flow, experimental `tasks` for long scrapes, `steel_execute_js` security review, profiles/credentials/file tools.
-
-## 11. Migration & compatibility
-
-- npm name stays `@steel-dev/mcp-server`; major bump to 2.0.0; old bin `mcp-server-steel-puppeteer` removed in favor of `steel-mcp` (breaking, documented).
-- v1 config keys honored where sensible: `STEEL_API_KEY`, `STEEL_LOCAL`, `STEEL_BASE_URL`. `GLOBAL_WAIT_SECONDS` dropped (replaced by `steel_wait_for`).
-- Hosts that can't set auth headers and can't speak stdio: `mcp-remote`-style shim documented as the bridge to the hosted endpoint.
-
-## 12. Open questions & risks
-
-| # | Item | Owner / next step |
-|---|---|---|
-| 1 | **RESOLVED — Buzz is stdio-only for MCP.** Verified at three layers: the harness models only `McpServerStdio` (buzz-acp/src/acp.rs:25, buzz-agent/src/types.rs:195); the reference brain advertises `mcpCapabilities: { http: false, sse: false }` (buzz-agent/src/lib.rs:294); the rmcp client compiles only `transport-child-process` (buzz-agent/Cargo.toml:33). ACP the protocol *does* allow HTTP MCP, and Claude/Codex/Goose CLIs support it natively, but the Buzz harness never injects an HTTP server spec. Consequence: Buzz consumes our stdio entrypoint (P1); the hosted URL reaches Buzz only via an `mcp-remote`-style stdio shim, or a future harness change | Done — plan unchanged; stdio-first ordering confirmed correct |
-| 2 | **Steel OAuth AS** — exists today? Required only for consumer connectors | Steel platform team |
-| 3 | **Hosted placement** — standalone service vs. behind existing API gateway; who owns the pager | Steel platform team |
-| 4 | **Scrape-endpoint anti-bot parity** — stateless `/v1/scrape` vs. full session (proxies/captcha); may need a `use_session: true` escape hatch on `steel_scrape` | Test against known-hostile fixture sites in P1 |
-| 5 | **Snapshot ref stability under DOM churn** — refs must survive between `steel_page_read` and the following `steel_click` | Unit-test with mutating fixture pages |
-| 6 | Billed-session leaks despite reaper (process crash between create and bind) | Create-then-bind ordering: write binding to Redis *before* the Steel create call returns is impossible — instead tag Steel sessions (`metadata: mcp-session-id`) and run a sweeper that releases tagged-but-unbound sessions |
+| 1 | Did 2026-07-28 ship final, unchanged from the RC? | Check the spec repo for a non-RC tag **tomorrow**. Every §3 assumption rides on this |
+| 2 | **Can Steel bill active-seconds-only, or snapshot-and-suspend an idle session?** | Steel platform/billing, **this week**. Kernel's Standby Mode charges zero while idle — structurally better than any reaper. If we can match it the whole leak risk class collapses; if not, they market it against us |
+| 3 | Does Steel have an OAuth AS, and does it support CIMD? | Steel platform. Gates both consumer directories. Building DCR would be building a deprecated mechanism |
+| 4 | Is Anthropic's `static_headers` beta available to us? | `mcp-review@anthropic.com`. The only non-OAuth path into Claude's connector infra, but org-admin-scoped |
+| 5 | Is the reported Claude Code bug real — custom headers sent on connect but not forwarded on tool-call POSTs? | Reproduce. If real, header auth is fragile on our best host and the query-param fallback becomes load-bearing |
+| 6 | Does `@modelcontextprotocol/server@2` go stable tomorrow and pass conformance at both eras? | npm dist-tags + run the suite. We're scaffolding on a beta |
+| 7 | **Is our a11y snapshot good enough that a host's model can drive it?** | Build and measure in P1 against a hostile corpus. **The highest technical risk here** — the entire "deterministic, no LLM" differentiation rests on it |
+| 8 | Which `region` values are actually valid? | Three Steel sources disagree. Pass through as a string, let the API validate |
+| 9 | Should `/v1/search` be promoted from the OSS image to Cloud? | Steel platform. Agents constantly want search; until then we can't offer it |
+| 10 | What is `steel-computer` (private repo, "persistent computers for AI agents")? | Steel product. An adjacent surface this may need to accommodate |
 
 ---
 
-*Prepared on branch `niko/steel-mcp-server-v2`. Protocol/SDK versions verified against modelcontextprotocol.io and npm on 2026-07-27.*
+*Branch `niko/steel-mcp-server-v2`. Protocol, SDK and competitor facts verified 2026-07-27; see RESEARCH.md for sourcing and for the claims the fact-checkers refuted.*
