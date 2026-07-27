@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import { SteelRestClient } from '../../src/core/steel/rest.js';
 import { describeStack, E2E_ENV, STEEL_BASE_URL, stackIsUp } from './stack.js';
@@ -25,6 +25,12 @@ async function liveSessionIds(): Promise<string[]> {
         .map(session => session.id ?? '');
 }
 
+beforeAll(async () => {
+    if (!available) return;
+    // Start from a clean slate: another suite may have left a session behind.
+    for (const id of await liveSessionIds()) await api.releaseSession(id).catch(() => undefined);
+});
+
 describe.skipIf(!available)(`billed-session teardown (${reason})`, () => {
     it('releases the browser when the client goes away mid-session', async () => {
         const transport = new StdioClientTransport({
@@ -36,6 +42,7 @@ describe.skipIf(!available)(`billed-session teardown (${reason})`, () => {
         const client = new Client({ name: 'leak-test', version: '1.0.0' });
         await client.connect(transport);
 
+        const before = new Set(await liveSessionIds());
         const created = await client.callTool({ name: 'steel_session_create', arguments: {} });
         const handle = (created as { structuredContent?: { session_id?: string } }).structuredContent?.session_id;
         expect(handle, `session_create failed: ${JSON.stringify(created)}`).toBeTruthy();
@@ -44,22 +51,30 @@ describe.skipIf(!available)(`billed-session teardown (${reason})`, () => {
             name: 'steel_navigate',
             arguments: { session_id: handle, url: 'http://fixture-site:8099/' },
         });
-        expect(await liveSessionIds()).not.toHaveLength(0);
 
-        // The client vanishing is the case the reaper and the shutdown hook exist for.
+        // Assert on the session this client started, not on the global list, so a session left
+        // behind by anything else cannot make this pass or fail for the wrong reason.
+        const started = (await liveSessionIds()).filter(id => !before.has(id));
+        expect(started, 'no new browser session appeared').toHaveLength(1);
+
+        // The client vanishing is the case the shutdown hook and the reaper exist for.
         await client.close();
 
         const deadline = Date.now() + 20_000;
-        let remaining = await liveSessionIds();
-        while (remaining.length > 0 && Date.now() < deadline) {
+        let stillLive = await liveSessionIds();
+        while (stillLive.includes(started[0]!) && Date.now() < deadline) {
             await new Promise(resolve => setTimeout(resolve, 500));
-            remaining = await liveSessionIds();
+            stillLive = await liveSessionIds();
         }
-        expect(remaining, 'a browser session outlived the client that created it').toHaveLength(0);
+        expect(stillLive, 'a browser session outlived the client that created it').not.toContain(started[0]);
     }, 60_000);
 
-    it('leaves nothing behind after an explicit release either', async () => {
-        for (const id of await liveSessionIds()) await api.releaseSession(id).catch(() => undefined);
-        expect(await liveSessionIds()).toHaveLength(0);
+    it('releases a session the tool layer was asked to release', async () => {
+        const sessionId = crypto.randomUUID();
+        await api.createSession({ sessionId, timeout: 60_000, inactivityTimeout: 30_000 });
+        expect(await liveSessionIds()).toContain(sessionId);
+
+        await api.releaseSession(sessionId);
+        expect(await liveSessionIds()).not.toContain(sessionId);
     });
 });

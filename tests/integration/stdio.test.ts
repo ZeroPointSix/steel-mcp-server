@@ -67,6 +67,26 @@ describe('the stdio binary', () => {
     });
 });
 
+describe('shutdown', () => {
+    it('tears down and exits when the host closes the pipe without signalling', async () => {
+        const child = spawn(process.execPath, [BINARY], {
+            env: { PATH: process.env.PATH ?? '', STEEL_API_KEY: 'ste-shutdown-test' },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let output = '';
+        child.stderr.on('data', chunk => {
+            output += String(chunk);
+        });
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        child.stdin.end();
+
+        const code = await new Promise<number>(resolve => child.on('exit', resolve));
+        expect(code).toBe(0);
+        expect(output, 'the process exited without running the release path').toMatch(/shutting down/);
+    }, 15_000);
+});
+
 describe('startup failure', () => {
     it('explains a missing API key on stderr and exits non-zero rather than hanging', async () => {
         const child = spawn(process.execPath, [BINARY], {

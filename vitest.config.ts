@@ -34,6 +34,10 @@ export default defineConfig({
                     environment: 'node',
                     testTimeout: 120_000,
                     hookTimeout: 180_000,
+                    // Self-hosted steel-browser runs exactly one browser session at a time, so
+                    // two E2E files in parallel fight over it and fail for the wrong reason.
+                    fileParallelism: false,
+                    sequence: { concurrent: false },
                 },
             },
         ],

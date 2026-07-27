@@ -13,13 +13,14 @@ const reason = describeStack(available);
 const config = loadConfig(E2E_ENV);
 const api = new SteelRestClient(config);
 const pool = new CdpSessionPool(config, 1);
-const steelSessionIds: string[] = [];
+
+// Self-hosted steel-browser runs one browser session at a time, so the whole file shares one and
+// resets between tests by navigating, exactly as a real agent working through a site would.
+let steelSessionId = '';
+let sharedPage: BrowserPage;
 
 async function openSession(): Promise<BrowserPage> {
-    const sessionId = crypto.randomUUID();
-    await api.createSession({ sessionId, timeout: 120_000, inactivityTimeout: 60_000 });
-    steelSessionIds.push(sessionId);
-    return pool.page(sessionId);
+    return sharedPage;
 }
 
 beforeAll(async () => {
@@ -27,11 +28,15 @@ beforeAll(async () => {
     // Fail loudly rather than silently skipping if the fixture site is not the one we expect.
     const response = await fetch(`${FIXTURE_PROBE_URL}/`);
     expect(response.status, 'fixture site is not serving its index').toBe(200);
+
+    steelSessionId = crypto.randomUUID();
+    await api.createSession({ sessionId: steelSessionId, timeout: 300_000, inactivityTimeout: 120_000 });
+    sharedPage = await pool.page(steelSessionId);
 });
 
 afterAll(async () => {
     await pool.closeAll().catch(() => undefined);
-    for (const id of steelSessionIds) await api.releaseSession(id).catch(() => undefined);
+    if (steelSessionId) await api.releaseSession(steelSessionId).catch(() => undefined);
 });
 
 describe.skipIf(!available)(`browsing the adversarial fixture site (${reason})`, () => {
@@ -168,15 +173,12 @@ describe.skipIf(!available)(`browsing the adversarial fixture site (${reason})`,
 
 describe.skipIf(!available)(`session teardown against a real browser (${reason})`, () => {
     it('releases the Steel session, and a second release is not an error', async () => {
-        const sessionId = crypto.randomUUID();
-        await api.createSession({ sessionId, timeout: 120_000, inactivityTimeout: 60_000 });
-        await pool.page(sessionId);
+        await pool.close(steelSessionId);
+        await api.releaseSession(steelSessionId);
+        await expect(api.releaseSession(steelSessionId)).resolves.toBeUndefined();
 
-        await pool.close(sessionId);
-        await api.releaseSession(sessionId);
-        await expect(api.releaseSession(sessionId)).resolves.toBeUndefined();
-
-        const after = await api.getSession(sessionId).catch(() => ({ status: 'gone' }));
+        const after = await api.getSession(steelSessionId).catch(() => ({ status: 'gone' }));
         expect(after.status).not.toBe('live');
+        steelSessionId = '';
     });
 });

@@ -69,12 +69,17 @@ function main(): void {
         baseUrl: deps.config.baseUrl,
     });
 
-    const shutdown = (signal: string) => {
+    let shuttingDown = false;
+    const shutdown = (cause: string) => {
+        if (shuttingDown) return;
+        shuttingDown = true;
         void (async () => {
-            log('info', 'shutting down', { signal });
+            log('info', 'shutting down', { cause });
             clearInterval(reaper);
             // Release every browser this process started before the process itself goes away.
-            await deps.registry.reap({ idleMs: 0 }).catch(() => undefined);
+            await deps.registry.reap({ idleMs: 0 }).catch(error => {
+                log('error', 'failed to release a session during shutdown', { error: String(error) });
+            });
             await deps.pool.closeAll().catch(() => undefined);
             await handle.close().catch(() => undefined);
             process.exit(0);
@@ -83,6 +88,12 @@ function main(): void {
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+    // A host that closes the pipe without signalling is the common way a stdio client goes away,
+    // and it is the stdio equivalent of the stream-close cancellation the HTTP transport gets.
+    // Without this, a browser keeps running with nobody listening until Steel's idle timeout.
+    process.stdin.on('end', () => shutdown('stdin-end'));
+    process.stdin.on('close', () => shutdown('stdin-close'));
 }
 
 main();
