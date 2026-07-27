@@ -177,6 +177,27 @@ describe('BrowserPage.act — text entry', () => {
         expect(JSON.stringify(outcome)).not.toContain('hunter2');
     });
 
+    it('echoes an ordinary value so the caller can see what was entered', async () => {
+        const fixture = actionFixture(
+            fixtureSession(
+                page([
+                    {
+                        tag: 'INPUT',
+                        backendNodeId: 23,
+                        role: 'textbox',
+                        name: 'City',
+                        attributes: { type: 'text', name: 'city' },
+                        bounds: [0, 0, 200, 30],
+                    },
+                ])
+            )
+        );
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        const outcome = await browserPage.act({ action: 'type', target: '@e1', value: 'Zagreb' });
+        expect(outcome.summary).toContain('Zagreb');
+    });
+
     it('fills several fields in one call and settles once', async () => {
         const fixture = actionFixture(
             fixtureSession(

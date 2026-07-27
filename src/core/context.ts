@@ -24,7 +24,10 @@ export interface ServerDeps {
     pool: SessionPool;
     /** The principal for this request's own credential; handles are re-authorised against it. */
     principal: string;
-    /** Multiplier applied to settle budgets, because Steel sessions run through proxies. */
+    /**
+     * Multiplier applied to settle budgets, because Steel sessions reach the internet through
+     * Steel's fleet and often a proxy, so the localhost-tuned constants are too tight.
+     */
     settleMultiplier: number;
     now(): Date;
     /** Overridable so tests get deterministic Steel session ids. */
@@ -40,7 +43,10 @@ export function mintSteelSessionId(deps: ServerDeps): string {
 export class CdpSessionPool implements SessionPool {
     private readonly entries = new Map<string, { connection: CdpConnection; page: BrowserPage }>();
 
-    constructor(private readonly config: SteelConfig) {}
+    constructor(
+        private readonly config: SteelConfig,
+        private readonly settleMultiplier: number
+    ) {}
 
     async page(steelSessionId: string, signal?: AbortSignal): Promise<BrowserPage> {
         const existing = this.entries.get(steelSessionId);
@@ -49,9 +55,7 @@ export class CdpSessionPool implements SessionPool {
         const url = buildCdpUrl(this.config, steelSessionId);
         const connection = await CdpConnection.connect(url, signal);
         const session = await connection.attachToPage();
-        const page = await BrowserPage.attach(session, {
-            budgets: resolveSettleBudgets(this.config.deployment === 'cloud' ? 2 : 1),
-        });
+        const page = await BrowserPage.attach(session, { budgets: resolveSettleBudgets(this.settleMultiplier) });
         this.entries.set(steelSessionId, { connection, page });
         return page;
     }

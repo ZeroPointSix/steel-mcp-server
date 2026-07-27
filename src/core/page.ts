@@ -12,7 +12,6 @@ import {
     type SnapshotNode,
 } from './snapshot.js';
 import type { CdpSession } from './steel/cdp.js';
-import { isSensitiveField } from './untrusted.js';
 
 /** The interaction verbs, mirroring the shape of Steel's own computer-action union. */
 export type ActionName =
@@ -348,15 +347,15 @@ export class BrowserPage {
         return handle;
     }
 
-    /** Describes what was typed without ever repeating a secret back to the caller. */
+    /**
+     * Describes what was typed without repeating a secret back to the caller.
+     *
+     * Whether a field is sensitive is decided once, in the snapshot, where the input type and
+     * autocomplete attributes are available. Re-deriving it from the visible label here would
+     * either over-redact every field or miss the ones whose label says nothing useful.
+     */
     private describeTyped(handle: TargetHandle, value: string): string {
-        const sensitive =
-            handle.node !== undefined &&
-            isSensitiveField({ tagName: 'input', type: 'password', name: handle.node.name });
-        const shown =
-            sensitive || /password|secret|otp|token/i.test(handle.node?.name ?? '')
-                ? `${value.length} characters`
-                : `"${value}"`;
+        const shown = handle.node?.sensitive ? `${value.length} characters` : `"${value}"`;
         return `Typed ${shown} into ${handle.describe}.`;
     }
 

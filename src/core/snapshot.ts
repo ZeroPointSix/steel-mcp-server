@@ -20,6 +20,8 @@ export interface SnapshotNode {
     depth: number;
     inViewport: boolean;
     interactive: boolean;
+    /** True for a form control whose value must never be echoed back, such as a password input. */
+    sensitive: boolean;
     properties?: Record<string, string | number | boolean> | undefined;
     /** Element centre in CSS pixels, used to dispatch pointer events. */
     center?: { x: number; y: number } | undefined;
@@ -452,20 +454,19 @@ export class PageState {
                 });
             }
 
+            const sensitive =
+                nodeFacts !== undefined &&
+                isSensitiveField({
+                    tagName: nodeFacts.tagName,
+                    type: nodeFacts.attributes.type,
+                    name: nodeFacts.attributes.name,
+                    id: nodeFacts.attributes.id,
+                    autocomplete: nodeFacts.attributes.autocomplete,
+                });
+
             const rawValue = nodeFacts?.inputValue ?? (axNode.value ? asString(axNode.value.value) : undefined);
             const value =
-                rawValue === undefined
-                    ? undefined
-                    : nodeFacts &&
-                        isSensitiveField({
-                            tagName: nodeFacts.tagName,
-                            type: nodeFacts.attributes.type,
-                            name: nodeFacts.attributes.name,
-                            id: nodeFacts.attributes.id,
-                            autocomplete: nodeFacts.attributes.autocomplete,
-                        })
-                      ? redactSensitiveValue(rawValue)
-                      : cleanText(rawValue);
+                rawValue === undefined ? undefined : sensitive ? redactSensitiveValue(rawValue) : cleanText(rawValue);
 
             const properties: Record<string, string | number | boolean> = {};
             for (const property of axNode.properties ?? []) {
@@ -495,6 +496,7 @@ export class PageState {
                     depth,
                     inViewport,
                     interactive: ref !== undefined,
+                    sensitive,
                     properties: Object.keys(properties).length > 0 ? properties : undefined,
                     center,
                 });

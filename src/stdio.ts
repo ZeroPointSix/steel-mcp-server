@@ -19,8 +19,9 @@ function log(level: 'info' | 'error', message: string, fields: Record<string, un
 
 function buildDeps(): ServerDeps {
     const config = loadConfig(process.env);
+    const settleMultiplier = config.deployment === 'cloud' ? 2 : 1;
     const api = new SteelRestClient(config);
-    const pool = new CdpSessionPool(config);
+    const pool = new CdpSessionPool(config, settleMultiplier);
     const registry = new InMemoryHandleRegistry({
         releaseSteelSession: async (steelSessionId: string) => {
             await pool.close(steelSessionId);
@@ -37,7 +38,7 @@ function buildDeps(): ServerDeps {
         // One process serves one credential, so the principal is fixed for the connection. The
         // per-call re-authorisation in the tool layer is what makes the hosted entry safe later.
         principal: principalFromCredential(config.apiKey ?? `self-hosted:${config.baseUrl}`),
-        settleMultiplier: config.deployment === 'cloud' ? 2 : 1,
+        settleMultiplier,
         now: () => new Date(),
     };
 }

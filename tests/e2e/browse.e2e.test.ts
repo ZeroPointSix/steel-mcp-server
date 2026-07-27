@@ -12,7 +12,7 @@ const reason = describeStack(available);
 
 const config = loadConfig(E2E_ENV);
 const api = new SteelRestClient(config);
-const pool = new CdpSessionPool(config);
+const pool = new CdpSessionPool(config, 1);
 const steelSessionIds: string[] = [];
 
 async function openSession(): Promise<BrowserPage> {

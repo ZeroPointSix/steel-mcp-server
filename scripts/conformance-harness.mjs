@@ -13,7 +13,7 @@ const port = Number.parseInt(process.env.PORT ?? '3399', 10);
 
 const config = loadConfig({ STEEL_API_KEY: 'ste-conformance-harness', ...process.env });
 const api = new SteelRestClient(config);
-const pool = new CdpSessionPool(config);
+const pool = new CdpSessionPool(config, 1);
 const registry = new InMemoryHandleRegistry({
     releaseSteelSession: async steelSessionId => {
         await pool.close(steelSessionId);
