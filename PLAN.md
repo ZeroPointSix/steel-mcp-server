@@ -84,7 +84,7 @@ src/
 - **Teardown, in order of preference**: client `DELETE` → idle reaper (default 5 min without a tool call) → hard TTL (default 30 min) → Steel-side session timeout as final backstop. Every path calls `POST /v1/sessions/{id}/release` and records which path fired (leak metric).
 
 **stdio mode**
-- Same core; the "MCP session" is the process lifetime. Release on shutdown signal and on `close`. This is what Buzz brains spawn today and what the Buzz persona pack points at until ACP HTTP-transport support is confirmed (§12).
+- Same core; the "MCP session" is the process lifetime. Release on shutdown signal and on `close`. This is what the Buzz persona pack points at: the Buzz path is stdio-only for MCP (verified — see §12 #1), so through Buzz every brain receives a `McpServerStdio` entry regardless of what its own CLI supports.
 
 ## 6. Auth
 
@@ -161,7 +161,7 @@ Test output pristine; expected-error paths capture and assert on logs.
 
 | # | Item | Owner / next step |
 |---|---|---|
-| 1 | **ACP HTTP-transport support per Buzz brain** — determines whether Buzz can consume the hosted URL directly or stays on stdio | Verify against buzz-acp + adapter sources; ~1 hr |
+| 1 | **RESOLVED — Buzz is stdio-only for MCP.** Verified at three layers: the harness models only `McpServerStdio` (buzz-acp/src/acp.rs:25, buzz-agent/src/types.rs:195); the reference brain advertises `mcpCapabilities: { http: false, sse: false }` (buzz-agent/src/lib.rs:294); the rmcp client compiles only `transport-child-process` (buzz-agent/Cargo.toml:33). ACP the protocol *does* allow HTTP MCP, and Claude/Codex/Goose CLIs support it natively, but the Buzz harness never injects an HTTP server spec. Consequence: Buzz consumes our stdio entrypoint (P1); the hosted URL reaches Buzz only via an `mcp-remote`-style stdio shim, or a future harness change | Done — plan unchanged; stdio-first ordering confirmed correct |
 | 2 | **Steel OAuth AS** — exists today? Required only for consumer connectors | Steel platform team |
 | 3 | **Hosted placement** — standalone service vs. behind existing API gateway; who owns the pager | Steel platform team |
 | 4 | **Scrape-endpoint anti-bot parity** — stateless `/v1/scrape` vs. full session (proxies/captcha); may need a `use_session: true` escape hatch on `steel_scrape` | Test against known-hostile fixture sites in P1 |
