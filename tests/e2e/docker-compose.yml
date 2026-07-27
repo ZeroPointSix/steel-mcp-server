@@ -1,0 +1,30 @@
+# The E2E stack: a self-hosted steel-browser and the adversarial fixture site it browses.
+# The browser reaches the site by service name; the test process reaches the browser on localhost.
+services:
+  steel-browser:
+    image: ghcr.io/steel-dev/steel-browser-api:latest
+    container_name: steel-mcp-e2e-browser
+    ports:
+      - '3000:3000'
+    environment:
+      HOST: '0.0.0.0'
+      PORT: '3000'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      - fixture-site
+
+  fixture-site:
+    image: node:22-alpine
+    container_name: steel-mcp-e2e-fixture
+    working_dir: /site
+    command: ['node', 'server.mjs']
+    volumes:
+      - ./fixture-site:/site:ro
+    ports:
+      - '8099:8099'
+    environment:
+      PORT: '8099'

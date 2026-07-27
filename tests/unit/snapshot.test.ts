@@ -118,6 +118,56 @@ describe('PageState.capture — ref stability', () => {
     });
 });
 
+describe('PageState.capture — tree noise', () => {
+    it('never gives the document root a ref, however focusable Chrome says it is', async () => {
+        const { session } = fixtureSession(page([BUTTON]));
+        const snapshot = await new PageState().capture(session, {});
+        expect(snapshot.nodes.find(node => node.role === 'RootWebArea')?.ref).toBeUndefined();
+    });
+
+    it('drops InlineTextBox nodes, which duplicate their StaticText parent', async () => {
+        const { session } = fixtureSession(
+            page([
+                {
+                    tag: 'P',
+                    backendNodeId: 50,
+                    role: 'StaticText',
+                    name: 'Hello world',
+                    bounds: [0, 0, 100, 20],
+                    children: [{ tag: '#text', backendNodeId: 51, role: 'InlineTextBox', name: 'Hello world' }],
+                },
+            ])
+        );
+        const snapshot = await new PageState().capture(session, {});
+        expect(snapshot.nodes.some(node => node.role === 'InlineTextBox')).toBe(false);
+        expect(snapshot.text).toContain('Hello world');
+        expect(snapshot.text.match(/Hello world/g) ?? []).toHaveLength(1);
+    });
+
+    it('collapses a StaticText child that only repeats its parent name', async () => {
+        const { session } = fixtureSession(
+            page([
+                {
+                    ...BUTTON,
+                    children: [{ tag: '#text', backendNodeId: 52, role: 'StaticText', name: 'Save' }],
+                },
+            ])
+        );
+        const snapshot = await new PageState().capture(session, {});
+        expect(snapshot.text.match(/"Save"/g) ?? []).toHaveLength(1);
+    });
+
+    it('omits properties whose value is false, including the string "false"', async () => {
+        const { session } = fixtureSession(
+            page([{ ...BUTTON, properties: { invalid: 'false', disabled: false, level: 2 } }])
+        );
+        const snapshot = await new PageState().capture(session, {});
+        expect(snapshot.text).not.toContain('invalid');
+        expect(snapshot.text).not.toContain('disabled');
+        expect(snapshot.text).toContain('[level=2]');
+    });
+});
+
 describe('PageState.resolveRef', () => {
     it('resolves a live ref to its backend node', async () => {
         const state = new PageState();
@@ -377,6 +427,31 @@ describe('findInSnapshot', () => {
     it('can restrict results to nodes that can actually be targeted', () => {
         expect(findInSnapshot(nodes, { text: 'settings', interactiveOnly: true })).toEqual([]);
         expect(findInSnapshot(nodes, { text: 'settings' })).toHaveLength(1);
+    });
+
+    it('puts targetable matches first, because a match with no ref cannot be acted on', () => {
+        const withLabel = [
+            {
+                role: 'StaticText',
+                name: 'Email',
+                nameInferred: false,
+                backendNodeId: 9,
+                depth: 1,
+                inViewport: true,
+                interactive: false,
+            },
+            {
+                role: 'textbox',
+                name: 'Email',
+                nameInferred: false,
+                backendNodeId: 10,
+                depth: 1,
+                inViewport: true,
+                interactive: true,
+                ref: '@e5',
+            },
+        ];
+        expect(findInSnapshot(withLabel, { text: 'email' })[0]?.ref).toBe('@e5');
     });
 
     it('rejects an invalid regular expression with an actionable message', () => {

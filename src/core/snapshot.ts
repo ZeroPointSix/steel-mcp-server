@@ -105,6 +105,24 @@ const TEXT_BEARING_ROLES = new Set([
     'alertdialog',
 ]);
 
+/** Roles that describe the document or a text run rather than something a model can act on. */
+const NEVER_TARGETABLE_ROLES = new Set([
+    'RootWebArea',
+    'WebArea',
+    'InlineTextBox',
+    'StaticText',
+    'none',
+    'presentation',
+]);
+
+/**
+ * Roles dropped from the tree entirely.
+ *
+ * `InlineTextBox` is Chrome's per-line breakdown of a `StaticText`; it repeats the same words with
+ * no DOM node behind it, which both doubles the token cost and makes every line look off-screen.
+ */
+const DROPPED_ROLES = new Set(['InlineTextBox']);
+
 /** AX properties worth surfacing; everything else is noise in a context window. */
 const USEFUL_PROPERTIES = new Set([
     'level',
@@ -228,6 +246,7 @@ function isTargetable(facts: DomFacts | undefined, role: string, focusable: bool
     if (width <= 0 || height <= 0) return false;
     if (facts.styles['pointer-events'] === 'none') return false;
     if (facts.styles.visibility === 'hidden' || facts.styles.visibility === 'collapse') return false;
+    if (NEVER_TARGETABLE_ROLES.has(role)) return false;
     return facts.clickable || focusable || INTERACTIVE_ROLES.has(role);
 }
 
@@ -301,11 +320,15 @@ export function findInSnapshot(nodes: SnapshotNode[], query: FindQuery): Snapsho
         matcher = () => true;
     }
 
-    return nodes.filter(node => {
+    const matches = nodes.filter(node => {
         if (query.role && node.role !== query.role) return false;
         if (query.interactiveOnly && !node.ref) return false;
         return matcher(node);
     });
+
+    // A label and the field it labels usually share a name. The field is the one a caller can act
+    // on, so targetable matches lead; document order is preserved within each group.
+    return [...matches.filter(node => node.ref !== undefined), ...matches.filter(node => node.ref === undefined)];
 }
 
 /**
@@ -369,7 +392,7 @@ export class PageState {
         const maxNodes = options.maxNodes ?? DEFAULT_MAX_NODES;
         let truncated = false;
 
-        const visit = (axNode: AxNode, depth: number): void => {
+        const visit = (axNode: AxNode, depth: number, parentName: string): void => {
             if (nodes.length >= maxNodes) {
                 truncated = true;
                 return;
@@ -381,13 +404,15 @@ export class PageState {
                 .filter((n): n is AxNode => n !== undefined);
             if (axNode.ignored) {
                 // Ignored nodes contribute nothing, but their subtree can still be meaningful.
-                for (const child of children) visit(child, depth);
+                for (const child of children) visit(child, depth, parentName);
                 return;
             }
 
+            const role = asString(axNode.role?.value) || 'generic';
+            if (DROPPED_ROLES.has(role)) return;
+
             const backendNodeId = axNode.backendDOMNodeId;
             const nodeFacts = backendNodeId === undefined ? undefined : facts.get(backendNodeId);
-            const role = asString(axNode.role?.value) || 'generic';
 
             const accessibleName = cleanText(asString(axNode.name?.value));
             const inferredName = accessibleName ? '' : cleanText(synthesizeName(nodeFacts));
@@ -446,15 +471,18 @@ export class PageState {
             for (const property of axNode.properties ?? []) {
                 if (!USEFUL_PROPERTIES.has(property.name)) continue;
                 const propertyValue = property.value?.value;
-                if (propertyValue === undefined || propertyValue === false) continue;
+                if (propertyValue === undefined || propertyValue === false || propertyValue === 'false') continue;
                 properties[property.name] = propertyValue as string | number | boolean;
             }
 
+            // A StaticText child that only repeats its parent's name is pure duplication.
+            const repeatsParent = role === 'StaticText' && name !== '' && parentName.includes(name);
             const keep =
-                options.interactiveOnly === false ||
-                ref !== undefined ||
-                TEXT_BEARING_ROLES.has(role) ||
-                name.length > 0;
+                !repeatsParent &&
+                (options.interactiveOnly === false ||
+                    ref !== undefined ||
+                    TEXT_BEARING_ROLES.has(role) ||
+                    name.length > 0);
 
             if (keep) {
                 nodes.push({
@@ -472,10 +500,10 @@ export class PageState {
                 });
             }
 
-            for (const child of children) visit(child, keep ? depth + 1 : depth);
+            for (const child of children) visit(child, keep ? depth + 1 : depth, name || parentName);
         };
 
-        for (const root of roots) visit(root, 0);
+        for (const root of roots) visit(root, 0, '');
 
         const snapshot: PageSnapshot = {
             snapshotId,

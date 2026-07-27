@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for the settle helper: frame-navigation detection plus DOM quiescence,
 // ABOUTME: with budgets scaled by a network multiplier because Steel sessions run through proxies.
 import { describe, expect, it, vi } from 'vitest';
-import { resolveSettleBudgets, settle } from '../../src/core/settle.js';
+import { readMutationCount, resolveSettleBudgets, settle } from '../../src/core/settle.js';
 import type { CdpEventParams, CdpSession } from '../../src/core/steel/cdp.js';
 
 interface FakeOptions {
@@ -52,6 +52,27 @@ describe('resolveSettleBudgets', () => {
     });
 });
 
+describe('readMutationCount', () => {
+    it('installs a persistent observer in the page and returns the running count', async () => {
+        const { session, sent } = fakeSession({ mutationResult: { mutated: false } });
+        await readMutationCount(session);
+        const evaluate = sent.find(call => call.method === 'Runtime.evaluate');
+        expect(String(evaluate?.params.expression)).toContain('__steelMutations');
+        expect(String(evaluate?.params.expression)).toContain('MutationObserver');
+    });
+
+    it('reports zero rather than throwing when the page cannot be reached', async () => {
+        const session: CdpSession = {
+            async send() {
+                throw new Error('Execution context was destroyed.');
+            },
+            on: () => () => {},
+            async close() {},
+        };
+        expect(await readMutationCount(session)).toBe(0);
+    });
+});
+
 describe('settle', () => {
     it('reports no navigation and no mutation when the page is already quiet', async () => {
         const { session } = fakeSession({ mutationResult: { mutated: false } });
@@ -98,6 +119,41 @@ describe('settle', () => {
         const { session } = fakeSession({ mutationResult: { mutated: true } });
         const result = await settle(session, { budgets: resolveSettleBudgets(1) });
         expect(result).toMatchObject({ navigated: false, domMutated: true });
+    });
+
+    it('counts a mutation that fired before the quiescence probe was installed', async () => {
+        // A click handler that mutates synchronously finishes long before an observer installed
+        // afterwards can see anything, which is why the running counter exists.
+        let count = 0;
+        const session: CdpSession = {
+            async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+                if (method !== 'Runtime.evaluate') return {} as T;
+                const expression = String(params.expression);
+                if (expression.includes('__steelMutations')) return { result: { value: count } } as T;
+                return { result: { value: false } } as T;
+            },
+            on: () => () => {},
+            async close() {},
+        };
+        const baseline = await readMutationCount(session);
+        count = 7;
+        const result = await settle(session, { budgets: resolveSettleBudgets(1), baselineMutations: baseline });
+        expect(result.domMutated).toBe(true);
+    });
+
+    it('does not claim a mutation when the counter did not move', async () => {
+        const session: CdpSession = {
+            async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+                if (method !== 'Runtime.evaluate') return {} as T;
+                const expression = String(params.expression);
+                if (expression.includes('__steelMutations')) return { result: { value: 3 } } as T;
+                return { result: { value: false } } as T;
+            },
+            on: () => () => {},
+            async close() {},
+        };
+        const result = await settle(session, { budgets: resolveSettleBudgets(1), baselineMutations: 3 });
+        expect(result.domMutated).toBe(false);
     });
 
     it('runs the quiescence probe in the page with the configured budgets', async () => {

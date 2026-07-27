@@ -27,6 +27,14 @@ export interface SettleOptions {
     budgets: SettleBudgets;
     /** When given, navigations in other frames are ignored so an iframe cannot look like a load. */
     mainFrameId?: string | undefined;
+    /**
+     * The mutation counter read before the action, from {@link readMutationCount}.
+     *
+     * A click handler that mutates the DOM synchronously has finished long before an observer
+     * installed afterwards could see it, so the quiescence probe alone reports "nothing changed"
+     * on a click that plainly worked. The running counter closes that window.
+     */
+    baselineMutations?: number | undefined;
 }
 
 const BASE_BUDGETS: SettleBudgets = {
@@ -55,6 +63,35 @@ export function resolveSettleBudgets(multiplier: number): SettleBudgets {
         mutationQuietMs: BASE_BUDGETS.mutationQuietMs * multiplier,
         mutationMaxMs: BASE_BUDGETS.mutationMaxMs * multiplier,
     };
+}
+
+/**
+ * Installs a page-lifetime mutation counter if one is not already there, and returns its value.
+ *
+ * The counter is stored on `window`, so a document load resets it to zero — which is correct:
+ * a navigation is itself a change, and the caller already treats it as one.
+ */
+export async function readMutationCount(session: CdpSession): Promise<number> {
+    const expression = `(() => {
+    const state = window.__steelMutations || (window.__steelMutations = { count: 0 });
+    if (!state.observer) {
+        state.observer = new MutationObserver(records => { state.count += records.length; });
+        state.observer.observe(document.documentElement, {
+            childList: true, subtree: true, attributes: true, characterData: true,
+        });
+    }
+    return state.count;
+})()`;
+    try {
+        const result = await session.send<{ result?: { value?: number } }>('Runtime.evaluate', {
+            expression,
+            returnByValue: true,
+        });
+        return result.result?.value ?? 0;
+    } catch {
+        // No reachable execution context yet; the caller only needs a baseline it can compare.
+        return 0;
+    }
 }
 
 function quiescenceExpression(quietMs: number, maxMs: number): string {
@@ -137,7 +174,12 @@ export async function settle(session: CdpSession, options: SettleOptions): Promi
         });
         const outcome = await withDeadline(probe, budgets.mutationMaxMs + budgets.mutationQuietMs, undefined);
         timedOut ||= outcome.timedOut;
-        domMutated = outcome.value?.result?.value ?? navigatedToUrl !== undefined;
+        const observedDuringProbe = outcome.value?.result?.value ?? navigatedToUrl !== undefined;
+        const counted =
+            options.baselineMutations === undefined
+                ? false
+                : (await readMutationCount(session)) !== options.baselineMutations;
+        domMutated = observedDuringProbe || counted;
     } catch {
         // The execution context is destroyed by a navigation mid-probe. That is itself proof the
         // DOM changed, so report a mutation rather than failing the action the caller just took.
