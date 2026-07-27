@@ -170,7 +170,9 @@ function readDomFacts(payload: unknown): Map<number, DomFacts> {
         const inputValues = new Map<number, string>();
         const inputIndex = nodes.inputValue?.index ?? [];
         const inputValue = nodes.inputValue?.value ?? [];
-        inputIndex.forEach((nodeIndex, at) => inputValues.set(nodeIndex, text(inputValue[at])));
+        inputIndex.forEach((nodeIndex, at) => {
+            inputValues.set(nodeIndex, text(inputValue[at]));
+        });
 
         const clickable = new Set(document.nodes?.isClickable?.index ?? []);
 
