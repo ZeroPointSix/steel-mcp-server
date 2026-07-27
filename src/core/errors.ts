@@ -1,0 +1,304 @@
+// ABOUTME: Turns Steel REST failures, bot-detection interstitials and CDP failures into tool-execution
+// ABOUTME: errors whose text names the cause, the affected resource and exactly one next thing to try.
+import type { CallToolResult } from '@modelcontextprotocol/server';
+
+/** Stable machine-readable classification carried alongside every error message. */
+export type SteelErrorCode =
+    | 'payment_required'
+    | 'rate_limited'
+    | 'unauthorized'
+    | 'forbidden'
+    | 'not_found'
+    | 'proxy_failure'
+    | 'bot_detection'
+    | 'stale_ref'
+    | 'ref_not_found'
+    | 'click_blocked'
+    | 'self_host_unsupported'
+    | 'session_expired'
+    | 'invalid_argument'
+    | 'timeout'
+    | 'steel_error';
+
+export interface SteelToolErrorOptions {
+    code: SteelErrorCode;
+    /** Steel's own documentation link, relayed verbatim when the API supplies one. */
+    linkToDocs?: string | undefined;
+    /** Seconds the caller should wait before retrying, when the response said so. */
+    retryAfterSeconds?: number | undefined;
+    /** Extra fields surfaced in `structuredContent` for programmatic callers. */
+    details?: Record<string, unknown> | undefined;
+}
+
+/** An error whose message is written for the model that has to recover from it. */
+export class SteelToolError extends Error {
+    readonly code: SteelErrorCode;
+    readonly linkToDocs: string | undefined;
+    readonly retryAfterSeconds: number | undefined;
+    readonly details: Record<string, unknown> | undefined;
+
+    constructor(message: string, options: SteelToolErrorOptions) {
+        super(message);
+        this.name = 'SteelToolError';
+        this.code = options.code;
+        this.linkToDocs = options.linkToDocs;
+        this.retryAfterSeconds = options.retryAfterSeconds;
+        this.details = options.details;
+    }
+}
+
+/** The Steel API's standardised error body. */
+export interface SteelErrorBody {
+    message?: string;
+    error?: string;
+    linkToDocs?: string;
+}
+
+/** Which part of the surface produced the failure, so rate limits can be named precisely. */
+export type SteelOperation = 'session_create' | 'session_release' | 'browser_tool' | 'navigate' | 'cdp' | 'account';
+
+export interface MapErrorContext {
+    operation: SteelOperation;
+    retryAfterSeconds?: number | undefined;
+}
+
+const BROWSER_TOOL_LIMIT_TEXT =
+    'Steel enforces two separate limits: 20 requests/min Browser Tools (scrape, screenshot, pdf) and 60 requests/min overall on Launch.';
+
+const CONCURRENCY_LIMIT_TEXT =
+    'You are at the concurrent session cap for this plan (10 on Launch, 100 on Scale). Release a session with steel_session_release before creating another.';
+
+function rateLimitMessage(body: SteelErrorBody, context: MapErrorContext): string {
+    const saysConcurrency = /concurren|session limit/i.test(body.message ?? '');
+    const base =
+        saysConcurrency || context.operation === 'session_create' ? CONCURRENCY_LIMIT_TEXT : BROWSER_TOOL_LIMIT_TEXT;
+    const retry =
+        context.retryAfterSeconds === undefined
+            ? 'Retry after a short pause.'
+            : `Retry after ${context.retryAfterSeconds}s.`;
+    return `Steel rate limit hit. ${base} ${retry}`;
+}
+
+/** Maps a Steel HTTP failure to an error whose prose the calling model can act on. */
+export function mapSteelHttpError(status: number, body: SteelErrorBody, context: MapErrorContext): SteelToolError {
+    const linkToDocs = body.linkToDocs;
+    const steelMessage = body.message ?? body.error ?? `Steel returned HTTP ${status}.`;
+    const opts = { linkToDocs, details: { status, operation: context.operation } };
+
+    switch (status) {
+        case 401:
+        case 403:
+            // Steel's own 401 body still claims Bearer is unsupported. It is supported; relaying
+            // that sentence sends agents down a wrong path, so the body text is dropped here.
+            return new SteelToolError(
+                'Steel rejected the credential. Check that STEEL_API_KEY is set to a valid key for this ' +
+                    'project and that STEEL_BASE_URL points at the right deployment.',
+                { ...opts, code: status === 401 ? 'unauthorized' : 'forbidden' }
+            );
+        case 402:
+            return new SteelToolError(
+                'Steel-managed proxies and CAPTCHA solving require a $10 verified paid balance on Launch — ' +
+                    'free credits do not count. Retry with use_proxy omitted, or supply your own proxy URL.',
+                { ...opts, code: 'payment_required' }
+            );
+        case 404:
+            return new SteelToolError(steelMessage, { ...opts, code: 'not_found' });
+        case 407:
+            return new SteelToolError(
+                `Proxy authentication failed: ${steelMessage}. Check the proxy credentials, or retry without a proxy.`,
+                { ...opts, code: 'proxy_failure' }
+            );
+        case 429:
+            return new SteelToolError(rateLimitMessage(body, context), {
+                ...opts,
+                code: 'rate_limited',
+                retryAfterSeconds: context.retryAfterSeconds,
+            });
+        default:
+            return new SteelToolError(steelMessage, { ...opts, code: 'steel_error' });
+    }
+}
+
+/** Evidence available when deciding whether a response is an anti-bot interstitial. */
+export interface BlockEvidence {
+    status: number;
+    headers?: Record<string, string> | undefined;
+    body?: string | undefined;
+    finalUrl?: string | undefined;
+}
+
+/** A recognised anti-bot vendor and the specific marker that identified it. */
+export interface BotBlock {
+    vendor: string;
+    marker: string;
+}
+
+const VENDOR_MARKERS: ReadonlyArray<{ vendor: string; marker: string; test: RegExp }> = [
+    { vendor: 'Cloudflare', marker: 'cf-chl', test: /cf-chl|cf[-_]mitigated|__cf_bm|just a moment/i },
+    { vendor: 'DataDome', marker: 'datadome', test: /datadome/i },
+    { vendor: 'PerimeterX', marker: '_px', test: /perimeterx|_pxAppId|\b_px[A-Za-z]*=/i },
+    { vendor: 'Akamai', marker: 'ak_bmsc', test: /ak_bmsc|akamai bot manager|_abck/i },
+    { vendor: 'Google', marker: '/sorry/', test: /\/sorry\/|chal_t=/i },
+];
+
+/** Recognises an anti-bot interstitial from status, headers, body markers or the final URL. */
+export function detectBotBlock(evidence: BlockEvidence): BotBlock | null {
+    const haystack = [
+        JSON.stringify(evidence.headers ?? {}),
+        evidence.body?.slice(0, 4096) ?? '',
+        evidence.finalUrl ?? '',
+    ].join('\n');
+    for (const candidate of VENDOR_MARKERS) {
+        if (candidate.test.test(haystack)) return { vendor: candidate.vendor, marker: candidate.marker };
+    }
+    return null;
+}
+
+/** What the session already has enabled, so the ladder can name the next rung and only that one. */
+export interface MitigationState {
+    profileId?: string | undefined;
+    paced?: boolean | undefined;
+    useProxy?: boolean | undefined;
+    solveCaptcha?: boolean | undefined;
+}
+
+export type MitigationRung = 'identity' | 'pacing' | 'proxies' | 'captcha' | 'stealth';
+
+export interface MitigationStep {
+    rung: MitigationRung;
+    advice: string;
+}
+
+const RUNG_ADVICE: Record<MitigationRung, string> = {
+    identity:
+        'Reuse a browser identity: create the session with profile_id so cookies and fingerprint persist across visits.',
+    pacing: 'Slow down: fewer requests per minute and one session at a time before adding any new capability.',
+    proxies: 'Route through a residential proxy: create the session with use_proxy: true.',
+    captcha: 'Let Steel solve the challenge: create the session with solve_captcha: true.',
+    stealth: 'Tune the session fingerprint (device, viewport, region) to match the audience the site expects.',
+};
+
+/** Returns the single next rung on the mitigation ladder given what is already in use. */
+export function nextMitigationRung(state: MitigationState): MitigationStep {
+    const rung: MitigationRung = !state.profileId
+        ? 'identity'
+        : !state.paced
+          ? 'pacing'
+          : !state.useProxy
+            ? 'proxies'
+            : !state.solveCaptcha
+              ? 'captcha'
+              : 'stealth';
+    return { rung, advice: RUNG_ADVICE[rung] };
+}
+
+/** Builds the bot-detection error, naming the vendor and exactly one rung to try next. */
+export function botDetectionError(block: BotBlock, url: string, state: MitigationState): SteelToolError {
+    const step = nextMitigationRung(state);
+    return new SteelToolError(
+        `${url} answered with a ${block.vendor} anti-bot challenge (marker: ${block.marker}). ` +
+            `This is bot detection, not a bug in the page or the tool. Next step (${step.rung}): ${step.advice} ` +
+            'Change one thing at a time — stacking proxies, CAPTCHA solving and fingerprint changes at once makes the block harder to diagnose and costs more.',
+        { code: 'bot_detection', details: { vendor: block.vendor, marker: block.marker, url, rung: step.rung } }
+    );
+}
+
+/** Why a `@eN` reference no longer resolves. */
+export type StaleRefReason = 'page_navigated' | 'node_removed' | 'role_or_name_changed' | 'snapshot_superseded';
+
+const STALE_REASON_TEXT: Record<StaleRefReason, string> = {
+    page_navigated: 'the page navigated to a new document',
+    node_removed: 'the node was removed from the DOM',
+    role_or_name_changed: 'the element changed role or accessible name',
+    snapshot_superseded: 'the snapshot it came from has been superseded',
+};
+
+export interface StaleRefContext {
+    refSnapshotId: string;
+    currentSnapshotId: string;
+    reason: StaleRefReason;
+}
+
+/** Builds the precise staleness error: which ref, from which snapshot, why, and how to recover. */
+export function staleRefError(ref: string, context: StaleRefContext): SteelToolError {
+    return new SteelToolError(
+        `${ref} belongs to snapshot ${context.refSnapshotId} but ${STALE_REASON_TEXT[context.reason]}; ` +
+            `the current snapshot is ${context.currentSnapshotId}. Call steel_find to relocate just this element, ` +
+            'or steel_snapshot for the whole page, then retry with the new ref.',
+        { code: 'stale_ref', details: { ref, ...context } }
+    );
+}
+
+/** Builds the blocked-click error naming the element that intercepted the pointer. */
+export function clickBlockedError(ref: string, coveringDescription: string): SteelToolError {
+    return new SteelToolError(
+        `Click on ${ref} did not reach the element: ${coveringDescription} is on top of it at that point. ` +
+            'Run steel_act with action "dismiss_overlays", or scroll the target into a clear area, then retry.',
+        { code: 'click_blocked', details: { ref, covering: coveringDescription } }
+    );
+}
+
+/** Capabilities the self-hosted steel-browser image does not have. */
+export type SelfHostCapability =
+    | 'concurrency'
+    | 'use_proxy'
+    | 'solve_captcha'
+    | 'region'
+    | 'profile_id'
+    | 'credentials'
+    | 'files';
+
+const SELF_HOST_TEXT: Record<SelfHostCapability, string> = {
+    concurrency:
+        'Self-hosted Steel runs one browser session at a time. Call steel_session_release on the existing session before creating another.',
+    use_proxy:
+        'Steel-managed proxies are a cloud capability; the self-hosted image has none. Remove use_proxy, or point STEEL_BASE_URL at Steel Cloud.',
+    solve_captcha:
+        'CAPTCHA solving is a cloud capability; the self-hosted image cannot solve challenges. Remove solve_captcha, or drive the challenge manually through the session viewer.',
+    region: 'Session region selection is a cloud capability; the self-hosted image runs wherever you deployed it. Remove region.',
+    profile_id:
+        'Browser profiles are a cloud capability; the self-hosted image has no profile store. Remove profile_id.',
+    credentials:
+        'Managed credentials are a cloud capability; the self-hosted image has no credential store. Remove namespace.',
+    files: 'Session file storage is a cloud capability; the self-hosted image does not persist session files.',
+};
+
+/** Builds the named capability error for a self-hosted deployment, never an opaque 400. */
+export function selfHostUnsupportedError(capability: SelfHostCapability): SteelToolError {
+    return new SteelToolError(SELF_HOST_TEXT[capability], {
+        code: 'self_host_unsupported',
+        details: { capability },
+    });
+}
+
+function describeUnknown(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return typeof error === 'string' ? error : JSON.stringify(error);
+}
+
+/** Renders any throwable as an MCP tool-execution error result, never as a protocol error. */
+export function toolErrorResult(error: unknown): CallToolResult {
+    const steelError = error instanceof SteelToolError ? error : null;
+    const message = steelError?.message ?? describeUnknown(error);
+    const code: SteelErrorCode = steelError?.code ?? 'steel_error';
+
+    const lines = [`### Error`, message];
+    if (steelError?.retryAfterSeconds !== undefined) lines.push(`Retry-After: ${steelError.retryAfterSeconds}s`);
+    if (steelError?.linkToDocs) lines.push(`Docs: ${steelError.linkToDocs}`);
+
+    return {
+        isError: true,
+        content: [{ type: 'text', text: lines.join('\n\n') }],
+        structuredContent: {
+            error: {
+                code,
+                message,
+                ...(steelError?.linkToDocs ? { linkToDocs: steelError.linkToDocs } : {}),
+                ...(steelError?.retryAfterSeconds !== undefined
+                    ? { retryAfterSeconds: steelError.retryAfterSeconds }
+                    : {}),
+                ...(steelError?.details ? { details: steelError.details } : {}),
+            },
+        },
+    };
+}
