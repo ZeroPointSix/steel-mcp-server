@@ -1,0 +1,8 @@
+{
+    "$comment": "tools/list byte budgets per profile. CI fails on a regression; raising a number is a deliberate, reviewed act.",
+    "instructionsBytes": 2048,
+    "profiles": {
+        "scrape": { "tools": 3, "bytes": 4000 },
+        "browse": { "tools": 12, "bytes": 16000 }
+    }
+}

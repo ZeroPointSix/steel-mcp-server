@@ -27,3 +27,5 @@ jobs:
         run: npm run test:integration
       - name: tools/list byte budget
         run: npm run budget
+      - name: MCP conformance
+        run: ./scripts/run-conformance.sh

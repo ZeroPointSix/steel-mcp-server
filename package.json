@@ -36,7 +36,7 @@
         "test:integration": "vitest run --project integration",
         "test:e2e": "vitest run --project e2e",
         "test:watch": "vitest",
-        "conformance": "npm run build && mcp-conformance run --include-stateless-checks -- node dist/stdio.js",
+        "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
         "start": "node dist/stdio.js",
         "prepublishOnly": "npm run build"
