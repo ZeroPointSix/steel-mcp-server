@@ -1,0 +1,187 @@
+// ABOUTME: Unit tests for the typed Steel REST layer, pinning the parameter names and response
+// ABOUTME: shapes that the published SDK gets wrong, with a fake fetch injected at the boundary.
+import { describe, expect, it } from 'vitest';
+import { loadConfig } from '../../src/core/config.js';
+import { SteelToolError } from '../../src/core/errors.js';
+import { SteelRestClient } from '../../src/core/steel/rest.js';
+
+interface RecordedCall {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body: unknown;
+}
+
+function fakeFetch(responses: Array<{ status?: number; body?: unknown; headers?: Record<string, string> }>) {
+    const calls: RecordedCall[] = [];
+    let index = 0;
+    const fetchImpl = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+        const headers = Object.fromEntries(new Headers(init?.headers).entries());
+        calls.push({
+            url: String(input),
+            method: init?.method ?? 'GET',
+            headers,
+            body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+        });
+        const spec = responses[Math.min(index++, responses.length - 1)] ?? {};
+        return new Response(JSON.stringify(spec.body ?? {}), {
+            status: spec.status ?? 200,
+            headers: { 'content-type': 'application/json', ...(spec.headers ?? {}) },
+        });
+    };
+    return { calls, fetchImpl };
+}
+
+function client(
+    responses: Parameters<typeof fakeFetch>[0],
+    env: Record<string, string | undefined> = { STEEL_API_KEY: 'ste-secret' }
+) {
+    const { calls, fetchImpl } = fakeFetch(responses);
+    return { calls, api: new SteelRestClient(loadConfig(env), fetchImpl) };
+}
+
+/** Awaits a rejection and returns it typed, so assertions do not fight the success-type union. */
+async function captureError(promise: Promise<unknown>): Promise<SteelToolError> {
+    try {
+        await promise;
+    } catch (error) {
+        return error as SteelToolError;
+    }
+    throw new Error('Expected the promise to reject, but it resolved.');
+}
+
+describe('SteelRestClient.scrape', () => {
+    it('sends the singular format parameter with an array value', async () => {
+        const { api, calls } = client([{ body: { content: { markdown: '# hi' }, links: [], metadata: {} } }]);
+        await api.scrape({ url: 'https://example.com', format: ['markdown', 'html'] });
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/scrape');
+        expect(calls[0]!.method).toBe('POST');
+        expect(calls[0]!.body).toMatchObject({ url: 'https://example.com', format: ['markdown', 'html'] });
+        expect(calls[0]!.body).not.toHaveProperty('formats');
+    });
+
+    it('never sends links as a format value because links are always returned', async () => {
+        const { api, calls } = client([
+            { body: { content: { markdown: 'x' }, links: [{ url: 'https://a', text: 'A' }], metadata: {} } },
+        ]);
+        const result = await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+        expect((calls[0]!.body as { format: string[] }).format).not.toContain('links');
+        expect(result.links).toEqual([{ url: 'https://a', text: 'A' }]);
+    });
+
+    it('authenticates with a bearer token', async () => {
+        const { api, calls } = client([{ body: { content: {}, links: [], metadata: {} } }]);
+        await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+        expect(calls[0]!.headers.authorization).toBe('Bearer ste-secret');
+    });
+
+    it('sends no credential to a self-hosted deployment', async () => {
+        const { api, calls } = client([{ body: { content: {}, links: [], metadata: {} } }], {
+            STEEL_BASE_URL: 'http://localhost:3000',
+        });
+        await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+        expect(calls[0]!.url).toBe('http://localhost:3000/v1/scrape');
+        expect(calls[0]!.headers.authorization).toBeUndefined();
+    });
+
+    it('does not double the /v1 prefix when the base URL already carries it', async () => {
+        const { api, calls } = client([{ body: { content: {}, links: [], metadata: {} } }], {
+            STEEL_API_KEY: 'k',
+            STEEL_BASE_URL: 'https://api.steel.dev/v1',
+        });
+        await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/scrape');
+    });
+});
+
+describe('SteelRestClient artifact endpoints', () => {
+    it('returns the hosted URL for a screenshot rather than bytes', async () => {
+        const { api } = client([{ body: { url: 'https://files.steel.dev/v1/static/abc.png' } }]);
+        const result = await api.screenshot({ url: 'https://example.com', fullPage: true });
+        expect(result.url).toBe('https://files.steel.dev/v1/static/abc.png');
+    });
+
+    it('returns the hosted URL for a PDF rather than bytes', async () => {
+        const { api } = client([{ body: { url: 'https://files.steel.dev/v1/static/abc.pdf' } }]);
+        expect((await api.pdf({ url: 'https://example.com' })).url).toMatch(/\.pdf$/);
+    });
+});
+
+describe('SteelRestClient.createSession', () => {
+    it('passes the client-minted session id, a hard timeout and an inactivity timeout', async () => {
+        const { api, calls } = client([{ body: { id: 'mine-1', status: 'live', createdAt: '2026-07-27T00:00:00Z' } }]);
+        await api.createSession({ sessionId: 'mine-1', timeout: 900_000, inactivityTimeout: 120_000 });
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions');
+        expect(calls[0]!.body).toMatchObject({
+            sessionId: 'mine-1',
+            timeout: 900_000,
+            inactivityTimeout: 120_000,
+        });
+    });
+
+    it('never sends a metadata field, which the sessions endpoint does not have', async () => {
+        const { api, calls } = client([{ body: { id: 'mine-1', status: 'live' } }]);
+        await api.createSession({ sessionId: 'mine-1', timeout: 1000, inactivityTimeout: 500, namespace: 'ns' });
+        expect(calls[0]!.body).not.toHaveProperty('metadata');
+        expect(calls[0]!.body).toMatchObject({ namespace: 'ns' });
+    });
+
+    it('omits keys the caller did not set instead of sending nulls', async () => {
+        const { api, calls } = client([{ body: { id: 'mine-1', status: 'live' } }]);
+        await api.createSession({ sessionId: 'mine-1', timeout: 1000, inactivityTimeout: 500 });
+        expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['inactivityTimeout', 'sessionId', 'timeout']);
+    });
+});
+
+describe('SteelRestClient.releaseSession', () => {
+    it('posts to the release path', async () => {
+        const { api, calls } = client([{ body: { success: true } }]);
+        await api.releaseSession('abc');
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions/abc/release');
+        expect(calls[0]!.method).toBe('POST');
+    });
+
+    it('treats an unknown session as already released', async () => {
+        const { api } = client([{ status: 404, body: { message: 'Session not found' } }]);
+        await expect(api.releaseSession('gone')).resolves.toBeUndefined();
+    });
+});
+
+describe('SteelRestClient error handling', () => {
+    it('maps a failing status through the error layer and keeps Retry-After', async () => {
+        const { api } = client([{ status: 429, body: { message: 'slow down' }, headers: { 'retry-after': '30' } }]);
+        const error = await captureError(api.scrape({ url: 'https://x.test', format: ['markdown'] }));
+        expect(error).toBeInstanceOf(SteelToolError);
+        expect(error.code).toBe('rate_limited');
+        expect(error.retryAfterSeconds).toBe(30);
+        expect(error.message).toMatch(/Browser Tools/);
+    });
+
+    it('classifies a session-create failure as a session-create failure', async () => {
+        const { api } = client([{ status: 429, body: { message: 'slow down' } }]);
+        const error = await captureError(api.createSession({ sessionId: 's', timeout: 1, inactivityTimeout: 1 }));
+        expect(error.message).toMatch(/concurrent session/i);
+    });
+
+    it('survives a non-JSON error body', async () => {
+        const { fetchImpl } = { fetchImpl: async () => new Response('<html>502</html>', { status: 502 }) };
+        const api = new SteelRestClient(loadConfig({ STEEL_API_KEY: 'k' }), fetchImpl);
+        const error = await captureError(api.scrape({ url: 'https://x.test', format: ['markdown'] }));
+        expect(error).toBeInstanceOf(SteelToolError);
+        expect(error.code).toBe('steel_error');
+        expect(error.message).toContain('502');
+    });
+});
+
+describe('SteelRestClient diagnostics endpoints', () => {
+    it('reads agent traces and session logs', async () => {
+        const { api, calls } = client([
+            { body: [{ timestamp: '2026-07-27T00:00:00Z', action: 'click' }] },
+            { body: [{ timestamp: '2026-07-27T00:00:01Z', text: 'nav' }] },
+        ]);
+        await api.getAgentTraces('abc');
+        await api.getSessionLogs('abc');
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions/abc/agent-traces');
+        expect(calls[1]!.url).toBe('https://api.steel.dev/v1/sessions/abc/logs');
+    });
+});
