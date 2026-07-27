@@ -1,0 +1,153 @@
+// ABOUTME: Waits for a page to settle after an action: a short frame-navigation watch, then the
+// ABOUTME: navigation itself, then DOM quiescence measured by an in-page MutationObserver.
+import type { CdpEventParams, CdpSession } from './steel/cdp.js';
+
+/** Time budgets for one settle pass, already scaled by the network multiplier. */
+export interface SettleBudgets {
+    /** How long to watch for a navigation to start before concluding none will. */
+    navigationWatchMs: number;
+    /** How long to wait for a started navigation to finish loading. */
+    navigationMs: number;
+    /** Quiet period with no DOM mutations that counts as settled. */
+    mutationQuietMs: number;
+    /** Hard cap on the quiescence wait, however busy the page is. */
+    mutationMaxMs: number;
+}
+
+/** What the settle pass observed. This is the change signal every action tool returns. */
+export interface SettleResult {
+    navigated: boolean;
+    navigatedToUrl: string | undefined;
+    domMutated: boolean;
+    /** True when a budget expired before the page went quiet. */
+    timedOut: boolean;
+}
+
+export interface SettleOptions {
+    budgets: SettleBudgets;
+    /** When given, navigations in other frames are ignored so an iframe cannot look like a load. */
+    mainFrameId?: string | undefined;
+}
+
+const BASE_BUDGETS: SettleBudgets = {
+    navigationWatchMs: 100,
+    navigationMs: 3_000,
+    mutationQuietMs: 100,
+    mutationMaxMs: 3_000,
+};
+
+/** Navigation kinds that do not load a new document and must not count as a navigation. */
+const NON_LOADING_NAVIGATION_TYPES = new Set(['sameDocument', 'historySameDocument', 'historyDifferentDocument']);
+
+/**
+ * Scales the base budgets by a network multiplier.
+ *
+ * Steel sessions reach the internet through Steel's fleet and often a proxy, so they are
+ * systematically slower than the localhost browser these constants were tuned against.
+ */
+export function resolveSettleBudgets(multiplier: number): SettleBudgets {
+    if (!Number.isFinite(multiplier) || multiplier < 1) {
+        throw new Error(`Settle multiplier must be at least 1, got ${multiplier}.`);
+    }
+    return {
+        navigationWatchMs: BASE_BUDGETS.navigationWatchMs * multiplier,
+        navigationMs: BASE_BUDGETS.navigationMs * multiplier,
+        mutationQuietMs: BASE_BUDGETS.mutationQuietMs * multiplier,
+        mutationMaxMs: BASE_BUDGETS.mutationMaxMs * multiplier,
+    };
+}
+
+function quiescenceExpression(quietMs: number, maxMs: number): string {
+    return `new Promise(resolve => {
+    const target = document.body || document.documentElement;
+    if (!target) { resolve(false); return; }
+    let mutated = false;
+    let quietTimer;
+    const finish = () => { observer.disconnect(); clearTimeout(quietTimer); clearTimeout(capTimer); resolve(mutated); };
+    const observer = new MutationObserver(() => {
+        mutated = true;
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, ${quietMs});
+    });
+    observer.observe(target, { childList: true, subtree: true, attributes: true });
+    quietTimer = setTimeout(finish, ${quietMs});
+    const capTimer = setTimeout(finish, ${maxMs});
+})`;
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: T): Promise<{ value: T; timedOut: boolean }> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<'timeout'>(resolve => {
+        timer = setTimeout(() => resolve('timeout'), ms);
+    });
+    try {
+        const outcome = await Promise.race([work, timeout]);
+        return outcome === 'timeout' ? { value: onTimeout, timedOut: true } : { value: outcome as T, timedOut: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Waits for the page to settle and reports what changed.
+ *
+ * The change signal matters as much as the wait: an action that produced no navigation, no
+ * mutation and no focus change must be reported as such, because a tool that always says
+ * "success" makes a model conclude the application is broken when input is silently dropped.
+ */
+export async function settle(session: CdpSession, options: SettleOptions): Promise<SettleResult> {
+    const { budgets, mainFrameId } = options;
+    let navigatedToUrl: string | undefined;
+
+    const unsubscribe = session.on('Page.frameStartedNavigating', (params: CdpEventParams) => {
+        const navigationType = String(params.navigationType ?? '');
+        if (NON_LOADING_NAVIGATION_TYPES.has(navigationType)) return;
+        if (mainFrameId && params.frameId !== mainFrameId) return;
+        navigatedToUrl ??= typeof params.url === 'string' ? params.url : undefined;
+    });
+
+    let timedOut = false;
+    try {
+        await delay(budgets.navigationWatchMs);
+
+        if (navigatedToUrl !== undefined) {
+            const loaded = new Promise<'loaded'>(resolve => {
+                const off = session.on('Page.loadEventFired', () => {
+                    off();
+                    resolve('loaded');
+                });
+            });
+            const outcome = await withDeadline(loaded, budgets.navigationMs, 'loaded' as const);
+            timedOut ||= outcome.timedOut;
+        }
+    } finally {
+        unsubscribe();
+    }
+
+    let domMutated: boolean;
+    try {
+        const probe = session.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
+            expression: quiescenceExpression(budgets.mutationQuietMs, budgets.mutationMaxMs),
+            awaitPromise: true,
+            returnByValue: true,
+        });
+        const outcome = await withDeadline(probe, budgets.mutationMaxMs + budgets.mutationQuietMs, undefined);
+        timedOut ||= outcome.timedOut;
+        domMutated = outcome.value?.result?.value ?? navigatedToUrl !== undefined;
+    } catch {
+        // The execution context is destroyed by a navigation mid-probe. That is itself proof the
+        // DOM changed, so report a mutation rather than failing the action the caller just took.
+        domMutated = true;
+    }
+
+    return {
+        navigated: navigatedToUrl !== undefined,
+        navigatedToUrl,
+        domMutated,
+        timedOut,
+    };
+}
