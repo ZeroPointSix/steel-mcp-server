@@ -1,35 +1,68 @@
 {
-    "name": "@steel-dev/mcp-server",
-    "version": "0.0.1",
-    "description": "MCP server for browser automation using Steel and Puppeteer",
+    "name": "steel-mcp",
+    "mcpName": "dev.steel/mcp-server",
+    "version": "2.0.0-beta.1",
+    "description": "MCP server for Steel cloud browsers: read, screenshot and act on any website, including ones that block plain fetch",
     "license": "MIT",
     "author": "Steel (https://steel.dev)",
     "homepage": "https://steel.dev",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/steel-dev/mcp-server.git"
+    },
     "bugs": "https://github.com/steel-dev/mcp-server/issues",
     "type": "module",
+    "engines": {
+        "node": ">=20"
+    },
     "bin": {
-        "mcp-server-steel-puppeteer": "dist/index.js"
+        "steel-mcp": "dist/stdio.js"
+    },
+    "main": "./dist/core/index.js",
+    "exports": {
+        ".": "./dist/core/index.js",
+        "./stdio": "./dist/stdio.js"
     },
     "files": [
         "dist"
     ],
     "scripts": {
-        "build": "tsc && shx chmod +x dist/*.js",
-        "prepare": "npm run build",
-        "watch": "tsc --watch",
-        "start": "node dist/index.js",
-        "inspector": "npx @modelcontextprotocol/inspector dist/index.js"
+        "build": "tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write .",
+        "test": "vitest run --project unit --project integration",
+        "test:unit": "vitest run --project unit",
+        "test:integration": "vitest run --project integration",
+        "test:e2e": "vitest run --project e2e",
+        "test:watch": "vitest",
+        "conformance": "npm run build && mcp-conformance run --include-stateless-checks -- node dist/stdio.js",
+        "budget": "vitest run --project budget",
+        "start": "node dist/stdio.js",
+        "prepublishOnly": "npm run build"
     },
     "dependencies": {
-        "@modelcontextprotocol/inspector": "^0.3.0",
-        "@modelcontextprotocol/sdk": "1.0.1",
-        "dotenv": "^16.4.7",
-        "puppeteer": "^23.4.0",
-        "steel-sdk": "^0.1.0-beta.5",
-        "tiktoken": "^1.0.17"
+        "@modelcontextprotocol/node": "2.0.0-beta.5",
+        "@modelcontextprotocol/server": "2.0.0-beta.5",
+        "ws": "^8.21.1",
+        "zod": "^4.2.0"
     },
     "devDependencies": {
-        "shx": "^0.3.4",
-        "typescript": "^5.6.2"
-    }
+        "@biomejs/biome": "^2.5.5",
+        "@modelcontextprotocol/client": "2.0.0-beta.5",
+        "@modelcontextprotocol/conformance": "0.1.16",
+        "@types/node": "^26.1.2",
+        "@types/ws": "^8.18.1",
+        "typescript": "^7.0.2",
+        "vitest": "^4.1.10"
+    },
+    "keywords": [
+        "mcp",
+        "modelcontextprotocol",
+        "steel",
+        "browser",
+        "automation",
+        "scraping",
+        "headless-chrome"
+    ]
 }
