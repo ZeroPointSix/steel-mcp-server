@@ -24,6 +24,9 @@ const INVISIBLE_CHARACTERS = /[­᠎​-‏‪-‮⁠-⁤⁦-⁯﻿]|[\u{E0000}-
 
 const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
 
+/** The closing delimiter in any casing, since a page controls how it spells it. */
+const FENCE_CLOSE_ANY_CASE = /<\/untrusted-page-content>/gi;
+
 const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 const MARKDOWN_LINK = /\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 
@@ -91,7 +94,9 @@ function escapeAttribute(value: string): string {
  * up, so a page cannot terminate the fence early and have the rest read as server instructions.
  */
 export function fenceUntrusted(content: string, provenance: Provenance): string {
-    const safeContent = stripInvisible(content).replaceAll(UNTRUSTED_FENCE_CLOSE, '&lt;/untrusted-page-content&gt;');
+    // HTML tag names are case-insensitive, so a page writing </UNTRUSTED-PAGE-CONTENT> would
+    // otherwise close the fence and have everything after it read as server output.
+    const safeContent = stripInvisible(content).replace(FENCE_CLOSE_ANY_CASE, '&lt;/untrusted-page-content&gt;');
     const attrs = `source="${escapeAttribute(provenance.finalUrl)}" fetched-at="${escapeAttribute(provenance.fetchedAt)}"`;
     return `${UNTRUSTED_FENCE_OPEN_TAG} ${attrs}>\n${UNTRUSTED_CONTENT_NOTICE}\n\n${safeContent}\n${UNTRUSTED_FENCE_CLOSE}`;
 }

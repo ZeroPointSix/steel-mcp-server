@@ -333,6 +333,45 @@ describe('BrowserPage.act — text entry', () => {
         expect(outcome.summary).toContain('Zagreb');
     });
 
+    it('redacts a typed value when the target came from a selector, where sensitivity is unknown', async () => {
+        // The selector path has no snapshot node to consult. Unknown must mean redacted, or a
+        // password typed via #password is echoed verbatim into model context and logs.
+        const fixture = actionFixture(fixtureSession(page([FIELD])));
+        fixture.stub('DOM.getDocument', () => ({ root: { nodeId: 1 } }));
+        fixture.stub('DOM.querySelector', () => ({ nodeId: 42 }));
+        fixture.stub('DOM.describeNode', () => ({ node: { backendNodeId: 999, nodeName: 'INPUT', attributes: [] } }));
+        const browserPage = await openPage(fixture);
+
+        const outcome = await browserPage.act({ action: 'type', target: '#password', value: 'hunter2' });
+        expect(JSON.stringify(outcome)).not.toContain('hunter2');
+        expect(outcome.summary).toMatch(/7 characters/);
+    });
+
+    it('still echoes an ordinary value when the selector resolves to a known non-sensitive field', async () => {
+        const fixture = actionFixture(
+            fixtureSession(
+                page([
+                    {
+                        tag: 'INPUT',
+                        backendNodeId: 24,
+                        role: 'textbox',
+                        name: 'City',
+                        attributes: { type: 'text', name: 'city' },
+                        bounds: [0, 0, 200, 30],
+                    },
+                ])
+            )
+        );
+        fixture.stub('DOM.getDocument', () => ({ root: { nodeId: 1 } }));
+        fixture.stub('DOM.querySelector', () => ({ nodeId: 42 }));
+        fixture.stub('DOM.describeNode', () => ({ node: { backendNodeId: 24, nodeName: 'INPUT', attributes: [] } }));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const outcome = await browserPage.act({ action: 'type', target: '#city', value: 'Zagreb' });
+        expect(outcome.summary).toContain('Zagreb');
+    });
+
     it('fills several fields in one call and settles once', async () => {
         const fixture = actionFixture(
             fixtureSession(

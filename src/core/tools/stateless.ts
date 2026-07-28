@@ -5,20 +5,69 @@ import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
 import { botDetectionError, detectBotBlock, SteelToolError } from '../errors.js';
 import type { ScrapeFormat } from '../steel/types.js';
+import { fenceUntrusted, type Provenance, stripHtmlComments, stripInvisible } from '../untrusted.js';
 import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult, withPage } from './shared.js';
 
 const FORMATS = ['markdown', 'html', 'cleaned_html', 'readability'] as const;
+
+/** Formats that carry raw markup, where an HTML comment can hide instructions a person never sees. */
+const MARKUP_FORMATS = new Set<ScrapeFormat>(['html', 'cleaned_html']);
 
 function renderContent(content: Partial<Record<ScrapeFormat, unknown>>, formats: ScrapeFormat[]): string {
     return formats
         .map(format => {
             const value = content[format];
             if (value === undefined) return '';
-            const body = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+            const raw = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+            const body = MARKUP_FORMATS.has(format) ? stripHtmlComments(raw) : raw;
             return formats.length === 1 ? body : `--- ${format} ---\n${body}`;
         })
         .filter(Boolean)
         .join('\n\n');
+}
+
+/**
+ * Renders the links and metadata a scrape always returns.
+ *
+ * Both are page-derived — anchor text and an OG title are written by whoever wrote the page — so
+ * they go inside the fence with the content. Emitting them outside it would make the server
+ * instructions claim a protection the server does not apply.
+ */
+function renderLinksAndMetadata(
+    links: Array<{ url: string; text?: string }>,
+    metadata: Record<string, unknown>,
+    provenance: Provenance
+): string {
+    const linkLines = links
+        .slice(0, 100)
+        .map(link => `- ${link.text ? `${stripInvisible(link.text)}: ` : ''}${stripInvisible(link.url)}`)
+        .join('\n');
+
+    const metadataLines = Object.entries(metadata)
+        .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+        .map(([key, value]) => `- ${key}: ${stripInvisible(String(value))}`)
+        .join('\n');
+
+    const body = [
+        linkLines ? `Links (${links.length}):\n${linkLines}` : 'Links: none on this page.',
+        metadataLines ? `Metadata:\n${metadataLines}` : '',
+    ]
+        .filter(Boolean)
+        .join('\n\n');
+
+    return fenceUntrusted(body, provenance);
+}
+
+/** Removes smuggling characters from the machine-readable copy a host may render directly. */
+function sanitizeStructured<T>(value: T): T {
+    if (typeof value === 'string') return stripInvisible(value) as T;
+    if (Array.isArray(value)) return value.map(item => sanitizeStructured(item)) as T;
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, sanitizeStructured(item)])
+        ) as T;
+    }
+    return value;
 }
 
 export function registerScrape(server: McpServer, deps: ServerDeps): void {
@@ -73,28 +122,27 @@ export function registerScrape(server: McpServer, deps: ServerDeps): void {
                     throw botDetectionError(block, finalUrl, { useProxy: args.use_proxy });
                 }
 
-                const { text, pagination } = fencedSection(
-                    body,
-                    { finalUrl, fetchedAt: deps.now().toISOString() },
-                    { maxTokens: args.max_tokens, cursor: args.cursor }
-                );
-
-                const links = response.links
-                    .slice(0, 100)
-                    .map(link => `- ${link.text ? `${link.text}: ` : ''}${link.url}`)
-                    .join('\n');
+                const provenance: Provenance = { finalUrl, fetchedAt: deps.now().toISOString() };
+                const { text, pagination } = fencedSection(body, provenance, {
+                    maxTokens: args.max_tokens,
+                    cursor: args.cursor,
+                });
 
                 return successResult(
                     {
                         result: `Read ${finalUrl} (HTTP ${response.metadata.statusCode ?? 'unknown'}).`,
                         snapshot: text,
-                        links: links || 'No links on this page.',
+                        links: renderLinksAndMetadata(response.links, response.metadata, provenance),
                         pagination,
                         notes: block
                             ? [`This page carries ${block.vendor} anti-bot markers; content may be partial.`]
                             : undefined,
                     },
-                    { final_url: finalUrl, metadata: response.metadata, links: response.links }
+                    {
+                        final_url: finalUrl,
+                        metadata: sanitizeStructured(response.metadata),
+                        links: sanitizeStructured(response.links),
+                    }
                 );
             })
     );

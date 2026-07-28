@@ -295,7 +295,10 @@ export class BrowserPage {
                 code: 'ref_not_found',
             });
         }
-        return { backendNodeId, describe: `"${target}"` };
+        // Look the node up in the last snapshot so a selector target still carries its known
+        // sensitivity; when it is not there, describeTyped fails safe and redacts.
+        const node = this.state.lastSnapshot?.nodes.find(candidate => candidate.backendNodeId === backendNodeId);
+        return { backendNodeId, node, describe: `"${target}"` };
     }
 
     private requireTarget(request: ActRequest): string {
@@ -428,10 +431,14 @@ export class BrowserPage {
      *
      * Whether a field is sensitive is decided once, in the snapshot, where the input type and
      * autocomplete attributes are available. Re-deriving it from the visible label here would
-     * either over-redact every field or miss the ones whose label says nothing useful.
+     * either over-redact every field or miss the ones whose label says nothing useful. When the
+     * snapshot has nothing to say about the target, the value is redacted rather than echoed.
      */
     private describeTyped(handle: TargetHandle, value: string): string {
-        const shown = handle.node?.sensitive ? `${value.length} characters` : `"${value}"`;
+        // Unknown means redacted. A selector target has no snapshot node to consult, and echoing a
+        // password typed through one into the response and the logs is not a recoverable mistake.
+        const knownSafe = handle.node?.sensitive === false;
+        const shown = knownSafe ? `"${value}"` : `${value.length} characters`;
         return `Typed ${shown} into ${handle.describe}.`;
     }
 
