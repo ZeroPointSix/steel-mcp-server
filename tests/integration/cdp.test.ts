@@ -85,10 +85,19 @@ describe('CdpConnection.connect', () => {
         await connection.close();
     });
 
-    it('rejects when the signal aborts during the handshake', async () => {
+    // Both abort paths reach terminate() on a socket that never opened. Vitest fails the run on an
+    // uncaught exception, so these also pin that terminate() never escapes as one.
+    it('rejects when the signal is already aborted before the connection starts', async () => {
         const controller = new AbortController();
         controller.abort();
         await expect(CdpConnection.connect(harness.url, controller.signal)).rejects.toThrow(/cancelled/i);
+    });
+
+    it('rejects when the signal aborts during the handshake', async () => {
+        const controller = new AbortController();
+        const connecting = CdpConnection.connect(harness.url, controller.signal);
+        controller.abort();
+        await expect(connecting).rejects.toThrow(/cancelled/i);
     });
 
     it('reports an unreachable browser rather than hanging', async () => {

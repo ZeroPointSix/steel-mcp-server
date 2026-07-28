@@ -69,11 +69,11 @@ export class CdpConnection {
                         })
                     );
                 };
-                if (signal?.aborted) {
-                    onAbort();
-                    return;
-                }
-                signal?.addEventListener('abort', onAbort, { once: true });
+                // The socket listeners are registered before the aborted check because terminate()
+                // on a handshake that never opened makes ws emit 'error', and an emitter with no
+                // 'error' listener turns that into an uncaught exception that would take the
+                // process down. An already-aborted signal reaches terminate() by the shortest path,
+                // so that path needs the listener too.
                 socket.once('open', () => {
                     signal?.removeEventListener('abort', onAbort);
                     resolve();
@@ -86,6 +86,11 @@ export class CdpConnection {
                         })
                     );
                 });
+                if (signal?.aborted) {
+                    onAbort();
+                    return;
+                }
+                signal?.addEventListener('abort', onAbort, { once: true });
             });
         } catch (error) {
             socket.terminate();
