@@ -27,7 +27,7 @@
 | Thing | Target | Notes |
 |---|---|---|
 | MCP spec | **2026-07-28** primary | Publishes 2026-07-28; RC locked 2026-05-21. Largest revision since launch. 2025-11-25 and 2025-06-18 served via the SDK legacy shim |
-| SDK | `@modelcontextprotocol/server@^2` + `@modelcontextprotocol/node` | v2 (`2.0.0-beta.5`, going stable alongside the spec) is the only line implementing the new wire format. The v1 line still gets maintenance (1.30.0 shipped 2026-07-27) but is frozen at the legacy protocol — do not build on it |
+| SDK | `@modelcontextprotocol/server@2.0.0` + `@modelcontextprotocol/node` | v2 went **stable 2.0.0 on 2026-07-27**; the `beta` dist-tag is gone. It is the only line implementing the new wire format. The v1 line still gets maintenance (1.30.0 shipped 2026-07-27) but is frozen at the legacy protocol — do not build on it. Pins are exact |
 | Runtime | **Node ≥20, Zod ≥4.2, `"type": "module"`** | ESM-first with a CJS build available. Painful to retrofit — commit at P0 |
 | Steel access | `steel-sdk@^0.18` **plus a thin typed REST layer** | SDK published 2026-03-16, missing `inactivityTimeout`, `browserMode`, `caCertificates`, and the `/agent-traces`, `/logs`, `/hls`, `/v1/projects` endpoint families |
 | Conformance | `@modelcontextprotocol/conformance` | Replaces hand-rolled protocol tests; the same harness Tier-1 SDKs are measured against |
