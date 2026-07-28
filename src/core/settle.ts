@@ -44,8 +44,18 @@ const BASE_BUDGETS: SettleBudgets = {
     mutationMaxMs: 3_000,
 };
 
-/** Navigation kinds that do not load a new document and must not count as a navigation. */
-const NON_LOADING_NAVIGATION_TYPES = new Set(['sameDocument', 'historySameDocument', 'historyDifferentDocument']);
+/**
+ * Navigation kinds that do not load a new document and must not count as a navigation.
+ *
+ * `historyDifferentDocument` is deliberately absent: it does load a different document, which is
+ * what a cross-document back or forward is, and the caller needs to wait for that load.
+ */
+const NON_LOADING_NAVIGATION_TYPES = new Set(['sameDocument', 'historySameDocument']);
+
+/** Cross-document back and forward, which can be served from the back/forward cache. */
+function isHistoryNavigation(navigationType: string): boolean {
+    return navigationType === 'historyDifferentDocument';
+}
 
 /**
  * Scales the base budgets by a network multiplier.
@@ -129,67 +139,104 @@ async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: T): Prom
     }
 }
 
+/** A settle pass that has already subscribed, so no event between now and `finish` is lost. */
+export interface SettleWatch {
+    finish(): Promise<SettleResult>;
+}
+
 /**
- * Waits for the page to settle and reports what changed.
+ * Subscribes to the navigation events and returns a handle that finishes the settle pass.
+ *
+ * Subscribing has to happen before the action is dispatched. Some CDP commands —
+ * `Page.navigateToHistoryEntry` among them — do not resolve until the navigation has already
+ * committed, so a listener attached after the command returns never sees the event that command
+ * caused, and the action reports that nothing happened.
+ */
+export function watchForSettle(session: CdpSession, options: SettleOptions): SettleWatch {
+    const { budgets, mainFrameId } = options;
+    let navigatedToUrl: string | undefined;
+    let navigationType = '';
+    let loadObserved = false;
+    let commitObserved = false;
+    let onComplete: (() => void) | undefined;
+    const completion = new Promise<void>(resolve => {
+        onComplete = resolve;
+    });
+
+    const settled = () => loadObserved || (commitObserved && isHistoryNavigation(navigationType));
+
+    const offStarted = session.on('Page.frameStartedNavigating', (params: CdpEventParams) => {
+        const type = String(params.navigationType ?? '');
+        if (NON_LOADING_NAVIGATION_TYPES.has(type)) return;
+        if (mainFrameId && params.frameId !== mainFrameId) return;
+        if (navigatedToUrl !== undefined) return;
+        navigatedToUrl = typeof params.url === 'string' ? params.url : undefined;
+        navigationType = type;
+        if (settled()) onComplete?.();
+    });
+
+    const offLoad = session.on('Page.loadEventFired', () => {
+        loadObserved = true;
+        onComplete?.();
+    });
+
+    const offNavigated = session.on('Page.frameNavigated', (params: CdpEventParams) => {
+        const frame = params.frame as { id?: string } | undefined;
+        if (mainFrameId && frame?.id !== mainFrameId) return;
+        commitObserved = true;
+        // A back/forward-cache restore commits without ever firing a load event, so a history
+        // navigation would otherwise burn the whole budget on every cross-document go_back.
+        if (isHistoryNavigation(navigationType)) onComplete?.();
+    });
+
+    return {
+        async finish(): Promise<SettleResult> {
+            let timedOut = false;
+            try {
+                await delay(budgets.navigationWatchMs);
+                if (navigatedToUrl !== undefined && !settled()) {
+                    const outcome = await withDeadline(completion, budgets.navigationMs, undefined);
+                    timedOut ||= outcome.timedOut;
+                }
+            } finally {
+                offStarted();
+                offLoad();
+                offNavigated();
+            }
+
+            let domMutated: boolean;
+            try {
+                const probe = session.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
+                    expression: quiescenceExpression(budgets.mutationQuietMs, budgets.mutationMaxMs),
+                    awaitPromise: true,
+                    returnByValue: true,
+                });
+                const outcome = await withDeadline(probe, budgets.mutationMaxMs + budgets.mutationQuietMs, undefined);
+                timedOut ||= outcome.timedOut;
+                const observedDuringProbe = outcome.value?.result?.value ?? navigatedToUrl !== undefined;
+                const counted =
+                    options.baselineMutations === undefined
+                        ? false
+                        : (await readMutationCount(session)) !== options.baselineMutations;
+                domMutated = observedDuringProbe || counted;
+            } catch {
+                // The execution context is destroyed by a navigation mid-probe. That is itself
+                // proof the DOM changed, so report a mutation rather than failing the action.
+                domMutated = true;
+            }
+
+            return { navigated: navigatedToUrl !== undefined, navigatedToUrl, domMutated, timedOut };
+        },
+    };
+}
+
+/**
+ * Subscribes and finishes in one call, for a caller with nothing to dispatch in between.
  *
  * The change signal matters as much as the wait: an action that produced no navigation, no
  * mutation and no focus change must be reported as such, because a tool that always says
  * "success" makes a model conclude the application is broken when input is silently dropped.
  */
 export async function settle(session: CdpSession, options: SettleOptions): Promise<SettleResult> {
-    const { budgets, mainFrameId } = options;
-    let navigatedToUrl: string | undefined;
-
-    const unsubscribe = session.on('Page.frameStartedNavigating', (params: CdpEventParams) => {
-        const navigationType = String(params.navigationType ?? '');
-        if (NON_LOADING_NAVIGATION_TYPES.has(navigationType)) return;
-        if (mainFrameId && params.frameId !== mainFrameId) return;
-        navigatedToUrl ??= typeof params.url === 'string' ? params.url : undefined;
-    });
-
-    let timedOut = false;
-    try {
-        await delay(budgets.navigationWatchMs);
-
-        if (navigatedToUrl !== undefined) {
-            const loaded = new Promise<'loaded'>(resolve => {
-                const off = session.on('Page.loadEventFired', () => {
-                    off();
-                    resolve('loaded');
-                });
-            });
-            const outcome = await withDeadline(loaded, budgets.navigationMs, 'loaded' as const);
-            timedOut ||= outcome.timedOut;
-        }
-    } finally {
-        unsubscribe();
-    }
-
-    let domMutated: boolean;
-    try {
-        const probe = session.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
-            expression: quiescenceExpression(budgets.mutationQuietMs, budgets.mutationMaxMs),
-            awaitPromise: true,
-            returnByValue: true,
-        });
-        const outcome = await withDeadline(probe, budgets.mutationMaxMs + budgets.mutationQuietMs, undefined);
-        timedOut ||= outcome.timedOut;
-        const observedDuringProbe = outcome.value?.result?.value ?? navigatedToUrl !== undefined;
-        const counted =
-            options.baselineMutations === undefined
-                ? false
-                : (await readMutationCount(session)) !== options.baselineMutations;
-        domMutated = observedDuringProbe || counted;
-    } catch {
-        // The execution context is destroyed by a navigation mid-probe. That is itself proof the
-        // DOM changed, so report a mutation rather than failing the action the caller just took.
-        domMutated = true;
-    }
-
-    return {
-        navigated: navigatedToUrl !== undefined,
-        navigatedToUrl,
-        domMutated,
-        timedOut,
-    };
+    return watchForSettle(session, options).finish();
 }

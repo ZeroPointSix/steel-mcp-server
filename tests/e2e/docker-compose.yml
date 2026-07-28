@@ -5,7 +5,8 @@ services:
     image: ghcr.io/steel-dev/steel-browser-api:latest
     container_name: steel-mcp-e2e-browser
     ports:
-      - '3000:3000'
+      # 3100 on the host, because 3000 is a common default that something else is often holding.
+      - '3100:3000'
     environment:
       HOST: '0.0.0.0'
       PORT: '3000'

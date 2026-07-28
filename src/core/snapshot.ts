@@ -278,6 +278,29 @@ function cleanText(value: string): string {
     return defangMarkdownLinks(stripInvisible(value)).replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Decides whether an element's identity moved since the snapshot the caller read.
+ *
+ * Deliberately strict. Distinguishing a cosmetic relabel (`Save` to `Saving…`) from a swapped
+ * action (`Save` to `Delete everything`) needs a similarity threshold, and a threshold that guesses
+ * wrong clicks the wrong button. So any role or name change counts, and the caller re-reads the
+ * page and retries — one extra round trip, against the alternative of a destructive misclick.
+ *
+ * The one exception is a name appearing or disappearing: Chrome frequently computes an accessible
+ * name a beat after layout, and an empty name on either side is no evidence of a different element.
+ */
+export function identityChanged(
+    recorded: Pick<ResolvedRef, 'role' | 'name'>,
+    live: Pick<ResolvedRef, 'role' | 'name'>
+): boolean {
+    if (recorded.role !== live.role) return true;
+
+    const before = recorded.name.trim().toLowerCase();
+    const after = live.name.trim().toLowerCase();
+    if (before === after) return false;
+    return before !== '' && after !== '';
+}
+
 /** Renders snapshot nodes as an indented tree, one line per node. */
 export function renderSnapshot(nodes: SnapshotNode[]): string {
     return nodes
@@ -550,15 +573,18 @@ export class PageState {
     }
 
     /**
-     * Verifies that a target still has the role and accessible name it had when the ref was taken.
+     * Verifies that a target still has the role and accessible name the snapshot recorded.
      *
-     * Acting on an element whose label changed from `Save` to `Delete everything` between the
-     * snapshot and the click is the failure mode this exists to prevent.
+     * Acting on an element relabelled from `Save` to `Delete everything` between the read and the
+     * click is the failure mode this prevents. A cosmetic relabel is not: a button that goes from
+     * `Save` to `Saving…` is the same button, and refusing to click it would trade a real bug for
+     * a worse one. So a role change always counts, and a name change counts only when neither name
+     * contains the other.
      */
-    assertIdentityUnchanged(ref: string, expected: Pick<ResolvedRef, 'role' | 'name'>): void {
+    assertIdentityUnchanged(ref: string, live: Pick<ResolvedRef, 'role' | 'name'>): void {
         const record = this.recordByRef.get(ref);
         if (!record) return;
-        if (record.role === expected.role && record.name === expected.name) return;
+        if (!identityChanged(record, live)) return;
         throw staleRefError(ref, {
             refSnapshotId: record.snapshotId,
             currentSnapshotId: this.latest?.snapshotId ?? record.snapshotId,

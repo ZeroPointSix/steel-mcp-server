@@ -57,7 +57,8 @@ npm run test:e2e           # real steel-browser + the adversarial fixture site
 docker compose -f tests/e2e/docker-compose.yml down
 ```
 
-The E2E suite skips with a stated reason when the stack is not up. It never skips silently.
+The E2E suite skips with a stated reason when the stack is not up. It never skips silently. The
+browser is published on host port 3100, not 3000, because 3000 is a default other things grab.
 
 ## How we work here
 

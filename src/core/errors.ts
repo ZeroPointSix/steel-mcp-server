@@ -203,6 +203,51 @@ export function botDetectionError(block: BotBlock, url: string, state: Mitigatio
     );
 }
 
+/** CDP error texts that mean the proxy, not the site, refused the connection. */
+const PROXY_ERROR_TEXTS = /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY|ERR_NO_SUPPORTED_PROXIES/i;
+
+const NAVIGATION_ADVICE: ReadonlyArray<{ test: RegExp; advice: string }> = [
+    { test: /ERR_NAME_NOT_RESOLVED/i, advice: 'The hostname does not resolve. Check the spelling of the URL.' },
+    {
+        test: /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED/i,
+        advice: 'Nothing accepted the connection. The host may be down, or the port may be wrong.',
+    },
+    {
+        test: /ERR_CERT|ERR_SSL/i,
+        advice: 'The site presented a certificate the browser rejected. Check the URL uses the right scheme and host.',
+    },
+    {
+        test: /ERR_ABORTED/i,
+        advice:
+            'The navigation was cancelled — usually because the URL started a download, or another navigation ' +
+            'replaced it. Nothing was loaded.',
+    },
+    {
+        test: /ERR_BLOCKED_BY_CLIENT|ERR_BLOCKED_BY_RESPONSE/i,
+        advice: 'The browser blocked the load. An ad blocker or a response header may be refusing it.',
+    },
+];
+
+/**
+ * Builds the error for a navigation Chrome refused.
+ *
+ * `errorText` on the `Page.navigate` result is the only signal CDP gives: the page still ends up
+ * on Chrome's own error document, so ignoring it makes a DNS failure look like a successful load.
+ */
+export function navigationFailedError(url: string, errorText: string): SteelToolError {
+    const advice = NAVIGATION_ADVICE.find(candidate => candidate.test.test(errorText))?.advice ?? '';
+    const proxy = PROXY_ERROR_TEXTS.test(errorText);
+    return new SteelToolError(
+        `The browser could not load ${url}: ${errorText}.` +
+            (proxy
+                ? ' The proxy refused the connection. Check the proxy credentials, or create the session without use_proxy.'
+                : advice
+                  ? ` ${advice}`
+                  : ' The page is showing the browser error document, not the site.'),
+        { code: proxy ? 'proxy_failure' : 'steel_error', details: { url, errorText } }
+    );
+}
+
 /** Why a `@eN` reference no longer resolves. */
 export type StaleRefReason = 'page_navigated' | 'node_removed' | 'role_or_name_changed' | 'snapshot_superseded';
 

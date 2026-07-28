@@ -2,7 +2,7 @@
 // ABOUTME: stated reason instead of failing opaquely when Docker is unavailable.
 
 /** Where the test process reaches the self-hosted steel-browser. */
-export const STEEL_BASE_URL = process.env.E2E_STEEL_BASE_URL ?? 'http://localhost:3000';
+export const STEEL_BASE_URL = process.env.E2E_STEEL_BASE_URL ?? 'http://localhost:3100';
 
 /**
  * Where the *browser* reaches the fixture site.

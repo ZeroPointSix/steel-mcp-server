@@ -2,7 +2,7 @@
 // ABOUTME: survive DOM mutation, viewport marking, password redaction and precise staleness errors.
 import { describe, expect, it } from 'vitest';
 import type { SteelToolError } from '../../src/core/errors.js';
-import { findInSnapshot, PageState, renderSnapshot } from '../../src/core/snapshot.js';
+import { findInSnapshot, identityChanged, PageState, renderSnapshot } from '../../src/core/snapshot.js';
 import { type FixtureNode, type FixturePage, fixtureSession } from '../helpers/cdp-fixture.js';
 
 function page(children: FixtureNode[], overrides: Partial<FixturePage> = {}): FixturePage {
@@ -165,6 +165,44 @@ describe('PageState.capture — tree noise', () => {
         expect(snapshot.text).not.toContain('invalid');
         expect(snapshot.text).not.toContain('disabled');
         expect(snapshot.text).toContain('[level=2]');
+    });
+});
+
+describe('identityChanged', () => {
+    const at = (role: string, name: string) => ({ role, name });
+
+    it('treats an identical role and name as unchanged', () => {
+        expect(identityChanged(at('button', 'Save'), at('button', 'Save'))).toBe(false);
+    });
+
+    it('treats a role change as changed, because that is a different kind of element', () => {
+        expect(identityChanged(at('button', 'Save'), at('link', 'Save'))).toBe(true);
+    });
+
+    it('rejects a swap to a different action, which is the hazard worth failing on', () => {
+        expect(identityChanged(at('button', 'Save'), at('button', 'Delete everything'))).toBe(true);
+        expect(identityChanged(at('button', 'Cancel'), at('button', 'Confirm purchase'))).toBe(true);
+        expect(identityChanged(at('link', 'Next page'), at('link', 'Unsubscribe'))).toBe(true);
+    });
+
+    it('rejects any other relabel too, rather than guessing which ones are cosmetic', () => {
+        // Telling "Save became Saving…" apart from "Save became Delete" needs a similarity
+        // threshold, and a wrong guess clicks the wrong button. The caller re-reads instead.
+        expect(identityChanged(at('button', 'Save'), at('button', 'Saving…'))).toBe(true);
+        expect(identityChanged(at('button', 'Save'), at('button', 'Save changes'))).toBe(true);
+    });
+
+    it('does not fail on a name that only became available, or went away', () => {
+        expect(identityChanged(at('button', ''), at('button', 'Save'))).toBe(false);
+        expect(identityChanged(at('button', 'Save'), at('button', ''))).toBe(false);
+    });
+
+    it('ignores case and surrounding whitespace', () => {
+        expect(identityChanged(at('button', ' Save '), at('button', 'save'))).toBe(false);
+    });
+
+    it('does not treat two short unrelated names as the same because they share a letter', () => {
+        expect(identityChanged(at('button', 'No'), at('button', 'Next'))).toBe(true);
     });
 });
 

@@ -143,6 +143,75 @@ describe.skipIf(!available)(`browsing the adversarial fixture site (${reason})`,
         await page.waitFor({ text: 'Signed in successfully', timeoutMs: 15_000 });
     });
 
+    it('replaces the value of a prefilled field instead of appending to it', async () => {
+        const page = await openSession();
+        await page.navigate(`${FIXTURE_BASE_URL}/prefilled`);
+        await page.snapshot({});
+
+        const [quantity] = await page.find({ text: 'Quantity', interactiveOnly: true });
+        expect(quantity?.value, 'the fixture field did not start out prefilled').toBe('1');
+        await page.act({ action: 'type', target: quantity!.ref!, value: '2' });
+
+        const after = await page.snapshot({});
+        const field = after.nodes.find(node => node.ref === quantity!.ref);
+        expect(field?.value, 'the typed value was appended to the existing one').toBe('2');
+    });
+
+    it('replaces the value of a prefilled textarea', async () => {
+        const page = await openSession();
+        await page.navigate(`${FIXTURE_BASE_URL}/prefilled`);
+        await page.snapshot({});
+
+        const [notes] = await page.find({ text: 'Notes', interactiveOnly: true });
+        expect(notes?.value).toBe('existing note');
+        await page.act({ action: 'type', target: notes!.ref!, value: 'replaced' });
+
+        const after = await page.snapshot({});
+        expect(after.nodes.find(node => node.ref === notes!.ref)?.value).toBe('replaced');
+        expect(after.text).not.toContain('existing note');
+    });
+
+    it('fires the input events a controlled field depends on', async () => {
+        // If typing bypassed the real editing pipeline, the field's JavaScript state would stay
+        // empty while the DOM property changed, which is the failure a framework app would see.
+        const page = await openSession();
+        await page.navigate(`${FIXTURE_BASE_URL}/prefilled`);
+        await page.snapshot({});
+
+        const [coupon] = await page.find({ text: 'Coupon', interactiveOnly: true });
+        await page.act({ action: 'type', target: coupon!.ref!, value: 'SPRING' });
+
+        const after = await page.snapshot({});
+        expect(after.nodes.find(node => node.ref === coupon!.ref)?.value).toBe('SPRING');
+        // The mirrored output is written only from the input event handler, so its presence is the
+        // proof that typing went through the real editing pipeline.
+        expect(
+            after.nodes.some(node => node.name === 'SPRING' && node.ref === undefined),
+            'the controlled field never saw an input event'
+        ).toBe(true);
+    });
+
+    it('reports a navigation the browser refused rather than describing its error page', async () => {
+        const page = await openSession();
+        const error = await page.navigate('http://this-host-does-not-resolve.invalid/').then(
+            () => null,
+            (thrown: unknown) => thrown as { code?: string; message?: string }
+        );
+        expect(error?.message).toMatch(/could not load/i);
+        expect(error?.message).toMatch(/ERR_/);
+    });
+
+    it('treats a cross-document go_back as a real navigation', async () => {
+        const page = await openSession();
+        await page.navigate(`${FIXTURE_BASE_URL}/`);
+        await page.navigate(`${FIXTURE_BASE_URL}/login`);
+
+        const outcome = await page.act({ action: 'go_back' });
+        expect(outcome.change.navigated, 'a cross-document history navigation was not counted').toBe(true);
+        const after = await page.snapshot({});
+        expect(after.url).toBe(`${FIXTURE_BASE_URL}/`);
+    });
+
     it('waits for a modal that appears after the page was already read', async () => {
         const page = await openSession();
         await page.navigate(`${FIXTURE_BASE_URL}/modal`);

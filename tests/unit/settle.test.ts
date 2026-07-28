@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for the settle helper: frame-navigation detection plus DOM quiescence,
 // ABOUTME: with budgets scaled by a network multiplier because Steel sessions run through proxies.
 import { describe, expect, it, vi } from 'vitest';
-import { readMutationCount, resolveSettleBudgets, settle } from '../../src/core/settle.js';
+import { readMutationCount, resolveSettleBudgets, settle, watchForSettle } from '../../src/core/settle.js';
 import type { CdpEventParams, CdpSession } from '../../src/core/steel/cdp.js';
 
 interface FakeOptions {
@@ -73,6 +73,34 @@ describe('readMutationCount', () => {
     });
 });
 
+describe('watchForSettle', () => {
+    it('counts a navigation that started before finish was called', async () => {
+        // Some CDP commands do not resolve until the navigation they caused has committed, so a
+        // listener attached after the command returns never sees its own event.
+        const { session, emit } = fakeSession({ mutationResult: { mutated: false } });
+        const watch = watchForSettle(session, { budgets: resolveSettleBudgets(1), mainFrameId: 'main' });
+
+        emit('Page.frameStartedNavigating', {
+            frameId: 'main',
+            url: 'https://example.com/previous',
+            navigationType: 'historyDifferentDocument',
+        });
+        emit('Page.frameNavigated', { frame: { id: 'main', url: 'https://example.com/previous' } });
+
+        const result = await watch.finish();
+        expect(result.navigated).toBe(true);
+        expect(result.navigatedToUrl).toBe('https://example.com/previous');
+    });
+
+    it('unsubscribes everything once finished', async () => {
+        const { session, listeners } = fakeSession({ mutationResult: { mutated: false } });
+        await watchForSettle(session, { budgets: resolveSettleBudgets(1) }).finish();
+        for (const event of ['Page.frameStartedNavigating', 'Page.loadEventFired', 'Page.frameNavigated']) {
+            expect(listeners.get(event)?.size ?? 0, `${event} listener leaked`).toBe(0);
+        }
+    });
+});
+
 describe('settle', () => {
     it('reports no navigation and no mutation when the page is already quiet', async () => {
         const { session } = fakeSession({ mutationResult: { mutated: false } });
@@ -95,13 +123,27 @@ describe('settle', () => {
         expect(result.navigatedToUrl).toBe('https://example.com/next');
     });
 
-    it('ignores history and same-document navigations, which are not real loads', async () => {
+    it('ignores same-document navigations, which load nothing', async () => {
         const { session, emit } = fakeSession({ mutationResult: { mutated: false } });
         const pending = settle(session, { budgets: resolveSettleBudgets(1) });
-        for (const navigationType of ['sameDocument', 'historySameDocument', 'historyDifferentDocument']) {
+        for (const navigationType of ['sameDocument', 'historySameDocument']) {
             emit('Page.frameStartedNavigating', { frameId: 'main', url: 'https://example.com/#x', navigationType });
         }
         expect((await pending).navigated).toBe(false);
+    });
+
+    it('counts a cross-document history navigation, which is what go_back usually is', async () => {
+        const { session, emit } = fakeSession({ mutationResult: { mutated: false } });
+        const pending = settle(session, { budgets: resolveSettleBudgets(1) });
+        emit('Page.frameStartedNavigating', {
+            frameId: 'main',
+            url: 'https://example.com/previous',
+            navigationType: 'historyDifferentDocument',
+        });
+        emit('Page.loadEventFired', {});
+        const result = await pending;
+        expect(result.navigated).toBe(true);
+        expect(result.navigatedToUrl).toBe('https://example.com/previous');
     });
 
     it('ignores navigations in subframes so an advert iframe cannot look like a page load', async () => {
@@ -113,6 +155,22 @@ describe('settle', () => {
             navigationType: 'differentDocument',
         });
         expect((await pending).navigated).toBe(false);
+    });
+
+    it('finishes a back/forward-cache restore, which never fires a load event', async () => {
+        const { session, emit } = fakeSession({ mutationResult: { mutated: false } });
+        const started = Date.now();
+        const pending = settle(session, { budgets: resolveSettleBudgets(1), mainFrameId: 'main' });
+        emit('Page.frameStartedNavigating', {
+            frameId: 'main',
+            url: 'https://example.com/previous',
+            navigationType: 'historyDifferentDocument',
+        });
+        emit('Page.frameNavigated', { frame: { id: 'main', url: 'https://example.com/previous' } });
+        const result = await pending;
+        expect(result.navigated).toBe(true);
+        expect(result.timedOut, 'the navigation wait burned its whole budget').toBe(false);
+        expect(Date.now() - started).toBeLessThan(resolveSettleBudgets(1).navigationMs);
     });
 
     it('reports a DOM mutation without a navigation', async () => {

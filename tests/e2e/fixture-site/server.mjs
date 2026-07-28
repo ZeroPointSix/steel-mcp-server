@@ -20,6 +20,7 @@ const routes = {
                <li><a href="/login">Login wall</a></li>
                <li><a href="/rate-limited">Rate limited</a></li>
                <li><a href="/unnamed-buttons">Unnamed buttons</a></li>
+               <li><a href="/prefilled">Prefilled fields</a></li>
                <li><a href="/hidden-injection">Hidden injection</a></li>
              </ul>`
         ),
@@ -107,6 +108,41 @@ const routes = {
     '/login-submit': () => ({ status: 302, headers: { location: '/dashboard' }, body: '' }),
 
     '/dashboard': () => ({ body: page('Dashboard', '<h1>Dashboard</h1><p>Signed in successfully.</p>') }),
+
+    // Fields that already hold a value, including one whose state lives in JavaScript rather than
+    // in the DOM property, so an implementation that assigns .value directly is caught.
+    '/prefilled': () => ({
+        body: page(
+            'Prefilled fields',
+            `<h1>Order</h1>
+             <label>Quantity <input id="qty" type="number" name="qty" value="1"></label>
+             <label>Notes <textarea id="notes" name="notes">existing note</textarea></label>
+             <label>Coupon <input id="coupon" name="coupon"></label>
+             <div id="bio" contenteditable="true">old bio</div>
+             <p>qty=<span id="qty-out"></span> notes=<span id="notes-out"></span> coupon=<span id="coupon-out"></span> bio=<span id="bio-out"></span></p>
+             <script>
+               // A controlled field: the value the user sees is written back from JS state on every
+               // input event, so nothing that skips those events can change what the app believes.
+               let couponState = '';
+               const coupon = document.getElementById('coupon');
+               coupon.addEventListener('input', event => {
+                 couponState = event.target.value;
+                 coupon.value = couponState;
+                 document.getElementById('coupon-out').textContent = couponState;
+               });
+               for (const [id, out] of [['qty', 'qty-out'], ['notes', 'notes-out']]) {
+                 const el = document.getElementById(id);
+                 const sync = () => { document.getElementById(out).textContent = el.value; };
+                 el.addEventListener('input', sync);
+                 sync();
+               }
+               const bio = document.getElementById('bio');
+               const syncBio = () => { document.getElementById('bio-out').textContent = bio.textContent; };
+               bio.addEventListener('input', syncBio);
+               syncBio();
+             </script>`
+        ),
+    }),
 
     '/rate-limited': () => ({
         status: 429,

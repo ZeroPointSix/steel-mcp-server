@@ -1,8 +1,8 @@
 // ABOUTME: The page controller: navigation, targeting, pointer and keyboard input, overlay
 // ABOUTME: dismissal and explicit waits, each returning what actually changed on the page.
 import { type ChangeSignal, describeChange } from './envelope.js';
-import { clickBlockedError, SteelToolError } from './errors.js';
-import { readMutationCount, type SettleBudgets, type SettleResult, settle } from './settle.js';
+import { clickBlockedError, navigationFailedError, SteelToolError } from './errors.js';
+import { readMutationCount, type SettleBudgets, type SettleWatch, watchForSettle } from './settle.js';
 import {
     type CaptureOptions,
     type FindQuery,
@@ -132,8 +132,15 @@ export class BrowserPage {
             session.send('DOM.enable'),
             session.send('Accessibility.enable'),
         ]);
-        return new BrowserPage(session, new PageState(), options.budgets);
+        const page = new BrowserPage(session, new PageState(), options.budgets);
+        // Learned once, here, rather than on first settle: a round trip between an action and the
+        // event subscription is long enough to miss the navigation the action caused.
+        page.mainFrameId = await page.readMainFrameId();
+        return page;
     }
+
+    /** The main frame, learned on first use, so settle can ignore navigations in subframes. */
+    private mainFrameId: string | undefined;
 
     /** The page state, exposed so a tool can resolve refs and read the last snapshot. */
     get pageState(): PageState {
@@ -141,36 +148,60 @@ export class BrowserPage {
     }
 
     /**
-     * The DOM mutation count read immediately before an action, so a handler that mutates
-     * synchronously is still detected after the action returns.
+     * Starts watching for change, and must be called before the action is dispatched.
+     *
+     * Both halves need to be in place first: a click handler that mutates synchronously finishes
+     * before any observer installed afterwards could see it, and some navigation commands do not
+     * resolve until the navigation they caused has already committed.
      */
-    private async beginChange(): Promise<number> {
-        return readMutationCount(this.session);
+    private async beginChange(): Promise<SettleWatch> {
+        const baselineMutations = await readMutationCount(this.session);
+        return watchForSettle(this.session, {
+            budgets: this.budgets,
+            baselineMutations,
+            // Without this the frame filter never runs and an advert iframe navigating looks
+            // exactly like the page itself loading.
+            mainFrameId: this.mainFrameId,
+        });
     }
 
     private async settleNow(
-        baselineMutations: number | undefined,
+        watch: SettleWatch,
         focusChanged = false
     ): Promise<{ change: ChangeSignal; description: string }> {
-        const result: SettleResult = await settle(this.session, { budgets: this.budgets, baselineMutations });
-        const change: ChangeSignal = { ...result, focusChanged };
+        const change: ChangeSignal = { ...(await watch.finish()), focusChanged };
         return { change, description: describeChange(change) };
     }
 
-    private async currentFrame(): Promise<{ url: string; loaderId: string }> {
-        const tree = await this.session.send<{ frameTree?: { frame?: { url?: string; loaderId?: string } } }>(
-            'Page.getFrameTree'
-        );
-        return { url: tree.frameTree?.frame?.url ?? '', loaderId: tree.frameTree?.frame?.loaderId ?? '' };
+    private async currentFrame(): Promise<{ id: string; url: string; loaderId: string }> {
+        const tree = await this.session.send<{
+            frameTree?: { frame?: { id?: string; url?: string; loaderId?: string } };
+        }>('Page.getFrameTree');
+        const frame = tree.frameTree?.frame;
+        return { id: frame?.id ?? '', url: frame?.url ?? '', loaderId: frame?.loaderId ?? '' };
+    }
+
+    private async readMainFrameId(): Promise<string | undefined> {
+        try {
+            return (await this.currentFrame()).id || undefined;
+        } catch {
+            // Better to settle without the frame filter than to fail attaching to the page.
+            return undefined;
+        }
     }
 
     async navigate(url: string): Promise<NavigateOutcome> {
         const baseline = await this.beginChange();
-        await this.session.send('Page.navigate', { url });
+        const result = await this.session.send<{ errorText?: string }>('Page.navigate', { url });
+        // errorText is CDP's only failure signal. The page still ends up on Chrome's error
+        // document, so ignoring it reports a DNS or connection failure as a successful load.
+        if (result.errorText) throw navigationFailedError(url, result.errorText);
+
         const { change, description } = await this.settleNow(baseline);
         const frame = await this.currentFrame();
         return {
-            finalUrl: change.navigatedToUrl ?? frame.url ?? url,
+            // The frame tree is authoritative for the main frame; the settle signal is a fallback.
+            finalUrl: frame.url || change.navigatedToUrl || url,
             title: await this.readTitle(),
             change,
             changeDescription: description,
@@ -213,10 +244,33 @@ export class BrowserPage {
         return findInSnapshot(snapshot.nodes, query);
     }
 
+    /**
+     * Reads the role and accessible name the element reports right now.
+     *
+     * One extra CDP call on the action path, and it is what makes the identity guard real: the
+     * snapshot the model read is always at least one round trip old by the time a click lands.
+     */
+    private async liveIdentity(backendNodeId: number): Promise<{ role: string; name: string } | undefined> {
+        try {
+            const partial = await this.session.send<{
+                nodes?: Array<{ role?: { value?: unknown }; name?: { value?: unknown }; ignored?: boolean }>;
+            }>('Accessibility.getPartialAXTree', { backendNodeId, fetchRelatives: false });
+            const node = partial.nodes?.find(candidate => !candidate.ignored) ?? partial.nodes?.[0];
+            if (!node) return undefined;
+            return { role: String(node.role?.value ?? ''), name: String(node.name?.value ?? '') };
+        } catch {
+            // A browser that cannot answer this cannot be checked; the click still gets its own
+            // hit test, so failing the action here would trade a real capability for a guess.
+            return undefined;
+        }
+    }
+
     /** Resolves a `@eN` ref or a CSS selector to a backend node id. */
     private async resolveTarget(target: string): Promise<TargetHandle> {
         if (target.startsWith('@e')) {
             const resolved = this.state.resolveRef(target);
+            const live = await this.liveIdentity(resolved.backendNodeId);
+            if (live) this.state.assertIdentityUnchanged(target, live);
             const node = this.state.lastSnapshot?.nodes.find(candidate => candidate.ref === target);
             return { backendNodeId: resolved.backendNodeId, node, describe: `${target} (${resolved.role})` };
         }
@@ -340,10 +394,32 @@ export class BrowserPage {
         await this.session.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
     }
 
+    /**
+     * Focuses a field, replaces whatever it already holds, and types the new value.
+     *
+     * Selecting the existing content through the Input domain rather than assigning `.value`
+     * matters twice: it works for `contenteditable` as well as inputs, and it goes through the
+     * real editing pipeline, so the `input` events a controlled component listens for actually
+     * fire. Assigning the property directly leaves a framework's own state stale.
+     */
     private async typeInto(target: string, value: string): Promise<TargetHandle> {
         const handle = await this.resolveTarget(target);
         await this.session.send('DOM.focus', { backendNodeId: handle.backendNodeId });
-        await this.session.send('Input.insertText', { text: value });
+        await this.session.send('Input.dispatchKeyEvent', {
+            type: 'keyDown',
+            key: 'a',
+            code: 'KeyA',
+            commands: ['selectAll'],
+        });
+        await this.session.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA' });
+
+        if (value === '') {
+            // insertText('') would leave the selection in place rather than removing it.
+            await this.pressKey('Delete');
+        } else {
+            // insertText replaces the current selection, so this overwrites rather than appends.
+            await this.session.send('Input.insertText', { text: value });
+        }
         return handle;
     }
 

@@ -32,8 +32,17 @@ const SAVE_BUTTON: FixtureNode = {
     bounds: [100, 200, 80, 40],
 };
 
+interface ActionFixtureOptions {
+    hitBackendNodeId?: number;
+    contains?: boolean;
+    /** Simulates a navigation Chrome refused, which it reports only through errorText. */
+    navigateErrorText?: string;
+    /** The role and name the live element reports at action time, if it has drifted. */
+    liveIdentity?: { role?: string; name?: string };
+}
+
 /** Wires the CDP calls the action path makes that the fixture does not model itself. */
-function actionFixture(fixture: FixtureSession, options: { hitBackendNodeId?: number; contains?: boolean } = {}) {
+function actionFixture(fixture: FixtureSession, options: ActionFixtureOptions = {}) {
     fixture.stub('DOM.scrollIntoViewIfNeeded', () => ({}));
     fixture.stub('DOM.getBoxModel', () => ({ model: { content: [100, 200, 180, 200, 180, 240, 100, 240] } }));
     fixture.stub('DOM.getNodeForLocation', () => ({ backendNodeId: options.hitBackendNodeId ?? 10 }));
@@ -46,7 +55,22 @@ function actionFixture(fixture: FixtureSession, options: { hitBackendNodeId?: nu
     fixture.stub('Input.dispatchMouseEvent', () => ({}));
     fixture.stub('Input.dispatchKeyEvent', () => ({}));
     fixture.stub('Input.insertText', () => ({}));
-    fixture.stub('Page.navigate', () => ({ frameId: 'main-frame', loaderId: 'loader-1' }));
+    fixture.stub('Page.navigate', () => ({
+        frameId: 'main-frame',
+        loaderId: 'loader-1',
+        ...(options.navigateErrorText ? { errorText: options.navigateErrorText } : {}),
+    }));
+    if (options.liveIdentity) {
+        fixture.stub('Accessibility.getPartialAXTree', () => ({
+            nodes: [
+                {
+                    nodeId: '1',
+                    role: { value: options.liveIdentity?.role ?? 'button' },
+                    name: { value: options.liveIdentity?.name ?? 'Save' },
+                },
+            ],
+        }));
+    }
     return fixture;
 }
 
@@ -80,6 +104,46 @@ describe('BrowserPage.navigate', () => {
         expect(fixture.sent.some(call => call.method === 'Page.navigate')).toBe(true);
         expect(outcome.finalUrl).toBe('https://example.com/');
         expect(outcome.change).toBeDefined();
+    });
+
+    it('reports a navigation Chrome refused instead of describing its error page as success', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            navigateErrorText: 'net::ERR_NAME_NOT_RESOLVED',
+        });
+        const browserPage = await openPage(fixture);
+        const error = await catchAsync(browserPage.navigate('https://nope.invalid/'));
+        expect(error.message).toContain('net::ERR_NAME_NOT_RESOLVED');
+        expect(error.message).toContain('https://nope.invalid/');
+    });
+
+    it('classifies a refused proxy tunnel as a proxy failure', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            navigateErrorText: 'net::ERR_TUNNEL_CONNECTION_FAILED',
+        });
+        const browserPage = await openPage(fixture);
+        const error = await catchAsync(browserPage.navigate('https://example.com/'));
+        expect(error.code).toBe('proxy_failure');
+    });
+
+    it('restricts the settle frame filter to the main frame, so an iframe is not a page load', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        const browserPage = await openPage(fixture);
+        const navigating = browserPage.navigate('https://example.com/');
+        await new Promise(resolve => setTimeout(resolve, 0));
+        fixture.emit('Page.frameStartedNavigating', {
+            frameId: 'an-advert-iframe',
+            url: 'https://ads.test/',
+            navigationType: 'differentDocument',
+        });
+        const outcome = await navigating;
+        expect(outcome.change.navigated, 'a subframe navigation was reported as a page load').toBe(false);
+    });
+
+    it('reports the main frame URL rather than any frame that happened to navigate', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        const browserPage = await openPage(fixture);
+        const outcome = await browserPage.navigate('https://example.com/');
+        expect(outcome.finalUrl).toBe('https://example.com/');
     });
 
     it('does not capture a snapshot unless one is asked for', async () => {
@@ -140,6 +204,49 @@ describe('BrowserPage.act — click', () => {
         expect(error.message).toMatch(/page navigated/i);
     });
 
+    it('refuses to click a target whose role or name changed since the snapshot was read', async () => {
+        // The hazard is acting on an element relabelled between the read and the click: a button
+        // that said Save when the model decided, and says Delete everything by the time it lands.
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            liveIdentity: { role: 'button', name: 'Delete everything' },
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(error.code).toBe('stale_ref');
+        expect(error.message).toMatch(/changed role or accessible name/i);
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+    });
+
+    it('clicks when the live element still matches what the snapshot recorded', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            liveIdentity: { role: 'button', name: 'Save' },
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await browserPage.act({ action: 'click', target: '@e1' });
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(true);
+    });
+
+    it('clicks when the browser cannot report a live identity, rather than refusing every action', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await browserPage.act({ action: 'click', target: '@e1' });
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(true);
+    });
+
+    it('refuses a click on a target that changed role, which is a different element', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            liveIdentity: { role: 'link', name: 'Save' },
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(error.code).toBe('stale_ref');
+    });
+
     it('refuses to act before any snapshot has been taken, naming the fix', async () => {
         const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
         const browserPage = await openPage(fixture);
@@ -167,6 +274,34 @@ describe('BrowserPage.act — text entry', () => {
 
         expect(fixture.sent.some(call => call.method === 'DOM.focus')).toBe(true);
         expect(fixture.sent.find(call => call.method === 'Input.insertText')?.params.text).toBe('hunter2');
+    });
+
+    it('clears the field before typing, so a value is replaced rather than appended', async () => {
+        const fixture = actionFixture(fixtureSession(page([FIELD])));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await browserPage.act({ action: 'type', target: '@e1', value: 'replacement' });
+
+        const keys = fixture.sent.filter(call => call.method === 'Input.dispatchKeyEvent');
+        const selectAll = keys.find(call => JSON.stringify(call.params.commands ?? []).includes('selectAll'));
+        expect(selectAll, 'nothing selected the existing content before typing').toBeDefined();
+
+        const focusAt = fixture.sent.findIndex(call => call.method === 'DOM.focus');
+        const selectAt = fixture.sent.indexOf(selectAll!);
+        const insertAt = fixture.sent.findIndex(call => call.method === 'Input.insertText');
+        expect(focusAt).toBeLessThan(selectAt);
+        expect(selectAt).toBeLessThan(insertAt);
+    });
+
+    it('deletes the selection rather than inserting nothing when clearing a field', async () => {
+        const fixture = actionFixture(fixtureSession(page([FIELD])));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await browserPage.act({ action: 'type', target: '@e1', value: '' });
+
+        expect(fixture.sent.some(call => call.method === 'Input.insertText')).toBe(false);
+        const keys = fixture.sent.filter(call => call.method === 'Input.dispatchKeyEvent');
+        expect(keys.some(call => call.params.key === 'Delete')).toBe(true);
     });
 
     it('never echoes a value typed into a password field back to the caller', async () => {
