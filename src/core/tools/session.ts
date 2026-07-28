@@ -4,9 +4,10 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { resolveInactivityTimeout } from '../config.js';
 import { mintSteelSessionId, type ServerDeps } from '../context.js';
-import { type SelfHostCapability, selfHostUnsupportedError } from '../errors.js';
+import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
-import type { AccountDetails } from '../steel/types.js';
+import type { HandleRecord } from '../registry.js';
+import type { AccountDetails, SteelSession } from '../steel/types.js';
 import { cursorSchema, guard, maxTokensSchema, sessionIdSchema, successResult } from './shared.js';
 
 /** Session-creation options the self-hosted image cannot honour, mapped to their named errors. */
@@ -92,36 +93,71 @@ export function registerSessionCreate(server: McpServer, deps: ServerDeps): void
                 const timeout = Math.min(args.timeout_ms ?? deps.config.sessionTimeoutMs, planMax);
 
                 const steelSessionId = mintSteelSessionId(deps);
-                const session = await deps.api.createSession(
-                    {
-                        sessionId: steelSessionId,
-                        timeout,
-                        inactivityTimeout: resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout),
-                        region: args.region,
-                        useProxy: args.use_proxy,
-                        solveCaptcha: args.solve_captcha,
-                        profileId: args.profile_id,
-                        namespace: args.namespace,
-                        blockAds: args.block_ads,
-                        dimensions: args.viewport,
-                    },
-                    ctx.mcpReq.signal
-                );
+                let session: SteelSession;
+                try {
+                    session = await deps.api.createSession(
+                        {
+                            sessionId: steelSessionId,
+                            timeout,
+                            inactivityTimeout: resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout),
+                            region: args.region,
+                            useProxy: args.use_proxy,
+                            solveCaptcha: args.solve_captcha,
+                            profileId: args.profile_id,
+                            namespace: args.namespace,
+                            blockAds: args.block_ads,
+                            dimensions: args.viewport,
+                        },
+                        ctx.mcpReq.signal
+                    );
+                } catch (error) {
+                    // The id was minted before the request, so even a response lost after Steel
+                    // accepted the create can be reclaimed instead of becoming an unknown session.
+                    await deps.pool.close(steelSessionId).catch(() => undefined);
+                    await deps.api.releaseSession(steelSessionId).catch(() => undefined);
+                    throw error;
+                }
 
                 const expiresAt = new Date(deps.now().getTime() + timeout);
-                const record = await deps.registry.create({
-                    principal: deps.principal,
-                    steelSessionId,
-                    expiresAt: expiresAt.getTime(),
-                    viewerUrl: session.sessionViewerUrl,
-                    mitigation: {
-                        profileId: args.profile_id,
-                        useProxy: args.use_proxy,
-                        solveCaptcha: args.solve_captcha,
-                    },
-                });
+                let record: HandleRecord;
+                try {
+                    record = await deps.registry.create({
+                        principal: deps.principal,
+                        steelSessionId,
+                        expiresAt: expiresAt.getTime(),
+                        viewerUrl: session.sessionViewerUrl,
+                        mitigation: {
+                            profileId: args.profile_id,
+                            useProxy: args.use_proxy,
+                            solveCaptcha: args.solve_captcha,
+                        },
+                    });
+                } catch (error) {
+                    await deps.pool.close(steelSessionId).catch(() => undefined);
+                    await deps.api.releaseSession(steelSessionId).catch(() => undefined);
+                    throw error;
+                }
 
-                return successResult(
+                const signal = ctx.mcpReq.signal;
+                let abortRelease: Promise<unknown> | undefined;
+                let releaseOnAbort: (() => Promise<unknown>) | undefined;
+                if (signal) {
+                    releaseOnAbort = () => {
+                        abortRelease ??= deps.registry
+                            .release(record.handle, deps.principal, 'stream_close')
+                            .catch(() => undefined);
+                        return abortRelease;
+                    };
+                    signal.addEventListener('abort', releaseOnAbort, { once: true });
+                    if (signal.aborted) {
+                        await releaseOnAbort();
+                        throw new SteelToolError('The session-creation request was cancelled by the caller.', {
+                            code: 'timeout',
+                        });
+                    }
+                }
+
+                const result = successResult(
                     {
                         result:
                             `Started a browser session. Pass session_id="${record.handle}" to the other browser tools, ` +
@@ -142,6 +178,19 @@ export function registerSessionCreate(server: McpServer, deps: ServerDeps): void
                         },
                     }
                 );
+                if (signal && releaseOnAbort) {
+                    // McpServer closes its per-request signal after a normal result. Remove the
+                    // listener before that lifecycle cleanup so success does not look like a
+                    // disconnected client and destroy the session it just returned.
+                    signal.removeEventListener('abort', releaseOnAbort);
+                    if (signal.aborted) {
+                        await releaseOnAbort();
+                        throw new SteelToolError('The session-creation request was cancelled by the caller.', {
+                            code: 'timeout',
+                        });
+                    }
+                }
+                return result;
             })
     );
 }

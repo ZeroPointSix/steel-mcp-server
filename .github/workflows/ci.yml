@@ -25,6 +25,8 @@ jobs:
         run: npm run test:unit
       - name: Integration tests
         run: npm run test:integration
+      - name: Real-browser E2E tests
+        run: npm run test:e2e
       - name: tools/list byte budget
         run: npm run budget
       - name: MCP conformance

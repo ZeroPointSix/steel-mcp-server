@@ -21,6 +21,8 @@
     "main": "./dist/core/index.js",
     "exports": {
         ".": "./dist/core/index.js",
+        "./hosted-runtime": "./dist/hosted-runtime.js",
+        "./http": "./dist/http.js",
         "./stdio": "./dist/stdio.js"
     },
     "files": [
@@ -34,7 +36,8 @@
         "test": "vitest run --project unit --project integration",
         "test:unit": "vitest run --project unit",
         "test:integration": "vitest run --project integration",
-        "test:e2e": "vitest run --project e2e",
+        "test:e2e": "./scripts/run-e2e.sh",
+        "test:e2e:direct": "vitest run --project e2e",
         "test:watch": "vitest",
         "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
@@ -51,7 +54,7 @@
     "devDependencies": {
         "@biomejs/biome": "^2.5.5",
         "@modelcontextprotocol/client": "2.0.0",
-        "@modelcontextprotocol/conformance": "0.1.16",
+        "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
         "@types/node": "^26.1.2",
         "@types/ws": "^8.18.1",
         "typescript": "^7.0.2",

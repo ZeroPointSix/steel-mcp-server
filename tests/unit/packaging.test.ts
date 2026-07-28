@@ -10,6 +10,7 @@ const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.js
     version: string;
     mcpName?: string;
     bin: Record<string, string>;
+    exports: Record<string, string>;
     scripts: Record<string, string>;
     engines: { node: string };
     dependencies: Record<string, string>;
@@ -29,6 +30,11 @@ describe('package metadata', () => {
         expect(manifest.bin['steel-mcp']).toBe('dist/stdio.js');
     });
 
+    it('exports the hosted HTTP boundary and its shared runtime', () => {
+        expect(manifest.exports['./http']).toBe('./dist/http.js');
+        expect(manifest.exports['./hosted-runtime']).toBe('./dist/hosted-runtime.js');
+    });
+
     it('requires Node 20 or newer, which the v2 SDK line needs', () => {
         expect(manifest.engines.node).toBe('>=20');
     });
@@ -43,6 +49,22 @@ describe('an install from git still yields a usable dist', () => {
 
     it('marks the built entrypoint executable, which the old shx chmod used to do', () => {
         expect(manifest.scripts.build, 'nothing restores the executable bit on dist/stdio.js').toMatch(/chmod/);
+    });
+});
+
+describe('real-browser test entrypoint', () => {
+    const root = new URL('../../', import.meta.url);
+    const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
+
+    it('runs E2E through the stack-owning script rather than racing Compose readiness', () => {
+        expect(manifest.scripts['test:e2e']).toBe('./scripts/run-e2e.sh');
+        const runner = read('scripts/run-e2e.sh');
+        expect(runner).toContain('up -d --wait');
+        expect(runner).toContain('down');
+    });
+
+    it('runs the real-browser suite in CI instead of allowing local-only coverage', () => {
+        expect(read('.github/workflows/ci.yml')).toContain('npm run test:e2e');
     });
 });
 
@@ -82,10 +104,28 @@ describe('dependency pins', () => {
 
     it('pins the client and conformance dev dependencies exactly too', () => {
         expect(manifest.devDependencies['@modelcontextprotocol/client']).toMatch(/^\d+\.\d+\.\d+(-\w+\.\d+)?$/);
-        expect(manifest.devDependencies['@modelcontextprotocol/conformance']).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(manifest.devDependencies['@modelcontextprotocol/conformance']).toMatch(/^\d+\.\d+\.\d+(-[\w.]+)?$/);
+    });
+
+    it('uses the conformance line that exercises the final stateless protocol', () => {
+        expect(manifest.devDependencies['@modelcontextprotocol/conformance']).toMatch(/^0\.2\.0-alpha\.\d+$/);
     });
 
     it('requires Zod 4.2 or newer, which the v2 SDK depends on', () => {
         expect(manifest.dependencies.zod).toMatch(/^\^4\.[2-9]/);
+    });
+});
+
+describe('protocol conformance gates', () => {
+    it('runs both the legacy compatibility scenarios and the modern stateless HTTP scenarios', () => {
+        const script = readFileSync(
+            fileURLToPath(new URL('../../scripts/run-conformance.sh', import.meta.url)),
+            'utf8'
+        );
+        expect(script).toContain('2025-11-25');
+        expect(script).toContain('2026-07-28');
+        expect(script).toContain('server-stateless');
+        expect(script).toContain('caching');
+        expect(script).toContain('http-header-validation');
     });
 });

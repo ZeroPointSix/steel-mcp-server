@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# ABOUTME: Boots the localhost conformance harness over the built core and runs the MCP conformance
-# ABOUTME: scenarios that apply to a tools-only server, failing the build if any of them regress.
+# ABOUTME: Boots the localhost harness and checks both legacy MCP compatibility and the final
+# ABOUTME: 2026-07-28 stateless protocol, failing the build if either wire era regresses.
 set -euo pipefail
 
 PORT="${PORT:-3399}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Scenarios that exercise capabilities this server declares. The remaining scenarios in the suite
-# call fixture tools, resources and prompts that only the SDK's reference server implements, and
-# exercise logging, sampling and elicitation, which this server deliberately does not offer.
-SCENARIOS=(
-  server-initialize
-  ping
+# Scenarios that exercise capabilities this server declares. Tool-call fixture scenarios, prompts,
+# resources and input-required cases rely on reference-server fixtures this server does not expose.
+LEGACY_SCENARIOS=(
   tools-list
-  server-sse-multiple-streams
+  dns-rebinding-protection
+)
+
+MODERN_SCENARIOS=(
+  server-stateless
+  tools-list
+  caching
+  http-header-validation
   dns-rebinding-protection
 )
 
@@ -30,14 +34,19 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-ARGS=()
-for scenario in "${SCENARIOS[@]}"; do ARGS+=(--scenario "$scenario"); done
+run_scenarios() {
+  local version="$1"
+  shift
+  for scenario in "$@"; do
+    npx conformance server \
+      --url "http://127.0.0.1:${PORT}/mcp" \
+      --spec-version "$version" \
+      --expected-failures "$ROOT/conformance-baseline.yml" \
+      --scenario "$scenario"
+  done
+}
 
-OUTPUT="$(npx conformance server --url "http://127.0.0.1:${PORT}/mcp" "${ARGS[@]}" 2>&1)"
-echo "$OUTPUT"
+run_scenarios 2025-11-25 "${LEGACY_SCENARIOS[@]}"
+run_scenarios 2026-07-28 "${MODERN_SCENARIOS[@]}"
 
-if echo "$OUTPUT" | grep -qE '[1-9][0-9]* failed'; then
-  echo "Conformance regressed." >&2
-  exit 1
-fi
-echo "Conformance: all ${#SCENARIOS[@]} applicable scenarios passed."
+echo "Conformance: ${#LEGACY_SCENARIOS[@]} legacy and ${#MODERN_SCENARIOS[@]} modern scenarios passed."

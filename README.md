@@ -135,9 +135,7 @@ npm test               # unit + integration
 npm run budget         # tools/list byte budget per profile
 npm run conformance    # MCP conformance suite
 
-docker compose -f tests/e2e/docker-compose.yml up -d
-npm run test:e2e       # real steel-browser plus an adversarial fixture site
-docker compose -f tests/e2e/docker-compose.yml down
+npm run test:e2e       # starts, waits for and tears down the real-browser stack
 ```
 
 See `CLAUDE.md` for the working rules, and `PLAN.md` / `RESEARCH.md` for the design and the

@@ -1,9 +1,16 @@
 # Steel MCP Server v2 — Implementation Plan
 
-**Status:** Draft for review
+**Status:** P0–P1 complete; P2 in progress
 **Branch:** `niko/steel-mcp-server-v2`
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
+
+**Implementation checkpoint (2026-07-28):** stdio, the twelve-tool core, real-browser E2E and
+legacy/2026-07-28 conformance gates are passing. P2 now has a web-standard `/mcp` boundary with
+request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
+validation. Its in-process hosted runtime shares handles across requests, isolates REST/CDP clients
+by credential, and reclaims a session whose create request disconnects. A multi-replica registry
+backend, rate limiting, telemetry and deployment remain.
 
 ---
 
