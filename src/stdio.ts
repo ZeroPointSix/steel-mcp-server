@@ -52,6 +52,8 @@ function main(): void {
         process.exit(1);
     }
 
+    for (const warning of deps.config.warnings) log('info', warning);
+
     const reaper = setInterval(() => {
         void deps.registry.reap({ idleMs: REAPER_IDLE_MS }).catch(error => {
             log('error', 'reaper sweep failed', { error: String(error) });

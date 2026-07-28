@@ -10,6 +10,7 @@ const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.js
     version: string;
     mcpName?: string;
     bin: Record<string, string>;
+    scripts: Record<string, string>;
     engines: { node: string };
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
@@ -30,6 +31,44 @@ describe('package metadata', () => {
 
     it('requires Node 20 or newer, which the v2 SDK line needs', () => {
         expect(manifest.engines.node).toBe('>=20');
+    });
+});
+
+describe('an install from git still yields a usable dist', () => {
+    it('builds on prepare, which prepublishOnly does not cover', () => {
+        // npm runs prepare for a git dependency and for a local install; prepublishOnly runs only
+        // when publishing, so without prepare a git install leaves no dist at all.
+        expect(manifest.scripts.prepare).toMatch(/build/);
+    });
+
+    it('marks the built entrypoint executable, which the old shx chmod used to do', () => {
+        expect(manifest.scripts.build, 'nothing restores the executable bit on dist/stdio.js').toMatch(/chmod/);
+    });
+});
+
+describe('the shipped launch paths all point at the real entrypoint', () => {
+    const root = new URL('../../', import.meta.url);
+    const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
+
+    it.each(['README.md', 'smithery.yaml', 'Dockerfile'])(
+        '%s does not launch the entrypoint the build stopped emitting',
+        name => {
+            expect(read(name), `${name} still launches dist/index.js`).not.toContain('dist/index.js');
+        }
+    );
+
+    it('the Dockerfile entrypoint is the file the build produces', () => {
+        expect(read('Dockerfile')).toContain('dist/stdio.js');
+    });
+
+    it('smithery launches the built stdio entrypoint', () => {
+        expect(read('smithery.yaml')).toContain('dist/stdio.js');
+    });
+
+    it('the README no longer configures retired environment variables as if they worked', () => {
+        const readme = read('README.md');
+        expect(readme).not.toContain('GLOBAL_WAIT_SECONDS');
+        expect(readme, 'the README still names the unpublished v1 package').not.toContain('steel-voyager/dist');
     });
 });
 

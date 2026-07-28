@@ -27,6 +27,54 @@ describe('loadConfig', () => {
         expect(config.apiKey).toBe('ste-abc');
     });
 
+    it('does not treat a lookalike domain as Steel Cloud', () => {
+        // Without a dot boundary, evilsteel.dev would be classified as Cloud and handed the key.
+        for (const host of ['evilsteel.dev', 'notsteel.dev', 'steel.dev.attacker.test']) {
+            const config = loadConfig({ STEEL_API_KEY: 'ste-secret', STEEL_BASE_URL: `https://${host}` });
+            expect(config.deployment, `${host} was classified as Steel Cloud`).toBe('self_hosted');
+        }
+    });
+
+    it('still recognises Steel Cloud and its subdomains', () => {
+        for (const host of ['steel.dev', 'api.steel.dev', 'api.eu.steel.dev']) {
+            const config = loadConfig({ STEEL_API_KEY: 'ste-secret', STEEL_BASE_URL: `https://${host}` });
+            expect(config.deployment, `${host} was not recognised as Steel Cloud`).toBe('cloud');
+        }
+    });
+
+    it('honours STEEL_LOCAL, which the shipped README tells self-hosters to toggle', () => {
+        // An upgrading self-hoster with a leftover key would otherwise silently start creating
+        // billed cloud sessions.
+        const local = loadConfig({ STEEL_LOCAL: 'true', STEEL_API_KEY: 'ste-leftover-key' });
+        expect(local.deployment).toBe('self_hosted');
+        expect(local.baseUrl).toBe('http://localhost:3000');
+        expect(local.apiKey, 'a local deployment kept a cloud credential').toBeUndefined();
+    });
+
+    it('waives the API key requirement when STEEL_LOCAL is set', () => {
+        expect(() => loadConfig({ STEEL_LOCAL: 'true' })).not.toThrow();
+    });
+
+    it('lets an explicit base URL win over the STEEL_LOCAL default', () => {
+        const config = loadConfig({ STEEL_LOCAL: 'true', STEEL_BASE_URL: 'http://steel-browser:3000' });
+        expect(config.baseUrl).toBe('http://steel-browser:3000');
+        expect(config.deployment).toBe('self_hosted');
+    });
+
+    it('treats STEEL_LOCAL=false as the cloud it names', () => {
+        expect(loadConfig({ STEEL_LOCAL: 'false', STEEL_API_KEY: 'k' }).deployment).toBe('cloud');
+    });
+
+    it('warns about the retired GLOBAL_WAIT_SECONDS instead of ignoring it', () => {
+        const config = loadConfig({ STEEL_API_KEY: 'k', GLOBAL_WAIT_SECONDS: '2' });
+        expect(config.warnings.join(' ')).toMatch(/GLOBAL_WAIT_SECONDS/);
+        expect(config.warnings.join(' '), 'the warning does not name the replacement').toMatch(/steel_wait_for/);
+    });
+
+    it('has no warnings for a plain configuration', () => {
+        expect(loadConfig({ STEEL_API_KEY: 'k' }).warnings).toEqual([]);
+    });
+
     it('detects a self-hosted deployment from a non-Steel base URL', () => {
         const config = loadConfig({ STEEL_BASE_URL: 'http://localhost:3000' });
         expect(config.deployment).toBe('self_hosted');

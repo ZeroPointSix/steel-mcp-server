@@ -27,7 +27,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "tsc -p tsconfig.build.json",
+        "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/stdio.js', 0o755)\"",
         "typecheck": "tsc -p tsconfig.json --noEmit",
         "lint": "biome check .",
         "lint:fix": "biome check --write .",
@@ -39,7 +39,7 @@
         "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
         "start": "node dist/stdio.js",
-        "prepublishOnly": "npm run build"
+        "prepare": "npm run build"
     },
     "dependencies": {
         "@modelcontextprotocol/node": "2.0.0-beta.5",

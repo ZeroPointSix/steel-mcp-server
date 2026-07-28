@@ -27,10 +27,15 @@ export interface SteelConfig {
     inactivityTimeoutMs: number;
     /** Hard session cap, in ms, clamped at runtime to the plan maximum from `GET /v1/details`. */
     sessionTimeoutMs: number;
+    /** Configuration problems worth telling the operator about, logged by the entrypoint. */
+    warnings: string[];
 }
 
 const CLOUD_BASE_URL = 'https://api.steel.dev';
 const CLOUD_CONNECT_URL = 'wss://connect.steel.dev';
+/** Where a self-hosted steel-browser listens by default, matching the image's own default. */
+const LOCAL_BASE_URL = 'http://localhost:3000';
+const CLOUD_HOSTNAME = 'steel.dev';
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
 const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
 
@@ -52,11 +57,35 @@ function toWebSocketUrl(httpUrl: string): string {
     return httpUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 }
 
+/**
+ * True only for `steel.dev` itself and its subdomains.
+ *
+ * A bare suffix test would classify `evilsteel.dev` as Steel Cloud and hand it the API key as a
+ * bearer credential, so the dot boundary is load-bearing.
+ */
+function isCloudHostname(hostname: string): boolean {
+    const host = hostname.toLowerCase();
+    return host === CLOUD_HOSTNAME || host.endsWith(`.${CLOUD_HOSTNAME}`);
+}
+
 /** Builds the configuration from a process environment, failing loudly on an unusable combination. */
 export function loadConfig(env: Record<string, string | undefined>): SteelConfig {
-    const baseUrl = normalizeBaseUrl(env.STEEL_BASE_URL ?? CLOUD_BASE_URL);
-    const deployment: Deployment = new URL(baseUrl).hostname.endsWith('steel.dev') ? 'cloud' : 'self_hosted';
-    const apiKey = env.STEEL_API_KEY?.trim() || undefined;
+    const warnings: string[] = [];
+
+    // v1 honoured STEEL_LOCAL and the shipped README still walks through toggling it. An upgrading
+    // self-hoster with a leftover key would otherwise silently start creating billed cloud sessions.
+    const local = env.STEEL_LOCAL?.trim().toLowerCase() === 'true';
+    const baseUrl = normalizeBaseUrl(env.STEEL_BASE_URL ?? (local ? LOCAL_BASE_URL : CLOUD_BASE_URL));
+    const deployment: Deployment = !local && isCloudHostname(new URL(baseUrl).hostname) ? 'cloud' : 'self_hosted';
+    const apiKey = deployment === 'cloud' ? env.STEEL_API_KEY?.trim() || undefined : undefined;
+
+    if (env.GLOBAL_WAIT_SECONDS !== undefined) {
+        warnings.push(
+            'GLOBAL_WAIT_SECONDS is no longer used. Every action waits for the page to settle by ' +
+                'itself; when something genuinely arrives later, call steel_wait_for and name what ' +
+                'you are waiting for.'
+        );
+    }
 
     if (deployment === 'cloud' && !apiKey) {
         throw new Error(
@@ -78,6 +107,7 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
         maxConcurrentSessions: deployment === 'self_hosted' ? 1 : parseIntEnv(env.STEEL_MAX_SESSIONS, 10),
         inactivityTimeoutMs: parseIntEnv(env.STEEL_INACTIVITY_TIMEOUT_MS, DEFAULT_INACTIVITY_TIMEOUT_MS),
         sessionTimeoutMs: parseIntEnv(env.STEEL_SESSION_TIMEOUT_MS, DEFAULT_SESSION_TIMEOUT_MS),
+        warnings,
     };
 }
 

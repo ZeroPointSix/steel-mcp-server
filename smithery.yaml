@@ -5,23 +5,22 @@ startCommand:
   configSchema:
     # JSON Schema defining the configuration options for the MCP.
     type: object
-    required:
-      - steelLocal
     properties:
       steelLocal:
         type: boolean
-        description: Set to true for local mode and false for cloud mode.
+        description: Set to true to drive a self-hosted steel-browser instead of Steel Cloud.
       steelApiKey:
         type: string
-        description: API key for Steel cloud service. Required if steelLocal is false.
+        description: Steel Cloud API key. Required unless steelLocal is true.
       steelBaseUrl:
         type: string
-        description: Base URL for Steel API. Optional, defaults to http://localhost:3000
-          for local mode and https://api.steel.dev for cloud mode.
-      globalWaitSeconds:
-        type: number
-        description: Optional number of seconds to wait after each tool action.
+        description: Base URL for the Steel API. Defaults to https://api.steel.dev, or
+          http://localhost:3000 when steelLocal is true.
+      steelProfile:
+        type: string
+        enum: [scrape, browse, vision, full]
+        description: Which tool preset to expose. Defaults to browse.
   commandFunction:
     # A function that produces the CLI command to start the MCP on stdio.
     |-
-    (config) => ({command:'node',args:['dist/index.js'],env:{STEEL_LOCAL:config.steelLocal.toString(),STEEL_API_KEY:config.steelApiKey,STEEL_BASE_URL:config.steelBaseUrl,GLOBAL_WAIT_SECONDS:config.globalWaitSeconds?.toString()}})
+    (config) => ({command:'node',args:['dist/stdio.js'],env:{STEEL_LOCAL:config.steelLocal?.toString(),STEEL_API_KEY:config.steelApiKey,STEEL_BASE_URL:config.steelBaseUrl,STEEL_PROFILE:config.steelProfile}})
