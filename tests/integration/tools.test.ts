@@ -200,6 +200,27 @@ describe('steel_screenshot and steel_pdf', () => {
         expect(content.find(block => block.type === 'resource_link')?.uri).toMatch(/\.pdf$/);
     });
 
+    it('keeps a session alive while screenshotting it, so a loop is not reaped mid-use', async () => {
+        // Every stateful call must mark the handle as used; a tool that resolves the handle without
+        // touching it lets the reaper reclaim a session an agent is actively working with.
+        const deps = testDeps();
+        const touched: string[] = [];
+        const realTouch = deps.registry.touch.bind(deps.registry);
+        deps.registry.touch = async (handle: string) => {
+            touched.push(handle);
+            return realTouch(handle);
+        };
+        const h = await connect(deps);
+        try {
+            const handle = await newSession(h);
+            touched.length = 0;
+            await h.client.callTool({ name: 'steel_screenshot', arguments: { session_id: handle } });
+            expect(touched, 'steel_screenshot did not mark the handle as used').toContain(handle);
+        } finally {
+            await h.close();
+        }
+    });
+
     it('tells the model not to act on pixels', async () => {
         const { tools } = await harness.client.listTools();
         const screenshot = tools.find(tool => tool.name === 'steel_screenshot');
@@ -215,6 +236,21 @@ describe('steel_session_create', () => {
         expect(created.sessionId).toMatch(/^[0-9a-f-]{36}$/);
         expect(created.inactivityTimeout).toBe(120_000);
         expect(created.timeout).toBeGreaterThan(0);
+    });
+
+    it('keeps the idle timeout strictly below the hard timeout, which is what makes it work', async () => {
+        // Steel ignores inactivityTimeout when it is greater than or equal to timeout, which would
+        // silently disable the only teardown layer that survives this process dying.
+        const api = new FakeSteelApi({ details: { maxSessionDuration: 60_000, concurrencyLimit: 10 } });
+        const h = await connect(testDeps({ api }));
+        try {
+            await newSession(h);
+            const created = api.created[0]!;
+            expect(created.inactivityTimeout).toBeDefined();
+            expect(created.inactivityTimeout!).toBeLessThan(created.timeout);
+        } finally {
+            await h.close();
+        }
     });
 
     it('clamps the hard timeout to the plan maximum rather than hardcoding one', async () => {

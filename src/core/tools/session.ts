@@ -2,6 +2,7 @@
 // ABOUTME: captures context before tearing down, and the agent-trace diagnostics timeline.
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import { resolveInactivityTimeout } from '../config.js';
 import { mintSteelSessionId, type ServerDeps } from '../context.js';
 import { type SelfHostCapability, selfHostUnsupportedError } from '../errors.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
@@ -95,7 +96,7 @@ export function registerSessionCreate(server: McpServer, deps: ServerDeps): void
                     {
                         sessionId: steelSessionId,
                         timeout,
-                        inactivityTimeout: Math.min(deps.config.inactivityTimeoutMs, timeout),
+                        inactivityTimeout: resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout),
                         region: args.region,
                         useProxy: args.use_proxy,
                         solveCaptcha: args.solve_captcha,

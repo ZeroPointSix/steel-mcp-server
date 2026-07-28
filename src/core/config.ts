@@ -81,6 +81,26 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
     };
 }
 
+/**
+ * The smallest idle timeout worth sending. Below this a session would be reclaimed faster than a
+ * model can take its next turn, so the hard timeout is left to do the work on its own.
+ */
+const MIN_USEFUL_INACTIVITY_TIMEOUT_MS = 1_000;
+
+/**
+ * Picks the idle timeout to send with a session, always strictly below the hard timeout.
+ *
+ * Steel ignores `inactivityTimeout` entirely when it is greater than or equal to `timeout`. Sending
+ * an equal value therefore silently disables the one teardown layer that survives this process
+ * dying, its replica being rescheduled, and the client vanishing. Returns `undefined` when no
+ * useful value exists, so an inert number is never sent at all.
+ */
+export function resolveInactivityTimeout(configuredMs: number, hardTimeoutMs: number): number | undefined {
+    if (configuredMs < hardTimeoutMs) return configuredMs;
+    const halved = Math.floor(hardTimeoutMs / 2);
+    return halved >= MIN_USEFUL_INACTIVITY_TIMEOUT_MS ? halved : undefined;
+}
+
 /** The subset of configuration a CDP URL is built from. */
 export type CdpEndpoint = Pick<SteelConfig, 'deployment' | 'connectUrl'> & { apiKey?: string | undefined };
 

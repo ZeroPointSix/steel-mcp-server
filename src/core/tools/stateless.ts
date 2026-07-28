@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
 import { botDetectionError, detectBotBlock, SteelToolError } from '../errors.js';
 import type { ScrapeFormat } from '../steel/types.js';
-import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult } from './shared.js';
+import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult, withPage } from './shared.js';
 
 const FORMATS = ['markdown', 'html', 'cleaned_html', 'readability'] as const;
 
@@ -124,19 +124,22 @@ export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
                     .describe('Return the image bytes in the response instead of a link. Costs far more context.'),
             }),
         },
-        async (args, ctx) =>
-            guard(async () => {
-                if (args.session_id) {
-                    const record = await deps.registry.resolve(args.session_id, deps.principal);
-                    const page = await deps.pool.page(record.steelSessionId, ctx.mcpReq.signal);
+        async (args, ctx) => {
+            // The session branch goes through withPage so there is exactly one path that resolves
+            // a handle and marks it as used; screenshotting in a loop must not let the reaper
+            // reclaim the session out from under the agent doing it.
+            if (args.session_id) {
+                return withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
                     const shot = await page.captureScreenshot({ fullPage: args.full_page ?? false });
                     return successResult(
                         { result: 'Captured the current page of this session as a JPEG.' },
                         { session_id: args.session_id },
                         [{ type: 'image', data: shot.data, mimeType: 'image/jpeg' }]
                     );
-                }
+                });
+            }
 
+            return guard(async () => {
                 if (!args.url) {
                     throw new SteelToolError('steel_screenshot needs either a url or a session_id.', {
                         code: 'invalid_argument',
@@ -166,7 +169,8 @@ export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
                     { url: artifact.url },
                     content
                 );
-            })
+            });
+        }
     );
 }
 

@@ -164,6 +164,65 @@ describe('InMemoryHandleRegistry.release', () => {
     });
 });
 
+describe('InMemoryHandleRegistry.release ordering', () => {
+    it('releases the Steel session before forgetting the handle', async () => {
+        // If the record went first, a transient failure would lose it: no retry, the reaper could
+        // never see it, and the browser would bill on with nothing tracking it.
+        let resolvableDuringRelease: boolean | undefined;
+        const registry: InMemoryHandleRegistry = new InMemoryHandleRegistry({
+            releaseSteelSession: async () => {
+                resolvableDuringRelease = await registry
+                    .resolve(handle, ORG_A)
+                    .then(() => true)
+                    .catch(() => false);
+            },
+        });
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        await registry.release(handle, ORG_A, 'explicit');
+        expect(resolvableDuringRelease, 'the record was deleted before the release was awaited').toBe(true);
+    });
+
+    it('keeps the handle when the Steel release fails, so the reaper can retry', async () => {
+        let attempts = 0;
+        const registry = new InMemoryHandleRegistry({
+            releaseSteelSession: async () => {
+                attempts += 1;
+                if (attempts === 1) throw new Error('steel unreachable');
+            },
+        });
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        await expect(registry.release(handle, ORG_A, 'explicit')).rejects.toThrow(/steel unreachable/);
+        expect(await registry.countLive(ORG_A), 'the handle was dropped despite the failure').toBe(1);
+        expect(registry.releaseCounts().explicit, 'the leak metric counted a release that never happened').toBe(0);
+
+        await expect(registry.release(handle, ORG_A, 'explicit')).resolves.toBeTruthy();
+        expect(await registry.countLive(ORG_A)).toBe(0);
+        expect(registry.releaseCounts().explicit).toBe(1);
+    });
+
+    it('counts the release only once even if the same handle is released twice', async () => {
+        const { registry } = newRegistry();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: Date.now() + 60_000,
+        });
+        await registry.release(handle, ORG_A, 'explicit');
+        await registry.release(handle, ORG_A, 'explicit');
+        expect(registry.releaseCounts().explicit).toBe(1);
+    });
+});
+
 describe('InMemoryHandleRegistry.reap', () => {
     it('releases handles idle past the deadline and leaves fresh ones alone', async () => {
         vi.useFakeTimers();
@@ -232,6 +291,25 @@ describe('InMemoryHandleRegistry.reap', () => {
         expect(await registry.reap({ idleMs: 1 })).toBe(1);
         expect(failures).toHaveLength(1);
         expect((failures[0] as Error).message).toContain('steel unreachable');
+    });
+
+    it('retries a handle whose release failed on the previous sweep', async () => {
+        let attempts = 0;
+        const registry = new InMemoryHandleRegistry({
+            releaseSteelSession: async () => {
+                attempts += 1;
+                if (attempts === 1) throw new Error('steel unreachable');
+            },
+            onReapError: () => {},
+        });
+        await registry.create({ principal: ORG_A, steelSessionId: 's1', expiresAt: Date.now() - 1 });
+
+        expect(await registry.reap({ idleMs: 1 })).toBe(0);
+        expect(await registry.countLive(ORG_A), 'a failed reap dropped the handle it could not release').toBe(1);
+
+        expect(await registry.reap({ idleMs: 1 })).toBe(1);
+        expect(await registry.countLive(ORG_A)).toBe(0);
+        expect(registry.releaseCounts().reaper).toBe(1);
     });
 });
 

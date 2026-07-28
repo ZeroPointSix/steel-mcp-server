@@ -119,14 +119,21 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         if (record) record.lastUsedAt = Date.now();
     }
 
+    /**
+     * Releases the Steel session, then forgets the handle.
+     *
+     * The order matters: deleting the record first would lose it on a transient failure, leaving
+     * nothing to retry, nothing for the reaper to find, and a browser billing on — while the
+     * release counter still claimed a release that never happened.
+     */
     async release(handle: string, principal: string, path: ReleasePath): Promise<HandleRecord | null> {
         const record = this.records.get(handle);
         if (!record) return null;
         if (record.principal !== principal) {
             throw new SteelToolError(NOT_FOUND_MESSAGE, { code: 'not_found' });
         }
-        this.records.delete(handle);
         await this.deps.releaseSteelSession(record.steelSessionId);
+        this.records.delete(handle);
         this.counts[path] += 1;
         return record;
     }
@@ -147,12 +154,14 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             const expired = record.expiresAt <= now;
             if (!idle && !expired) continue;
 
-            this.records.delete(record.handle);
             try {
                 await this.deps.releaseSteelSession(record.steelSessionId);
+                this.records.delete(record.handle);
                 this.counts.reaper += 1;
                 reaped += 1;
             } catch (error) {
+                // The record stays so the next sweep tries again. Dropping it here would leave the
+                // browser running with nothing in this process aware that it exists.
                 this.deps.onReapError?.(error);
             }
         }

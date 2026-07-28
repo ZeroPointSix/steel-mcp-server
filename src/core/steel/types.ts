@@ -56,8 +56,11 @@ export interface CreateSessionRequest {
     sessionId: string;
     /** Hard cap in ms. Clamped to the plan maximum by the caller. */
     timeout: number;
-    /** Idle release in ms. This is the layer that survives this process dying. */
-    inactivityTimeout: number;
+    /**
+     * Idle release in ms — the layer that survives this process dying. Steel ignores it when it is
+     * not strictly below `timeout`, so it is omitted rather than sent as an inert value.
+     */
+    inactivityTimeout?: number | undefined;
     region?: string | undefined;
     useProxy?: boolean | undefined;
     solveCaptcha?: boolean | undefined;
