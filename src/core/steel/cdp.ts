@@ -45,32 +45,54 @@ export class CdpConnection {
         socket.on('error', error => this.failAll(`The CDP connection failed: ${error.message}`));
     }
 
-    /** Opens a CDP connection, honouring an abort signal so a client hang-up tears the socket down. */
+    /** True once the socket is gone, so a pool can evict this connection instead of reusing it. */
+    get isClosed(): boolean {
+        return this.closed;
+    }
+
+    /**
+     * Opens a CDP connection.
+     *
+     * The signal cancels the handshake only. It deliberately does not survive into the established
+     * connection: the signal belongs to one tool call, while the connection is pooled for the whole
+     * browser session, so honouring a later abort would brick the session handle for every
+     * subsequent call while Steel kept billing for the browser.
+     */
     static async connect(url: string, signal?: AbortSignal): Promise<CdpConnection> {
         const socket = new WebSocket(url, { maxPayload: 256 * 1024 * 1024 });
-        await new Promise<void>((resolve, reject) => {
-            const onAbort = () => {
-                socket.terminate();
-                reject(
-                    new SteelToolError('The request was cancelled before the browser connected.', { code: 'timeout' })
-                );
-            };
-            signal?.addEventListener('abort', onAbort, { once: true });
-            socket.once('open', () => {
-                signal?.removeEventListener('abort', onAbort);
-                resolve();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                const onAbort = () => {
+                    reject(
+                        new SteelToolError('The request was cancelled before the browser connected.', {
+                            code: 'timeout',
+                        })
+                    );
+                };
+                if (signal?.aborted) {
+                    onAbort();
+                    return;
+                }
+                signal?.addEventListener('abort', onAbort, { once: true });
+                socket.once('open', () => {
+                    signal?.removeEventListener('abort', onAbort);
+                    resolve();
+                });
+                socket.once('error', error => {
+                    signal?.removeEventListener('abort', onAbort);
+                    reject(
+                        new SteelToolError(`Could not open a browser connection: ${error.message}`, {
+                            code: 'steel_error',
+                        })
+                    );
+                });
             });
-            socket.once('error', error => {
-                signal?.removeEventListener('abort', onAbort);
-                reject(
-                    new SteelToolError(`Could not open a browser connection: ${error.message}`, { code: 'steel_error' })
-                );
-            });
-        });
+        } catch (error) {
+            socket.terminate();
+            throw error;
+        }
 
-        const connection = new CdpConnection(socket);
-        signal?.addEventListener('abort', () => void connection.close(), { once: true });
-        return connection;
+        return new CdpConnection(socket);
     }
 
     private receive(raw: string): void {

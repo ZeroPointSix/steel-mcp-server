@@ -3,10 +3,11 @@
 import { randomUUID } from 'node:crypto';
 import type { SteelConfig } from './config.js';
 import { buildCdpUrl } from './config.js';
+import { SteelToolError } from './errors.js';
 import { BrowserPage } from './page.js';
 import type { HandleRegistry } from './registry.js';
 import { resolveSettleBudgets } from './settle.js';
-import { CdpConnection } from './steel/cdp.js';
+import { CdpConnection, type CdpSession } from './steel/cdp.js';
 import type { SteelApi } from './steel/types.js';
 
 /** Hands out the attached page for a Steel session, creating the CDP connection on first use. */
@@ -39,35 +40,98 @@ export function mintSteelSessionId(deps: ServerDeps): string {
     return (deps.newSessionId ?? randomUUID)();
 }
 
-/** Opens one CDP connection per Steel session and keeps the attached page for later calls. */
+/** The connection behaviour the pool depends on, so tests can supply one without a socket. */
+export interface PooledConnection {
+    attachToPage(): Promise<CdpSession>;
+    close(): Promise<void>;
+    readonly isClosed: boolean;
+}
+
+/** Opens a CDP connection to a URL. Injected so the pool's lifecycle is testable on its own. */
+export type CdpConnector = (url: string, signal?: AbortSignal) => Promise<PooledConnection>;
+
+interface PoolEntry {
+    connection: PooledConnection;
+    page: BrowserPage;
+}
+
+/** How many times `page` will evict a dead connection and reconnect before giving up. */
+const MAX_RECONNECT_ATTEMPTS = 3;
+
+/**
+ * Opens one CDP connection per Steel session and keeps the attached page for later calls.
+ *
+ * The map holds the in-flight connect promise rather than the finished entry, so concurrent
+ * callers share one connection instead of racing to open several — a loser's socket would leak
+ * for the session's whole life, and ref state would split across two `PageState` instances.
+ */
 export class CdpSessionPool implements SessionPool {
-    private readonly entries = new Map<string, { connection: CdpConnection; page: BrowserPage }>();
+    private readonly entries = new Map<string, Promise<PoolEntry>>();
 
     constructor(
         private readonly config: SteelConfig,
-        private readonly settleMultiplier: number
+        private readonly settleMultiplier: number,
+        private readonly connect: CdpConnector = CdpConnection.connect
     ) {}
 
-    async page(steelSessionId: string, signal?: AbortSignal): Promise<BrowserPage> {
-        const existing = this.entries.get(steelSessionId);
-        if (existing) return existing.page;
+    private async open(steelSessionId: string, signal?: AbortSignal): Promise<PoolEntry> {
+        const connection = await this.connect(buildCdpUrl(this.config, steelSessionId), signal);
+        try {
+            const session = await connection.attachToPage();
+            const page = await BrowserPage.attach(session, { budgets: resolveSettleBudgets(this.settleMultiplier) });
+            return { connection, page };
+        } catch (error) {
+            // The socket is open but unusable; close it here or nothing ever will.
+            await connection.close().catch(() => undefined);
+            throw error;
+        }
+    }
 
-        const url = buildCdpUrl(this.config, steelSessionId);
-        const connection = await CdpConnection.connect(url, signal);
-        const session = await connection.attachToPage();
-        const page = await BrowserPage.attach(session, { budgets: resolveSettleBudgets(this.settleMultiplier) });
-        this.entries.set(steelSessionId, { connection, page });
-        return page;
+    async page(steelSessionId: string, signal?: AbortSignal): Promise<BrowserPage> {
+        for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
+            const existing = this.entries.get(steelSessionId);
+
+            if (!existing) {
+                // No await between the miss and the set, so two callers cannot both start a connect.
+                const pending = this.open(steelSessionId, signal);
+                this.entries.set(steelSessionId, pending);
+                try {
+                    return (await pending).page;
+                } catch (error) {
+                    // A failed connect must not be cached, or the session is unusable for good.
+                    if (this.entries.get(steelSessionId) === pending) this.entries.delete(steelSessionId);
+                    throw error;
+                }
+            }
+
+            const entry = await existing.catch(() => undefined);
+            if (entry && !entry.connection.isClosed) return entry.page;
+
+            // Only the caller that still sees this promise evicts it; the others re-read the map,
+            // so a dropped socket costs one reconnect rather than one per waiting caller.
+            if (this.entries.get(steelSessionId) === existing) {
+                this.entries.delete(steelSessionId);
+                await entry?.connection.close().catch(() => undefined);
+            }
+        }
+
+        throw new SteelToolError(
+            'The browser connection for this session keeps dropping. Release the session with ' +
+                'steel_session_release and create a new one.',
+            { code: 'session_expired', details: { steelSessionId } }
+        );
     }
 
     async close(steelSessionId: string): Promise<void> {
-        const entry = this.entries.get(steelSessionId);
-        if (!entry) return;
+        const pending = this.entries.get(steelSessionId);
+        if (!pending) return;
         this.entries.delete(steelSessionId);
-        await entry.connection.close();
+        // Awaiting the in-flight connect is what stops a socket that opens after this call leaking.
+        const entry = await pending.catch(() => undefined);
+        await entry?.connection.close().catch(() => undefined);
     }
 
     async closeAll(): Promise<void> {
-        for (const id of [...this.entries.keys()]) await this.close(id);
+        await Promise.all([...this.entries.keys()].map(id => this.close(id)));
     }
 }
