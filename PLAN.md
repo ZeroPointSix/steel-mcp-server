@@ -89,7 +89,7 @@ Five layers. The strongest is not ours:
 | # | Layer | Survives |
 |---|---|---|
 | 1 | **Steel `inactivityTimeout`** (~120s) set on every create | our process dying, replica rescheduling, network partition, client vanishing. **This is the guarantee** |
-| 2 | **Steel `timeout`** hard cap, derived from `GET /v1/details` — never hardcoded (15 min on Launch, 1 hr on Scale) | same |
+| 2 | **Steel `timeout`** hard cap. Clamped to the plan maximum *when `GET /v1/details` reports one* — a live smoke test on 2026-07-28 got back only `{"plan":"admin"}`, so the configured default (5 min, below the smallest plan cap) is what actually governs | same |
 | 3 | **Client-minted `sessionId` UUID** passed on create | the create-then-crash gap: we know the id before create returns |
 | 4 | **`steel_session_release`** tool, idempotent, retention policy stated in `steel_session_create`'s description so the model can see the cost | fast path |
 | 5 | **Abort on stream close** — plumb the request abort signal into every CDP call | closing the SSE stream *is* cancellation now; `notifications/cancelled` survives only on stdio. A client hang-up mid-navigate otherwise burns minutes with nobody listening |
@@ -227,6 +227,7 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 | 6 | Does `@modelcontextprotocol/server@2` go stable tomorrow and pass conformance at both eras? | npm dist-tags + run the suite. We're scaffolding on a beta |
 | 7 | **Is our a11y snapshot good enough that a host's model can drive it?** | Build and measure in P1 against a hostile corpus. **The highest technical risk here** — the entire "deterministic, no LLM" differentiation rests on it |
 | 8 | Which `region` values are actually valid? | Three Steel sources disagree. Pass through as a string, let the API validate |
+| 11 | **Does a Launch or Scale key get session/concurrency limits back from `GET /v1/details`?** | Steel platform, or a smoke run with a non-admin key. An admin key returns only `{"plan":"admin"}`, so we cannot currently discover a caller's real cap and fall back to a conservative 5 min |
 | 9 | Should `/v1/search` be promoted from the OSS image to Cloud? | Steel platform. Agents constantly want search; until then we can't offer it |
 | 10 | What is `steel-computer` (private repo, "persistent computers for AI agents")? | Steel product. An adjacent surface this may need to accommodate |
 

@@ -25,7 +25,11 @@ export interface SteelConfig {
     maxConcurrentSessions: number;
     /** Idle release, in ms, set on every session so a browser frees itself if this process dies. */
     inactivityTimeoutMs: number;
-    /** Hard session cap, in ms, clamped at runtime to the plan maximum from `GET /v1/details`. */
+    /**
+     * Hard session cap, in ms. Clamped at runtime to the plan maximum when `GET /v1/details` reports
+     * one — it does not always, so this value governs on its own and stays below the smallest plan
+     * cap rather than assuming the API will correct it.
+     */
     sessionTimeoutMs: number;
     /** Configuration problems worth telling the operator about, logged by the entrypoint. */
     warnings: string[];

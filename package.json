@@ -39,7 +39,8 @@
         "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
         "start": "node dist/stdio.js",
-        "prepare": "npm run build"
+        "prepare": "npm run build",
+        "test:smoke": "vitest run --project smoke"
     },
     "dependencies": {
         "@modelcontextprotocol/node": "2.0.0",

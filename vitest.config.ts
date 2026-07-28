@@ -29,6 +29,19 @@ export default defineConfig({
             },
             {
                 test: {
+                    name: 'smoke',
+                    include: ['tests/smoke/**/*.test.ts'],
+                    environment: 'node',
+                    testTimeout: 120_000,
+                    hookTimeout: 60_000,
+                    // These calls bill real money and a create competes for a concurrency slot, so
+                    // they run one at a time.
+                    fileParallelism: false,
+                    sequence: { concurrent: false },
+                },
+            },
+            {
+                test: {
                     name: 'e2e',
                     include: ['tests/e2e/**/*.test.ts'],
                     environment: 'node',
