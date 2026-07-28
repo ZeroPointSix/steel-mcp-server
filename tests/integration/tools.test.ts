@@ -492,6 +492,75 @@ describe('steel_snapshot', () => {
         expect(text).toMatch(/snapshot [a-z]?\d+/i);
     });
 
+    it('continues a truncated snapshot from its cursor even after the page changed', async () => {
+        // Recapturing on continuation would compare the cursor against fresh content, so every
+        // continuation failed on any page that moves.
+        const deps = testDeps({
+            page: () => ({
+                root: {
+                    tag: 'HTML',
+                    backendNodeId: 1,
+                    role: 'RootWebArea',
+                    name: 'Long page',
+                    bounds: [0, 0, 1280, 720],
+                    children: Array.from({ length: 200 }, (_, i) => ({
+                        tag: 'A',
+                        backendNodeId: 100 + i,
+                        role: 'link',
+                        name: `Item number ${i} with a reasonably long label`,
+                        bounds: [0, i * 20, 400, 18] as [number, number, number, number],
+                    })),
+                },
+                url: 'https://example.com/long',
+                loaderId: 'loader-1',
+            }),
+        });
+        const h = await connect(deps);
+        try {
+            const handle = await newSession(h);
+            const first = await h.client.callTool({
+                name: 'steel_snapshot',
+                arguments: { session_id: handle, max_tokens: 200 },
+            });
+            const firstText = textOf(first);
+            expect(firstText).toContain('### Pagination');
+            const cursor = /cursor="([^"]+)"/.exec(firstText)?.[1];
+            expect(cursor, 'no cursor was offered for a truncated snapshot').toBeTruthy();
+
+            // The page moves on between the two reads, as a real page does.
+            const fixture = h.deps.pool.fixtureFor(h.deps.api.created[0]!.sessionId);
+            fixture?.setPage({
+                root: {
+                    tag: 'HTML',
+                    backendNodeId: 1,
+                    role: 'RootWebArea',
+                    name: 'Long page',
+                    bounds: [0, 0, 1280, 720],
+                    children: [
+                        {
+                            tag: 'A',
+                            backendNodeId: 100,
+                            role: 'link',
+                            name: 'Everything else went away',
+                            bounds: [0, 0, 400, 18],
+                        },
+                    ],
+                },
+                url: 'https://example.com/long',
+                loaderId: 'loader-1',
+            });
+
+            const second = await h.client.callTool({
+                name: 'steel_snapshot',
+                arguments: { session_id: handle, max_tokens: 200, cursor },
+            });
+            expect(isError(second), `continuation failed: ${textOf(second)}`).toBe(false);
+            expect(textOf(second)).toContain('Item number');
+        } finally {
+            await h.close();
+        }
+    });
+
     it('fences the snapshot as untrusted page content', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({ name: 'steel_snapshot', arguments: { session_id: handle } });
@@ -600,6 +669,21 @@ describe('steel_batch', () => {
         expect(text.match(/### Snapshot/g) ?? []).toHaveLength(1);
         expect(text).toMatch(/step 1/i);
         expect(text).toMatch(/step 2/i);
+    });
+
+    it('rejects a step whose action is not one steel_act accepts', async () => {
+        const handle = await newSession();
+        const result = await harness.client.callTool({
+            name: 'steel_batch',
+            arguments: {
+                session_id: handle,
+                steps: [{ tool: 'steel_act', arguments: { action: 'teleport' } }],
+            },
+        });
+        expect(isError(result)).toBe(true);
+        // Rejected by the schema, before the handler runs, and the message lists every valid verb.
+        expect(textOf(result), 'the caller is not told what the valid actions are').toMatch(/dismiss_overlays/);
+        expect(textOf(result)).toMatch(/action/);
     });
 
     it('stops at the first failure and names the failing index', async () => {

@@ -13,18 +13,26 @@ import {
 } from './snapshot.js';
 import type { CdpSession } from './steel/cdp.js';
 
-/** The interaction verbs, mirroring the shape of Steel's own computer-action union. */
-export type ActionName =
-    | 'click'
-    | 'type'
-    | 'fill_form'
-    | 'select'
-    | 'check'
-    | 'hover'
-    | 'scroll'
-    | 'press'
-    | 'go_back'
-    | 'dismiss_overlays';
+/**
+ * The interaction verbs, mirroring the shape of Steel's own computer-action union.
+ *
+ * The single source of truth: `steel_act`'s enum and `steel_batch`'s step validation both build
+ * from this, so a verb can never be accepted by one and unknown to the other.
+ */
+export const ACTIONS = [
+    'click',
+    'type',
+    'fill_form',
+    'select',
+    'check',
+    'hover',
+    'scroll',
+    'press',
+    'go_back',
+    'dismiss_overlays',
+] as const;
+
+export type ActionName = (typeof ACTIONS)[number];
 
 export interface FormField {
     target: string;
@@ -556,6 +564,14 @@ export class BrowserPage {
             }
             case 'dismiss_overlays':
                 return this.dismissOverlays();
+            default:
+                // Reachable because steel_batch validates a string before casting it. Falling off
+                // the switch would return undefined and surface as a bare TypeError.
+                throw new SteelToolError(
+                    `"${String(request.action)}" is not an action this tool performs. ` +
+                        `Valid actions: ${ACTIONS.join(', ')}.`,
+                    { code: 'invalid_argument', details: { action: String(request.action) } }
+                );
         }
     }
 

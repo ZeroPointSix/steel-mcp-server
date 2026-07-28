@@ -4,7 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
 import { SteelToolError } from '../errors.js';
-import type { ActionName } from '../page.js';
+import { ACTIONS } from '../page.js';
 import { snapshotSection } from './browse.js';
 import { maxTokensSchema, sessionIdSchema, successResult, withPage } from './shared.js';
 
@@ -15,7 +15,7 @@ const stepSchema = z.object({
     arguments: z
         .object({
             url: z.string().optional(),
-            action: z.string().optional(),
+            action: z.enum(ACTIONS).optional(),
             target: z.string().optional(),
             value: z.string().optional(),
             fields: z.array(z.object({ target: z.string(), value: z.string() })).optional(),
@@ -71,7 +71,7 @@ export function registerBatch(server: McpServer, deps: ServerDeps): void {
                                 });
                             }
                             const outcome = await page.act({
-                                action: step.arguments.action as ActionName,
+                                action: step.arguments.action,
                                 target: step.arguments.target,
                                 value: step.arguments.value,
                                 fields: step.arguments.fields,

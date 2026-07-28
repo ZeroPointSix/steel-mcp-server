@@ -3,25 +3,12 @@
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
-import type { ActRequest, BrowserPage } from '../page.js';
+import { ACTIONS, type ActRequest, type BrowserPage } from '../page.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { SnapshotNode } from '../snapshot.js';
 import { renderSnapshot } from '../snapshot.js';
 import { fenceUntrusted } from '../untrusted.js';
 import { cursorSchema, maxTokensSchema, pageStateLine, sessionIdSchema, successResult, withPage } from './shared.js';
-
-const ACTIONS = [
-    'click',
-    'type',
-    'fill_form',
-    'select',
-    'check',
-    'hover',
-    'scroll',
-    'press',
-    'go_back',
-    'dismiss_overlays',
-] as const;
 
 /** Captures and renders a fenced, budgeted snapshot section for a tool that was asked for one. */
 export async function snapshotSection(
@@ -29,7 +16,10 @@ export async function snapshotSection(
     deps: ServerDeps,
     options: { interactiveOnly?: boolean; maxTokens?: number | undefined; cursor?: string | undefined }
 ): Promise<{ pageState: string; snapshot: string; pagination: string | undefined }> {
-    const snapshot = await page.snapshot({ interactiveOnly: options.interactiveOnly ?? true });
+    // A cursor refers to the text of the snapshot that produced it. Recapturing would paginate
+    // fresh content, so the fingerprint check would reject every continuation on a moving page.
+    const stored = options.cursor === undefined ? undefined : page.pageState.lastSnapshot;
+    const snapshot = stored ?? (await page.snapshot({ interactiveOnly: options.interactiveOnly ?? true }));
     const paged = paginate(snapshot.text, {
         maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
         cursor: options.cursor,

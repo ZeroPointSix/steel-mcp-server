@@ -414,6 +414,21 @@ describe('BrowserPage.act — keyboard', () => {
     });
 });
 
+describe('BrowserPage.act — unknown action', () => {
+    it('rejects an action outside the enum instead of falling off the switch', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        const browserPage = await openPage(fixture);
+        // batch accepts a string and casts it, so the switch is the last line of defence; without a
+        // default case it returns undefined and the caller throws a bare TypeError.
+        const error = await catchAsync(
+            browserPage.act({ action: 'teleport' as unknown as Parameters<BrowserPage['act']>[0]['action'] })
+        );
+        expect(error.code).toBe('invalid_argument');
+        expect(error.message).toContain('teleport');
+        expect(error.message, 'the error does not name the valid actions').toContain('dismiss_overlays');
+    });
+});
+
 describe('BrowserPage.act — dismiss_overlays', () => {
     it('presses Escape and clicks a recognised consent control, naming what it dismissed', async () => {
         const fixture = actionFixture(
