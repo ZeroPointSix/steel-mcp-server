@@ -87,5 +87,14 @@ browser is published on host port 3100, not 3000, because 3000 is a default othe
 - Self-hosted Steel is concurrency 1, and has no proxies, profiles, regions or CAPTCHA solving.
   Each gap has its own named error in `errors.ts`.
 - `serveStdio` lives at `@modelcontextprotocol/server/stdio`, not on the package root.
+- Subscribe to settle's events **before** dispatching an action, via `watchForSettle`. Some CDP
+  commands — `Page.navigateToHistoryEntry` among them — do not resolve until the navigation they
+  caused has already committed, so a listener attached afterwards never sees its own event. Same
+  reason the mutation baseline is read first.
+- Acting on a `@eN` ref re-reads the element's live role and name and refuses if either changed.
+  That is deliberately strict: telling a cosmetic relabel apart from a swapped action needs a
+  similarity threshold, and a wrong guess clicks the wrong button.
+- An abort signal cancels a CDP *handshake* only. It must never close an established pooled
+  connection: the signal belongs to one tool call, the connection to the whole session.
 - Post-action snapshots are **off** by default. Turning one on by default is how this category
   ends up with a 14k-token tool response nobody asked for.
