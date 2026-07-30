@@ -57,7 +57,7 @@ export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+            withPage(deps, 'steel_navigate', ctx.mcpReq, args.session_id, async page => {
                 const outcome = await page.navigate(args.url);
                 const sections = args.include_snapshot
                     ? await snapshotSection(page, deps, { maxTokens: args.max_tokens })
@@ -104,7 +104,7 @@ export function registerSnapshot(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+            withPage(deps, 'steel_snapshot', ctx.mcpReq, args.session_id, async page => {
                 const sections = await snapshotSection(page, deps, {
                     interactiveOnly: args.interactive_only ?? true,
                     maxTokens: args.max_tokens,
@@ -151,7 +151,7 @@ export function registerFind(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+            withPage(deps, 'steel_find', ctx.mcpReq, args.session_id, async page => {
                 await page.snapshot({});
                 const matches = await page.find({
                     text: args.text,
@@ -228,7 +228,7 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+            withPage(deps, 'steel_act', ctx.mcpReq, args.session_id, async page => {
                 const request: ActRequest = {
                     action: args.action,
                     target: args.target,
@@ -278,7 +278,7 @@ export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async (page): Promise<CallToolResult> => {
+            withPage(deps, 'steel_wait_for', ctx.mcpReq, args.session_id, async (page): Promise<CallToolResult> => {
                 const outcome = await page.waitFor({
                     text: args.text,
                     selector: args.selector,

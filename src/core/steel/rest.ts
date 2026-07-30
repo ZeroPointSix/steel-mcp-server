@@ -1,7 +1,9 @@
 // ABOUTME: Thin typed REST client for the Steel /v1 surface, with the fetch implementation injected
 // ABOUTME: so tests exercise the wire shape without a network, and every failure mapped to prose.
+import { type Tracer, trace } from '@opentelemetry/api';
 import type { SteelConfig } from '../config.js';
 import { mapSteelHttpError, type SteelErrorBody, type SteelOperation, SteelToolError } from '../errors.js';
+import { activeTraceparent, resolveTracer, withSteelCallSpan } from '../telemetry.js';
 import type {
     AccountDetails,
     AgentTrace,
@@ -53,13 +55,31 @@ function parseRetryAfter(response: Response): number | undefined {
 export class SteelRestClient implements SteelApi {
     constructor(
         private readonly config: SteelConfig,
-        private readonly fetchImpl: FetchLike = globalThis.fetch
+        private readonly fetchImpl: FetchLike = globalThis.fetch,
+        private readonly tracer: Tracer = resolveTracer()
     ) {}
 
+    /** Wraps every call in a client span, which is also what the outbound traceparent names. */
     private async request<T>(spec: RequestSpec): Promise<T | undefined> {
+        return withSteelCallSpan(
+            this.tracer,
+            {
+                method: spec.method,
+                path: `/v1${spec.path}`,
+                host: new URL(this.config.baseUrl).host,
+                operation: spec.operation,
+            },
+            () => this.send<T>(spec)
+        );
+    }
+
+    private async send<T>(spec: RequestSpec): Promise<T | undefined> {
         const headers: Record<string, string> = { accept: 'application/json' };
         if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
         if (spec.body) headers['content-type'] = 'application/json';
+        // Only set when something is actually tracing, so an untraced deployment sends what it always did.
+        const traceparent = activeTraceparent();
+        if (traceparent) headers.traceparent = traceparent;
 
         const init: RequestInit = { method: spec.method, headers };
         if (spec.body) init.body = JSON.stringify(dropUndefined(spec.body));
@@ -77,6 +97,8 @@ export class SteelRestClient implements SteelApi {
                 { code: 'steel_error' }
             );
         }
+
+        trace.getActiveSpan()?.setAttribute('http.response.status_code', response.status);
 
         if (spec.tolerate?.includes(response.status)) return undefined;
 

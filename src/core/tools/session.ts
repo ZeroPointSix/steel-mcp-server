@@ -67,7 +67,7 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            guard(async () => {
+            guard(deps, 'steel_session_create', ctx.mcpReq, async () => {
                 if (deps.config.deployment === 'self_hosted') {
                     for (const [option, capability] of CLOUD_ONLY_OPTIONS) {
                         if (args[option] !== undefined && args[option] !== false) {
@@ -206,8 +206,8 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
             inputSchema: z.object({ session_id: sessionIdSchema }),
         },
-        async args =>
-            guard(async () => {
+        async (args, ctx) =>
+            guard(deps, 'steel_session_release', ctx.mcpReq, async () => {
                 const record = await deps.registry.resolve(args.session_id, deps.principal).catch(() => null);
 
                 if (!record) {
@@ -266,7 +266,7 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
             }),
         },
         async (args, ctx) =>
-            guard(async () => {
+            guard(deps, 'steel_session_diagnostics', ctx.mcpReq, async () => {
                 const record = await deps.registry.resolve(args.session_id, deps.principal);
                 const [traces, logs] = await Promise.all([
                     deps.api.getAgentTraces(record.steelSessionId, ctx.mcpReq.signal).catch(() => []),

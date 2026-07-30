@@ -1,9 +1,11 @@
 // ABOUTME: Unit tests for the typed Steel REST layer, pinning the parameter names and response
 // ABOUTME: shapes that the published SDK gets wrong, with a fake fetch injected at the boundary.
+import { SpanKind, SpanStatusCode, type Tracer } from '@opentelemetry/api';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import { SteelToolError } from '../../src/core/errors.js';
 import { SteelRestClient } from '../../src/core/steel/rest.js';
+import { tracingHarness } from '../helpers/tracing.js';
 
 interface RecordedCall {
     url: string;
@@ -34,10 +36,11 @@ function fakeFetch(responses: Array<{ status?: number; body?: unknown; headers?:
 
 function client(
     responses: Parameters<typeof fakeFetch>[0],
-    env: Record<string, string | undefined> = { STEEL_API_KEY: 'ste-secret' }
+    env: Record<string, string | undefined> = { STEEL_API_KEY: 'ste-secret' },
+    tracer?: Tracer
 ) {
     const { calls, fetchImpl } = fakeFetch(responses);
-    return { calls, api: new SteelRestClient(loadConfig(env), fetchImpl) };
+    return { calls, api: new SteelRestClient(loadConfig(env), fetchImpl, tracer) };
 }
 
 /** Awaits a rejection and returns it typed, so assertions do not fight the success-type union. */
@@ -170,6 +173,61 @@ describe('SteelRestClient error handling', () => {
         expect(error).toBeInstanceOf(SteelToolError);
         expect(error.code).toBe('steel_error');
         expect(error.message).toContain('502');
+    });
+});
+
+describe('SteelRestClient trace propagation', () => {
+    it('sends no traceparent header when nothing is tracing the call', async () => {
+        const { api, calls } = client([{ body: { content: {}, links: [], metadata: {} } }]);
+        await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+        expect(calls[0]!.headers).not.toHaveProperty('traceparent');
+    });
+
+    it('puts its own client span on the wire as a traceparent header', async () => {
+        const harness = tracingHarness();
+        const { api, calls } = client([{ body: { content: {}, links: [], metadata: {} } }], undefined, harness.tracer);
+
+        await harness.tracer.startActiveSpan('tools/call steel_scrape', async span => {
+            await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+            span.end();
+        });
+
+        const clientSpan = harness.span('steel browser_tool');
+        const { traceId, spanId } = clientSpan.spanContext();
+        expect(calls[0]!.headers.traceparent).toBe(`00-${traceId}-${spanId}-01`);
+        expect(clientSpan.parentSpanContext?.spanId).toBe(harness.span('tools/call steel_scrape').spanContext().spanId);
+        await harness.shutdown();
+    });
+
+    it('describes the request without the credential or a query string', async () => {
+        const harness = tracingHarness();
+        const { api } = client([{ body: { content: {}, links: [], metadata: {} } }], undefined, harness.tracer);
+
+        await api.scrape({ url: 'https://example.com', format: ['markdown'] });
+
+        const span = harness.span('steel browser_tool');
+        expect(span.kind).toBe(SpanKind.CLIENT);
+        expect(span.attributes).toEqual({
+            'http.request.method': 'POST',
+            'url.path': '/v1/scrape',
+            'server.address': 'api.steel.dev',
+            'steel.operation': 'browser_tool',
+            'http.response.status_code': 200,
+        });
+        expect(JSON.stringify(span.attributes)).not.toContain('ste-secret');
+        await harness.shutdown();
+    });
+
+    it('marks the client span failed with the mapped error code', async () => {
+        const harness = tracingHarness();
+        const { api } = client([{ status: 429, body: { message: 'slow down' } }], undefined, harness.tracer);
+
+        await captureError(api.scrape({ url: 'https://x.test', format: ['markdown'] }));
+
+        const span = harness.span('steel browser_tool');
+        expect(span.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span.attributes['error.type']).toBe('rate_limited');
+        await harness.shutdown();
     });
 });
 

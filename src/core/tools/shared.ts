@@ -1,6 +1,6 @@
 // ABOUTME: Shared plumbing for tool handlers: the handle-to-page resolution that re-authorises on
 // ABOUTME: every call, the untrusted-content fence around page text, and uniform error handling.
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
 import { type EnvelopeSections, successResult } from '../envelope.js';
@@ -9,6 +9,7 @@ import type { BrowserPage } from '../page.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
 import type { PageSnapshot } from '../snapshot.js';
+import { recordSpanFailure, resolveTracer, withToolCallSpan } from '../telemetry.js';
 import { fenceUntrusted } from '../untrusted.js';
 
 /** The `session_id` argument shared by every stateful tool. */
@@ -28,13 +29,42 @@ export const cursorSchema = z
     .optional()
     .describe('Cursor from a previous truncated response, to continue reading where it stopped.');
 
-/** Runs a handler and converts anything it throws into a tool-execution error result. */
-export async function guard(work: () => Promise<CallToolResult>): Promise<CallToolResult> {
-    try {
-        return await work();
-    } catch (error) {
-        return toolErrorResult(error);
-    }
+/**
+ * What a tool handler needs from the request it is answering: cancellation, and the `_meta` the
+ * caller's trace context arrives in. Taken from the SDK context so it cannot drift from it.
+ */
+export type ToolRequest = Pick<ServerContext['mcpReq'], 'signal' | '_meta'>;
+
+/**
+ * Runs a handler inside its tool-call span and converts anything it throws into an error result.
+ *
+ * The span is the outermost layer so a failure is recorded as one before it becomes an ordinary
+ * result. It records the error code only, and never touches the bytes the caller receives.
+ */
+export async function guard(
+    deps: ServerDeps,
+    toolName: string,
+    request: ToolRequest,
+    work: () => Promise<CallToolResult>
+): Promise<CallToolResult> {
+    return withToolCallSpan(
+        resolveTracer(deps.tracer),
+        {
+            toolName,
+            profile: deps.config.profile,
+            deployment: deps.config.deployment,
+            principal: deps.principal,
+        },
+        request._meta,
+        async span => {
+            try {
+                return await work();
+            } catch (error) {
+                recordSpanFailure(span, error);
+                return toolErrorResult(error);
+            }
+        }
+    );
 }
 
 /**
@@ -46,14 +76,15 @@ export async function guard(work: () => Promise<CallToolResult>): Promise<CallTo
  */
 export async function withPage(
     deps: ServerDeps,
+    toolName: string,
+    request: ToolRequest,
     sessionId: string,
-    signal: AbortSignal | undefined,
     work: (page: BrowserPage, record: HandleRecord) => Promise<CallToolResult>
 ): Promise<CallToolResult> {
-    return guard(async () => {
+    return guard(deps, toolName, request, async () => {
         const record = await deps.registry.resolve(sessionId, deps.principal);
         await deps.registry.touch(sessionId);
-        const page = await deps.pool.page(record.steelSessionId, signal);
+        const page = await deps.pool.page(record.steelSessionId, request.signal);
         return work(page, record);
     });
 }
