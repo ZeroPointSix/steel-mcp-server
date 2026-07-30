@@ -348,6 +348,21 @@ Hand-rolling the wire format now means owning details the SDK will ship helpers 
 integration tests for cross-replica polling and cross-org rejection, and whatever tasks scenarios
 the conformance suite grows (watch it alongside the SDK).
 
+## 15. Known gaps carried out of the P2 review
+
+Two adversarial reviews of the P2 landing (merge seams, and the MRTR security surface) found bugs
+that were fixed on the spot and design questions that were not. The fixed ones are not listed here;
+these are the deliberate deferrals, recorded so they are decisions rather than oversights.
+
+| # | Gap | Why it was deferred |
+|---|---|---|
+| 1 | **A rate-limited call emits no span.** `meteredHost` charges the budget outside `guard`, so a throttled call returns before the tracing wrapper opens — the one event an operator most wants ("which principal is hitting the budget, on which tool") is the only one with no telemetry, and the only `isError` path `recordSpanFailure` can never see | Layering change, not a defect. Fix by charging inside `guard` or opening the span in the metered wrapper; the constraint that `requestState` verification precedes the charge is unaffected either way |
+| 2 | **A handoff is indistinguishable from a success in traces.** An `input_required` result correctly ends its span UNSET, but nothing marks it, so "how often are we asking humans, and on which tool" is unanswerable | Wants a `steel.handoff.round` span attribute plus a span-status assertion for the `input_required` outcome, which the tracing suite currently only covers for plain successes |
+| 3 | **MRTR detection costs a full a11y snapshot on every `steel_navigate` and `steel_act`** — and a second one when `include_snapshot` is true, because `snapshotSection` only reuses the cached snapshot when a cursor was passed. It also uses the *full* tree where the rendered path uses `interactiveOnly` | Contradicts `steel_navigate`'s own description (the CDP cost is now paid regardless; only tokens are saved). Element refs are safe — verified, `lastSeenSnapshotId` is recorded before the keep filter, so the detection snapshot refreshes rather than supersedes. Cheapest fix: have `snapshotSection` reuse the detection snapshot |
+| 4 | **`steel_batch` is 6 units for up to 20 steps and has no handoff wiring.** Twenty `steel_act` calls cost 60 individually, 6 batched — a 10× discount on the tool with the heaviest CDP load; and a batch step hitting a login wall gets the plain error, though form-filling and checkout stepping are exactly the flows batch exists for | Both look intentional, so flagging rather than changing. If the pricing is deliberate it belongs in the `TOOL_COSTS` comment, which currently argues the other way |
+| 5 | **The hosted `tenants` map never evicts.** Pre-existing, not from P2 — but the limiter next door prunes at 4096 principals, so the asymmetry is now visible | Unbounded growth keyed by principal on a long-lived replica. Wants the same pruning treatment |
+| 6 | **`forget()` deletes the record key unconditionally while `list()` passes the caller's principal**, so a stale index entry naming another tenant's handle would delete that tenant's record | Unreachable: handles are 128 bits of CSPRNG, the live-index member would survive, and the next sweep self-heals. Becomes live only if handles ever stop being random |
+
 ---
 
 *Branch `niko/steel-mcp-server-v2`. Protocol, SDK and competitor facts verified 2026-07-27, spec-final and extension facts 2026-07-30; see RESEARCH.md for sourcing and for the claims the fact-checkers refuted.*
