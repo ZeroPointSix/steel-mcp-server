@@ -1,8 +1,7 @@
 // ABOUTME: steel_batch runs a sequence of browser steps in one call, stopping at the first failure
 // ABOUTME: and taking at most one snapshot at the end — this is where the round-trip saving lives.
-import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { ServerDeps } from '../context.js';
+import type { ServerDeps, ToolHost } from '../context.js';
 import { SteelToolError } from '../errors.js';
 import { ACTIONS } from '../page.js';
 import { snapshotSection } from './browse.js';
@@ -26,8 +25,8 @@ const stepSchema = z.object({
         .describe('Arguments for that tool, minus session_id, which the batch already knows.'),
 });
 
-export function registerBatch(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerBatch(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_batch',
         {
             title: 'Run several browser steps at once',

@@ -1,9 +1,10 @@
 // ABOUTME: Unit tests for the hosted dependency runtime: clients are reused within one principal,
-// ABOUTME: isolated across credentials, and session releases route back through the owning client.
+// ABOUTME: isolated across credentials, budgets are per-principal, and releases route to their owner.
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import type { SessionPool } from '../../src/core/context.js';
 import type { BrowserPage } from '../../src/core/page.js';
+import { DEFAULT_RATE_LIMIT_POLICY, RATE_LIMIT_NAME, toolCost } from '../../src/core/rate-limit.js';
 import { principalFromCredential } from '../../src/core/registry.js';
 import { HostedRuntime } from '../../src/hosted-runtime.js';
 import { FakeSteelApi } from '../helpers/fakes.js';
@@ -48,6 +49,33 @@ function harness() {
     });
     return { runtime, apis, pools };
 }
+
+describe('HostedRuntime rate limiting', () => {
+    it('hands every request one shared cost-weighted limiter, which stdio never gets', async () => {
+        const { runtime } = harness();
+        const first = runtime.depsForRequest(input('ste-a'));
+        const second = runtime.depsForRequest(input('ste-b'));
+
+        expect(first.limiter).toBeDefined();
+        expect(second.limiter).toBe(first.limiter);
+
+        await runtime.close();
+    });
+
+    it('keeps the budget of one principal separate from another', async () => {
+        const { runtime } = harness();
+        const noisy = runtime.depsForRequest(input('ste-noisy'));
+        const quiet = runtime.depsForRequest(input('ste-quiet'));
+        const cost = toolCost('steel_scrape');
+        const calls = Math.ceil(DEFAULT_RATE_LIMIT_POLICY.burstCapacity / cost);
+
+        for (let call = 0; call < calls; call++) await noisy.limiter?.charge(noisy.principal, 'steel_scrape');
+        await expect(noisy.limiter?.charge(noisy.principal, 'steel_scrape')).rejects.toThrow(RATE_LIMIT_NAME);
+        await expect(quiet.limiter?.charge(quiet.principal, 'steel_scrape')).resolves.toBeUndefined();
+
+        await runtime.close();
+    });
+});
 
 describe('HostedRuntime dependency isolation', () => {
     it('reuses clients for one credential but never across credentials', async () => {

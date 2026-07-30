@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_RATE_LIMIT_POLICY, RATE_LIMIT_NAME, toolCost } from '../../src/core/rate-limit.js';
 
 const BINARY = fileURLToPath(new URL('../../dist/stdio.js', import.meta.url));
 
@@ -65,6 +66,24 @@ describe('the stdio binary', () => {
         const result = await client.callTool({ name: 'steel_scrape', arguments: { url: 'not a url' } });
         expect((result as { isError?: boolean }).isError).toBe(true);
     });
+
+    it('applies no request budget, because one process serves one credential', async () => {
+        // Far more calls than the hosted budget admits, so a limiter on this path would surface as a
+        // rate_limited error instead of the unknown-handle error every one of these earns.
+        const calls = Math.ceil((DEFAULT_RATE_LIMIT_POLICY.burstCapacity / toolCost('steel_snapshot')) * 3);
+        for (let call = 0; call < calls; call++) {
+            const result = (await client.callTool({
+                name: 'steel_snapshot',
+                arguments: { session_id: 'sess_does_not_exist' },
+            })) as { isError?: boolean; content?: Array<{ text?: string }> };
+            const text = result.content?.map(block => block.text ?? '').join('\n') ?? '';
+            expect(result.isError).toBe(true);
+            expect(text, `call ${call} was rate limited on the single-tenant stdio path`).not.toContain(
+                RATE_LIMIT_NAME
+            );
+            expect(text).toMatch(/No live browser session/);
+        }
+    }, 20_000);
 });
 
 describe('shutdown', () => {

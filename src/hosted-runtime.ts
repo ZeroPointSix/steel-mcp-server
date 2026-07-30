@@ -2,6 +2,7 @@
 // ABOUTME: isolating tenants and routing every session release through the client that created it.
 import type { SteelConfig } from './core/config.js';
 import { CdpSessionPool, type ServerDeps, type SessionPool } from './core/context.js';
+import { InMemoryRateLimiter, type RateLimiter } from './core/rate-limit.js';
 import {
     type HandleRegistry,
     InMemoryHandleRegistry,
@@ -30,6 +31,8 @@ export interface HostedRuntimeOptions {
     createPool?: ((config: SteelConfig, settleMultiplier: number) => SessionPool) | undefined;
     /** Swap this for a shared backend when replicas must exchange handle records. */
     createRegistry?: ((deps: RegistryDeps) => HandleRegistry) | undefined;
+    /** Swap this for a shared-store limiter when replicas must share one budget per principal. */
+    createLimiter?: ((now: () => Date) => RateLimiter) | undefined;
     onReapError?: ((error: unknown) => void) | undefined;
     now?: (() => Date) | undefined;
 }
@@ -103,6 +106,15 @@ class OwnedSteelApi implements SteelApi {
  */
 export class HostedRuntime {
     readonly registry: HandleRegistry;
+    /**
+     * One cost-weighted budget per principal, shared by every request this runtime serves.
+     *
+     * The default backend is in memory and therefore **per replica**: two replicas currently grant
+     * the same credential two independent budgets, so the effective ceiling is the budget times the
+     * replica count. Pass `createLimiter` with a shared-store implementation once the hosted
+     * deployment runs more than one replica and the ceiling has to be exact.
+     */
+    readonly limiter: RateLimiter;
     private readonly tenants = new Map<string, TenantClients>();
     private readonly sessionOwners = new Map<string, string>();
     private readonly createApi: (config: SteelConfig) => SteelApi;
@@ -118,6 +130,7 @@ export class HostedRuntime {
             onReapError: options.onReapError,
         };
         this.registry = (options.createRegistry ?? (deps => new InMemoryHandleRegistry(deps)))(registryDeps);
+        this.limiter = (options.createLimiter ?? (now => new InMemoryRateLimiter({ now })))(this.now);
     }
 
     private tenantFor(input: RequestDepsInput): TenantClients {
@@ -158,6 +171,7 @@ export class HostedRuntime {
             api: tenant.api,
             pool: tenant.pool,
             registry: this.registry,
+            limiter: this.limiter,
             principal: input.principal,
             settleMultiplier: tenant.settleMultiplier,
             now: this.now,

@@ -1,9 +1,8 @@
 // ABOUTME: Session lifecycle tools: explicit create with both Steel timeouts set, a release that
 // ABOUTME: captures context before tearing down, and the agent-trace diagnostics timeline.
-import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { resolveInactivityTimeout } from '../config.js';
-import { mintSteelSessionId, type ServerDeps } from '../context.js';
+import { mintSteelSessionId, type ServerDeps, type ToolHost } from '../context.js';
 import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
@@ -30,8 +29,8 @@ interface CreateArgs {
     timeout_ms?: number | undefined;
 }
 
-export function registerSessionCreate(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_session_create',
         {
             title: 'Start a browser session',
@@ -195,8 +194,8 @@ export function registerSessionCreate(server: McpServer, deps: ServerDeps): void
     );
 }
 
-export function registerSessionRelease(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_session_release',
         {
             title: 'Release a browser session',
@@ -249,8 +248,8 @@ export function registerSessionRelease(server: McpServer, deps: ServerDeps): voi
     );
 }
 
-export function registerSessionDiagnostics(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_session_diagnostics',
         {
             title: 'Explain what a browser session did',

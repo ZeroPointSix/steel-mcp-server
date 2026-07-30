@@ -27,8 +27,9 @@ export interface SteelHttpHandlerOptions {
     /**
      * Constructs request-scoped dependencies from the caller's own credential.
      *
-     * Shared registries and credential-keyed pools belong behind this seam; the boundary never
-     * reuses one caller's Steel clients for another caller.
+     * Shared registries, credential-keyed pools and the cost-weighted request limiter belong behind
+     * this seam; the boundary never reuses one caller's Steel clients for another caller.
+     * `HostedRuntime` is the implementation this deployment uses, and it supplies all three.
      */
     depsForRequest(input: RequestDepsInput): ServerDeps | Promise<ServerDeps>;
     onerror?: ((error: Error) => void) | undefined;

@@ -1,8 +1,9 @@
 // ABOUTME: Integration tests for the hosted fetch boundary: routing, DNS-rebinding guards, auth
-// ABOUTME: precedence and isolation of each credential into its own transport-agnostic server deps.
+// ABOUTME: precedence, per-credential request budgets and isolation into per-credential server deps.
 import { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
+import { InMemoryRateLimiter, RATE_LIMIT_NAME, type RateLimitPolicy } from '../../src/core/rate-limit.js';
 import { principalFromCredential } from '../../src/core/registry.js';
 import type { CreateSessionRequest, SteelSession } from '../../src/core/steel/types.js';
 import { HostedRuntime } from '../../src/hosted-runtime.js';
@@ -194,6 +195,84 @@ describe('hosted HTTP routing guards', () => {
 
         expect(response.status).toBe(404);
         expect(seen).toHaveLength(0);
+    });
+});
+
+describe('hosted HTTP rate limiting', () => {
+    /** Four units of burst keeps the wire test short; the shipped policy is ten times larger. */
+    const SMALL_POLICY: RateLimitPolicy = { refillPerMinute: 60, burstCapacity: 4 };
+
+    function limitedHarness() {
+        const api = new FakeSteelApi();
+        let ms = 1_800_000_000_000;
+        const runtime = new HostedRuntime({
+            configForCredential: credential => loadConfig({ STEEL_API_KEY: credential }),
+            createApi: () => api,
+            createPool: () => testDeps().pool,
+            now: () => new Date(ms),
+            createLimiter: now => new InMemoryRateLimiter({ policy: SMALL_POLICY, now }),
+        });
+        const handler = createSteelHttpHandler({
+            allowedHostnames: ['mcp.steel.dev'],
+            allowedOriginHostnames: ['steel.dev'],
+            depsForRequest: runtime.depsForRequest,
+        });
+        openHandlers.push({
+            close: async () => {
+                await handler.close();
+                await runtime.close();
+            },
+        });
+        return {
+            handler,
+            api,
+            advanceSeconds: (seconds: number) => {
+                ms += seconds * 1_000;
+            },
+        };
+    }
+
+    async function callScrape(handler: { fetch(request: Request): Promise<Response> }, credential: string) {
+        const response = await handler.fetch(toolRequest(credential, 'steel_scrape', { url: 'https://example.com/' }));
+        const body = (await response.json()) as {
+            result: { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: unknown };
+        };
+        return {
+            isError: body.result.isError === true,
+            text: body.result.content?.map(block => block.text ?? '').join('\n') ?? '',
+            structured: body.result.structuredContent,
+        };
+    }
+
+    it('rejects a call over budget with an error naming the limit and a retry-after', async () => {
+        const { handler, api, advanceSeconds } = limitedHarness();
+
+        for (let call = 0; call < SMALL_POLICY.burstCapacity; call++) {
+            expect((await callScrape(handler, 'ste-noisy')).isError).toBe(false);
+        }
+        const scrapesBefore = api.scrapes.length;
+        const rejected = await callScrape(handler, 'ste-noisy');
+
+        expect(rejected.isError).toBe(true);
+        expect(rejected.text).toContain(RATE_LIMIT_NAME);
+        expect(rejected.text).toContain('steel_scrape');
+        expect(rejected.text).toMatch(/Retry after \d+s/);
+        expect(rejected.text).toMatch(/Retry-After: \d+s/);
+        expect(rejected.structured).toMatchObject({ error: { code: 'rate_limited' } });
+        // Admission control runs before the handler, so nothing reached Steel.
+        expect(api.scrapes).toHaveLength(scrapesBefore);
+
+        advanceSeconds(1);
+        expect((await callScrape(handler, 'ste-noisy')).isError).toBe(false);
+    });
+
+    it('never lets one credential spend the budget of another', async () => {
+        const { handler } = limitedHarness();
+
+        for (let call = 0; call < SMALL_POLICY.burstCapacity; call++) await callScrape(handler, 'ste-noisy');
+        expect((await callScrape(handler, 'ste-noisy')).isError).toBe(true);
+
+        expect((await callScrape(handler, 'ste-quiet')).isError).toBe(false);
     });
 });
 

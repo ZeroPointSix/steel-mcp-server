@@ -1,14 +1,25 @@
-// ABOUTME: The dependency bundle every tool closes over, and the browser-pool contract that keeps
-// ABOUTME: one attached CDP page per Steel session so element refs survive across tool calls.
+// ABOUTME: The dependency bundle and registration surface every tool closes over, and the browser-pool
+// ABOUTME: contract that keeps one attached CDP page per Steel session so refs survive across calls.
 import { randomUUID } from 'node:crypto';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type { SteelConfig } from './config.js';
 import { buildCdpUrl } from './config.js';
 import { SteelToolError } from './errors.js';
 import { BrowserPage } from './page.js';
+import type { RateLimiter } from './rate-limit.js';
 import type { HandleRegistry } from './registry.js';
 import { resolveSettleBudgets } from './settle.js';
 import { CdpConnection, type CdpSession } from './steel/cdp.js';
 import type { SteelApi } from './steel/types.js';
+
+/**
+ * The registration surface handed to the tool modules.
+ *
+ * Narrower than `McpServer` on purpose: because a tool can only register itself through it, the
+ * hosted entry can hand over a wrapper that charges the request budget before any handler runs,
+ * and a tool added later is metered without anyone having to remember to ask for it.
+ */
+export type ToolHost = Pick<McpServer, 'registerTool'>;
 
 /** Hands out the attached page for a Steel session, creating the CDP connection on first use. */
 export interface SessionPool {
@@ -25,6 +36,13 @@ export interface ServerDeps {
     pool: SessionPool;
     /** The principal for this request's own credential; handles are re-authorised against it. */
     principal: string;
+    /**
+     * Cost-weighted admission control for this principal.
+     *
+     * Absent on stdio: one process serves one credential there, so there is no neighbour to
+     * protect and a budget would only stop the single tenant from using what it already pays for.
+     */
+    limiter?: RateLimiter | undefined;
     /**
      * Multiplier applied to settle budgets, because Steel sessions reach the internet through
      * Steel's fleet and often a proxy, so the localhost-tuned constants are too tight.

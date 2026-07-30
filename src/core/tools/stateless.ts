@@ -1,8 +1,8 @@
 // ABOUTME: The three stateless read tools — scrape, screenshot and pdf — which start no browser
 // ABOUTME: session, so they carry no billing surprise and no way to leak one.
-import type { ContentBlock, McpServer } from '@modelcontextprotocol/server';
+import type { ContentBlock } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { ServerDeps } from '../context.js';
+import type { ServerDeps, ToolHost } from '../context.js';
 import { botDetectionError, detectBotBlock, SteelToolError } from '../errors.js';
 import type { ScrapeFormat } from '../steel/types.js';
 import { fenceUntrusted, type Provenance, stripHtmlComments, stripInvisible } from '../untrusted.js';
@@ -70,8 +70,8 @@ function sanitizeStructured<T>(value: T): T {
     return value;
 }
 
-export function registerScrape(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerScrape(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_scrape',
         {
             title: 'Read a web page',
@@ -148,8 +148,8 @@ export function registerScrape(server: McpServer, deps: ServerDeps): void {
     );
 }
 
-export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_screenshot',
         {
             title: 'Screenshot a web page',
@@ -222,8 +222,8 @@ export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
     );
 }
 
-export function registerPdf(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerPdf(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_pdf',
         {
             title: 'Render a web page as PDF',

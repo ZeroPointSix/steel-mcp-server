@@ -1,8 +1,7 @@
 // ABOUTME: Named tool presets and the single ordered tool table, so tools/list is deterministic
 // ABOUTME: and a profile selection is a data change rather than a code change.
-import type { McpServer } from '@modelcontextprotocol/server';
 import type { ProfileName } from './config.js';
-import type { ServerDeps } from './context.js';
+import type { ServerDeps, ToolHost } from './context.js';
 import { registerBatch } from './tools/batch.js';
 import { registerAct, registerFind, registerNavigate, registerSnapshot, registerWaitFor } from './tools/browse.js';
 import { registerSessionCreate, registerSessionDiagnostics, registerSessionRelease } from './tools/session.js';
@@ -12,7 +11,7 @@ export interface ToolDefinition {
     name: string;
     /** Profiles this tool belongs to. */
     profiles: ProfileName[];
-    register(server: McpServer, deps: ServerDeps): void;
+    register(host: ToolHost, deps: ServerDeps): void;
 }
 
 const SCRAPE_AND_UP: ProfileName[] = ['scrape', 'browse', 'vision', 'full'];

@@ -1,8 +1,8 @@
 // ABOUTME: The stateful browsing tools — navigate, snapshot, find, act and wait_for — each taking a
 // ABOUTME: session handle and returning a change signal rather than a bare success.
-import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { ServerDeps } from '../context.js';
+import type { ServerDeps, ToolHost } from '../context.js';
 import { ACTIONS, type ActRequest, type BrowserPage } from '../page.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { SnapshotNode } from '../snapshot.js';
@@ -36,8 +36,8 @@ export async function snapshotSection(
     };
 }
 
-export function registerNavigate(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_navigate',
         {
             title: 'Open a URL in a browser session',
@@ -83,8 +83,8 @@ export function registerNavigate(server: McpServer, deps: ServerDeps): void {
     );
 }
 
-export function registerSnapshot(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerSnapshot(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_snapshot',
         {
             title: 'Read the page structure',
@@ -128,8 +128,8 @@ function renderMatches(nodes: SnapshotNode[]): string {
     return renderSnapshot(nodes.map(node => ({ ...node, depth: 0 })));
 }
 
-export function registerFind(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerFind(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_find',
         {
             title: 'Find an element on the page',
@@ -194,8 +194,8 @@ export function registerFind(server: McpServer, deps: ServerDeps): void {
     );
 }
 
-export function registerAct(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerAct(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_act',
         {
             title: 'Interact with the page',
@@ -258,8 +258,8 @@ export function registerAct(server: McpServer, deps: ServerDeps): void {
     );
 }
 
-export function registerWaitFor(server: McpServer, deps: ServerDeps): void {
-    server.registerTool(
+export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
         'steel_wait_for',
         {
             title: 'Wait for something on the page',
