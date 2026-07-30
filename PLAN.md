@@ -5,12 +5,16 @@
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
-**Implementation checkpoint (2026-07-28):** stdio, the twelve-tool core, real-browser E2E and
+**Implementation checkpoint (2026-07-30):** stdio, the twelve-tool core, real-browser E2E and
 legacy/2026-07-28 conformance gates are passing. P2 now has a web-standard `/mcp` boundary with
 request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
 validation. Its in-process hosted runtime shares handles across requests, isolates REST/CDP clients
-by credential, and reclaims a session whose create request disconnects. A multi-replica registry
-backend, rate limiting, telemetry and deployment remain.
+by credential, and reclaims a session whose create request disconnects. The four P2 leftovers have
+landed: a Redis-backed handle registry (`REDIS_URL`), per-principal cost-weighted rate limiting,
+OpenTelemetry with `_meta` trace propagation (`steel-mcp/tracing`), and the MRTR human-in-the-loop
+handoff on login walls and CAPTCHAs. What remains is P3: a hosted production entrypoint (nothing
+constructs `HostedRuntime` in production yet), operator docs for the new env vars
+(`REDIS_URL`, `STEEL_REQUEST_STATE_SECRET`, `OTEL_*`), leak-path metrics, and deployment.
 
 ---
 
@@ -33,7 +37,7 @@ backend, rate limiting, telemetry and deployment remain.
 
 | Thing | Target | Notes |
 |---|---|---|
-| MCP spec | **2026-07-28** primary | Publishes 2026-07-28; RC locked 2026-05-21. Largest revision since launch. 2025-11-25 and 2025-06-18 served via the SDK legacy shim |
+| MCP spec | **2026-07-28** primary | Shipped final 2026-07-28 (RC locked 2026-05-21). Largest revision since launch. 2025-11-25 and 2025-06-18 served via the SDK legacy shim |
 | SDK | `@modelcontextprotocol/server@2.0.0` + `@modelcontextprotocol/node` | v2 went **stable 2.0.0 on 2026-07-27**; the `beta` dist-tag is gone. It is the only line implementing the new wire format. The v1 line still gets maintenance (1.30.0 shipped 2026-07-27) but is frozen at the legacy protocol — do not build on it. Pins are exact |
 | Runtime | **Node ≥20, Zod ≥4.2, `"type": "module"`** | ESM-first with a CJS build available. Painful to retrofit — commit at P0 |
 | Steel access | `steel-sdk@^0.18` **plus a thin typed REST layer** | SDK published 2026-03-16, missing `inactivityTimeout`, `browserMode`, `caCertificates`, and the `/agent-traces`, `/logs`, `/hls`, `/v1/projects` endpoint families |
@@ -41,7 +45,7 @@ backend, rate limiting, telemetry and deployment remain.
 
 **Spec changes that shape this design** (full list in RESEARCH.md §2.1): protocol sessions, `Mcp-Session-Id`, and the `initialize` handshake are removed (SEP-2567/2575); `GET`/`DELETE` on the MCP endpoint answer `405`; SSE resumability and `Last-Event-ID` are gone; `server/discover` is a new MUST; every POST carries `MCP-Protocol-Version` (plus `Mcp-Method`/`Mcp-Name` on calls); results carry required `resultType`, and list results require `ttlMs` + `cacheScope`; Roots, Sampling and Logging are deprecated; Tasks moved out of core into the `io.modelcontextprotocol/tasks` extension (SEP-2663).
 
-> **Verify on the day.** As of 2026-07-27 the versioning page still lists 2025-11-25 as current and `/specification/2026-07-28` 404s; only the `2026-07-28-RC` tag exists. Confirm the final tag before merging this plan.
+> **Verified 2026-07-30.** The spec shipped final on 2026-07-28: `/specification/2026-07-28` and its changelog are live, and Anthropic announced Claude support the same day. One post-RC change to absorb: the new error codes were renumbered into a reserved MCP range (`HeaderMismatch` -32001 → **-32020**, `MissingRequiredClientCapability` -32003 → **-32021**, `UnsupportedProtocolVersion` -32004 → **-32022**). `@modelcontextprotocol/server@2.0.0` ships the final numbering, and our conformance gate passes at both eras against it — nothing in this repo needed to change.
 
 ## 4. Architecture
 
@@ -214,7 +218,8 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 - **P2 — Streamable HTTP** (week 2). Transport, handle registry, reaper, bearer + query-param auth, Origin/Host validation, cost-weighted rate limiting, OpenTelemetry with `_meta` trace propagation. MRTR human-in-the-loop.
 - **P3 — Hosted** (week 3). Staging, leak-path metrics and alerting, soak test, then `mcp.steel.dev`.
 - **P4 — Distribution.** Official Registry record (both `remotes[]` and `packages[]`; no OAuth needed, and it transitively feeds the GitHub registry → VS Code gallery), `mcp-publisher` wired into release CI, README to the Playwright MCP bar with one-click badges, **the published token-economics table**, self-hosted Claude plugin marketplace, MCPB bundle → Smithery + Claude Desktop, Cursor Marketplace.
-- **P5 — Gated on OAuth.** Anthropic Connectors Directory, OpenAI Plugins Directory. Then Tasks extension when the SDK ships it, MCP Apps live-session-viewer UI, masking-based injection defense.
+- **P4.5 — MCP Apps live-session viewer.** Scoped in §14.A. No OAuth dependency, so it rides alongside P4 distribution rather than behind it — and it is the distribution asset ("watch your agent browse, inline in the chat").
+- **P5 — Gated on OAuth.** Anthropic Connectors Directory, OpenAI Plugins Directory. Then the Tasks extension when the SDK ships server-side support (§14.B), and masking-based injection defense.
 
 **Worth doing early, cheaply:** document "Playwright MCP / chrome-devtools-mcp pointed at a Steel CDP URL" as a supported path. It costs a README section, covers the power-user surface we're deliberately not building, and hedges the snapshot-quality risk. And consider a **keyless, per-IP-rate-limited `scrape` profile** — those tools consume no session-minutes by construction, Firecrawl proved the funnel, and no browser-infra competitor offers it.
 
@@ -226,18 +231,123 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 
 | # | Question | Who answers |
 |---|---|---|
-| 1 | Did 2026-07-28 ship final, unchanged from the RC? | Check the spec repo for a non-RC tag **tomorrow**. Every §3 assumption rides on this |
 | 2 | **Can Steel bill active-seconds-only, or snapshot-and-suspend an idle session?** | Steel platform/billing, **this week**. Kernel's Standby Mode charges zero while idle — structurally better than any reaper. If we can match it the whole leak risk class collapses; if not, they market it against us |
 | 3 | Does Steel have an OAuth AS, and does it support CIMD? | Steel platform. Gates both consumer directories. Building DCR would be building a deprecated mechanism |
 | 4 | Is Anthropic's `static_headers` beta available to us? | `mcp-review@anthropic.com`. The only non-OAuth path into Claude's connector infra, but org-admin-scoped |
 | 5 | Is the reported Claude Code bug real — custom headers sent on connect but not forwarded on tool-call POSTs? | Reproduce. If real, header auth is fragile on our best host and the query-param fallback becomes load-bearing |
-| 6 | Does `@modelcontextprotocol/server@2` go stable tomorrow and pass conformance at both eras? | npm dist-tags + run the suite. We're scaffolding on a beta |
 | 7 | **Is our a11y snapshot good enough that a host's model can drive it?** | Build and measure in P1 against a hostile corpus. **The highest technical risk here** — the entire "deterministic, no LLM" differentiation rests on it |
 | 8 | Which `region` values are actually valid? | Three Steel sources disagree. Pass through as a string, let the API validate |
 | 11 | **Does a Launch or Scale key get session/concurrency limits back from `GET /v1/details`?** | Steel platform, or a smoke run with a non-admin key. An admin key returns only `{"plan":"admin"}`, so we cannot currently discover a caller's real cap and fall back to a conservative 5 min |
 | 9 | Should `/v1/search` be promoted from the OSS image to Cloud? | Steel platform. Agents constantly want search; until then we can't offer it |
 | 10 | What is `steel-computer` (private repo, "persistent computers for AI agents")? | Steel product. An adjacent surface this may need to accommodate |
+| 13 | When does server-side support for the redesigned `io.modelcontextprotocol/tasks` extension ship in an official SDK? | Watch the SDK releases and the ext-tasks repo. Gates §14.B — SDK 2.0.0 carries only the legacy experimental task shim |
+| 14 | **Can a session be created with a read-only or expiring player URL?** The `debugUrl` player is an unauthenticated bearer capability that is *interactive by default* (`debugConfig.interactive: true`), and `CreateSessionRequest` (src/core/steel/types.ts) exposes no field to turn that off — so a read-only viewer is not currently expressible through this repo's client | Steel platform. Gates handing `debugUrl` to anything beyond the MRTR elicitation flow; a leaked player URL is a drivable, possibly logged-in browser |
+
+### Resolved
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Did 2026-07-28 ship final, unchanged from the RC? | **Yes, shipped 2026-07-28** — with one post-RC delta: error codes renumbered into the reserved `-32020`…`-32099` range (see §3 note). Verified 2026-07-30 |
+| 6 | Does `@modelcontextprotocol/server@2` go stable and pass conformance at both eras? | **Yes** — 2.0.0 is the `latest` dist-tag, treats 2026-07-28 as its native protocol with the final error-code numbering, and our conformance gate passes 2 legacy + 5 modern scenarios against it. Verified 2026-07-30 |
+| 12 | Can the Steel live viewer be embedded in an MCP-app iframe? | **Yes, unconditionally at the HTTP layer** — live probe 2026-07-30 (one Launch session, released, 0 credits). `debugUrl` (`api.steel.dev/v1/sessions/{id}/player`) is a self-contained WebRTC player *built* for embedding: no `X-Frame-Options`, no CSP on either Steel origin, documented `steel:*` postMessage events (`steel:ready`, `steel:autoplay-blocked`, …) and `hideOverlay`/`hideInteractionDialog` params. The app shell needs only `frame-src https://api.steel.dev`. **`sessionViewerUrl` is the wrong URL for embedding** — it is the login-walled dashboard SPA. Residual risks are host-side (autoplay policy, nested-sandbox flags) plus the new open question 14 |
+
+## 14. Extension track — MCP Apps and Tasks
+
+Both graduated to official extensions with 2026-07-28. Negotiation is uniform and per-request: the
+client declares support under `extensions` in `_meta["io.modelcontextprotocol/clientCapabilities"]`;
+the server advertises under `capabilities.extensions` in `server/discover`. Both are opt-in and
+degrade gracefully — a non-supporting host sees exactly today's behavior. Facts verified 2026-07-30
+against the extension specs and the installed SDK.
+
+### 14.A MCP Apps (`io.modelcontextprotocol/ui`) — inline live session viewer
+
+**What ships:** `steel_session_create` declares `_meta.ui.resourceUri: "ui://steel/session-viewer"`.
+The server registers that `ui://` resource: one static HTML shell (`text/html;profile=mcp-app`,
+self-contained, no external scripts) that the host renders in a sandboxed iframe. The shell reads
+the session's **player URL (`debugUrl`, `api.steel.dev/v1/sessions/{id}/player`)** from the tool
+result the host pushes to it over the postMessage bridge and embeds the live player — **not**
+`sessionViewerUrl`, which is the login-walled dashboard SPA and renders a blank login page in an
+iframe. The human watches — and on a login wall or CAPTCHA, *acts in* — the agent's browser without
+leaving the conversation. This is the §9 human-in-the-loop feature with the last mile built in:
+MRTR `input_required` points at a viewer that is already rendered inline.
+
+**Why it goes first:** everything it needs exists today. The SDK's capability schema carries
+`extensions`; `@modelcontextprotocol/ext-apps` (1.7.5) provides the in-iframe `App` class; client
+adoption is the broadest of any extension (Claude web/Desktop, ChatGPT, VS Code Copilot, M365
+Copilot, Cursor, Goose, Postman, MCPJam — RESEARCH.md client matrix). No OAuth, no SDK gap, no new
+protocol machinery.
+
+**Work items, in order:**
+
+1. ~~Embeddability probe~~ **Done 2026-07-30** (resolved question 12): the player is embed-ready —
+   no framing blocks on any Steel origin, `steel:*` postMessage lifecycle events, `hideOverlay`/
+   `hideInteractionDialog` params. The CDP-screencast fallback is dead; do not build it.
+2. Declare `capabilities.extensions["io.modelcontextprotocol/ui"]` and add the `resources`
+   capability (currently tools-only). The shell is org-independent and static: serve it with
+   `ttlMs` = 1h, `cacheScope: 'public'` — no per-session data may ever be baked into it.
+   Session-specific state (the player URL) arrives only via the tool-result push.
+3. Author the shell: vanilla JS + `App` class, `_meta.ui.csp` of **`frame-src
+   https://api.steel.dev` only** (the player's WebSocket/ICE/Sentry traffic runs inside the
+   cross-origin child and is not governed by our shell's CSP), no tool-call permissions in v1
+   (pure display), viewport-responsive. Wire the player's `steel:ready` and
+   `steel:autoplay-blocked` events into the shell's loading/error states — hosts with strict
+   autoplay policies otherwise show a frozen frame with no diagnosable cause. Nested-sandbox
+   flags are the other host-side risk: test that the host's iframe permits nested framing +
+   scripts before blaming Steel.
+4. Add `_meta.ui.resourceUri` to `steel_session_create`. Text content unchanged — fallback for
+   non-supporting hosts is automatic. Later candidates once the pattern is proven:
+   `steel_session_diagnostics` (timeline dashboard), `steel_screenshot` (zoomable image).
+5. Security review against §9: page-derived text never flows into the template; the untrusted-fence
+   discipline is unchanged (the app renders the *browser*, not page text); handle authorization is
+   untouched because the app calls no tools. **Gate on question 14 before shipping:** the player
+   URL is an unauthenticated bearer capability, interactive by default, and our Steel client
+   cannot currently request a read-only session — decide deliberately who gets handed a drivable
+   browser URL.
+6. Tests per §10: unit (resource registration, `_meta` present, shell contains no dynamic
+   interpolation), integration (`server/discover` advertises the extension; `resources/read` serves
+   the right MIME and cache hints), budget (**`_meta.ui` adds bytes to every `tools/list` — the
+   budget gate must price it**), manual E2E on MCPJam then Claude Desktop. Conformance has no apps
+   scenarios yet; baseline unaffected.
+
+**Estimate:** 3–5 days after the probe, most of it in the shell and host-quirk testing.
+
+### 14.B Tasks (`io.modelcontextprotocol/tasks`) — durable handles for long operations
+
+**What it would ship:** `steel_batch` returns `resultType: "task"` with a `taskId` when a run will
+outlive host timeouts; the client polls `tasks/get`; a login wall mid-batch moves the task to
+`input_required` carrying an elicitation the client answers via `tasks/update` — pointing the human
+at the §14.A viewer. `tasks/cancel` maps to releasing the drive loop, never silently to releasing
+the session.
+
+**Gate, verified:** SDK 2.0.0 ships only the *legacy* experimental task plumbing (`tasks/result`,
+`tasks/list` — kept for the 2025-11-25 shim). The redesigned extension (polling `tasks/get`, new
+`tasks/update`, `tasks/list` removed) has no server-side SDK support and no published ext package.
+Hand-rolling the wire format now means owning details the SDK will ship helpers for weeks later.
+**Decision: stay gated on the SDK (open question 13); bank the design now.**
+
+**Design decisions banked (cheap while waiting, expensive to retrofit):**
+
+- **Task-capable tools:** `steel_batch` only. Single-action tools resolve inside any host timeout;
+  a task handle would add a poll round-trip for nothing.
+- **Spec MUST honored at the call site:** never return a task to a caller whose *current request*
+  didn't declare the extension — checked per request like everything else in the stateless model,
+  never cached from an earlier call.
+- **Task ids are handles and inherit §5 verbatim:** `task_` prefix, ≥128-bit CSPRNG, namespaced by
+  principal, re-authorized against the request's own credential on every `tasks/get`/`update`/
+  `cancel`. A leaked task id must be worth nothing to a stranger.
+- **Store behind the same seam as the handle registry:** in-memory for stdio, shared backend for
+  hosted multi-replica — polls land on any replica. The task record carries the session handle so
+  the reaper and task store cannot disagree about liveness.
+- **TTL discipline:** a task must not outlive the browser it drives. `ttlMs` ≤ the session's
+  remaining hard timeout; a task parked on `input_required` is deliberately *not* exempt from the
+  session clock — the status message states the expiry so the cost of waiting is visible.
+- **Budgets:** a completed task's `result` is a normal `steel_batch` result and obeys §8 budgets;
+  polling responses stay tiny (status, message, `pollIntervalMs`).
+
+**Estimate once the SDK ships:** ~1 week — task state machine + store with full unit coverage,
+integration tests for cross-replica polling and cross-org rejection, and whatever tasks scenarios
+the conformance suite grows (watch it alongside the SDK).
 
 ---
 
-*Branch `niko/steel-mcp-server-v2`. Protocol, SDK and competitor facts verified 2026-07-27; see RESEARCH.md for sourcing and for the claims the fact-checkers refuted.*
+*Branch `niko/steel-mcp-server-v2`. Protocol, SDK and competitor facts verified 2026-07-27, spec-final and extension facts 2026-07-30; see RESEARCH.md for sourcing and for the claims the fact-checkers refuted.*

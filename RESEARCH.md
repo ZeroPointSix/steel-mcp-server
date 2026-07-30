@@ -156,7 +156,7 @@ Worth stating so nobody re-litigates them:
 - **Keyless top-of-funnel.** Firecrawl proved the model. Steel's stateless scrape tools consume no session-minutes by construction — that is exactly the surface you can give away at a per-IP rate limit. No browser-infra competitor does this.
 - **Published, measured token economics.** The incumbents' #1 complaint for eight months, unanswered. It's an afternoon of work to produce the table and it's a number, not a claim.
 - **MCP Apps live session viewer.** Eleven hosts render `ui://` resources today, including Claude, ChatGPT, Cursor, VS Code and Goose. Steel's product *is* watching a browser work. Nobody in this category has shipped it.
-- **MRTR human-in-the-loop.** Cloudflare and Human Browser market takeover; the new spec hands you the mechanism (`inputRequired.elicitUrl` → Steel session viewer); Steel already has `debugUrl?interactive=true&showControls=true`. This is arguably the highest-value thing a *browser* MCP server can do that a scraper API cannot.
+- **MRTR human-in-the-loop.** Cloudflare and Human Browser market takeover; the new spec hands you the mechanism (`inputRequired.elicitUrl` → Steel session viewer); Steel already ships an embed-ready WebRTC player at `debugUrl` (`/v1/sessions/{id}/player`) with a parent-window postMessage API. *Correction (live probe, 2026-07-30): the `?interactive=true&showControls=true` params an earlier draft cited do not exist — the player reads only `hideOverlay` and `hideInteractionDialog`; interactivity comes from the session's server-side `debugConfig.interactive`, which is **on by default**. The player URL is an unauthenticated bearer capability: anyone holding it can watch and, with the default config, drive the browser.* This is arguably the highest-value thing a *browser* MCP server can do that a scraper API cannot.
 
 **Two strategic reads worth internalizing:**
 
@@ -342,7 +342,7 @@ Adopt **MRTR** rather than inventing something. When a session hits a login wall
 inputRequired({
   inputRequests: { solve: inputRequired.elicitUrl({
       message: 'Solve the CAPTCHA in the live browser, then retry',
-      url: <Steel debugUrl?interactive=true&showControls=true> }) },
+      url: <Steel debugUrl — /v1/sessions/{id}/player; interactivity is the session's debugConfig, not a URL param> }) },
   requestState: await codec.mint({ org, handle, exp })
 })
 ```
