@@ -52,6 +52,30 @@ const DEFAULT_KEY_PREFIX = 'steel-mcp';
  */
 const RECORD_GRACE_MS = 86_400_000;
 
+/**
+ * How long a `lastUsedAt` or `awaitingInputUntil` key lives.
+ *
+ * Its expiry is not a deadline anything depends on: a missing `lastUsedAt` means nothing has
+ * touched the handle for this long, so falling back to `createdAt` reports it as idle, which it
+ * demonstrably is. That holds for any session duration, so this needs no relation to one.
+ */
+const MUTABLE_FIELD_TTL_MS = RECORD_GRACE_MS;
+
+/**
+ * The immutable part of a record, which is the only part stored as JSON.
+ *
+ * `lastUsedAt` and `awaitingInputUntil` are deliberately absent: they change after creation, and a
+ * whole-record rewrite is what made a concurrent touch able to undo a release or a handoff.
+ */
+type StoredRecord = Omit<HandleRecord, 'lastUsedAt' | 'awaitingInputUntil'>;
+
+/** Reads a timestamp key, treating anything unparseable as absent. */
+function readTimestamp(raw: string | null): number | undefined {
+    if (raw === null) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /** Handle registry over a shared Redis, so any replica can serve a handle any other replica minted. */
 export class RedisHandleRegistry implements HandleRegistry {
     private readonly commands: RedisCommands;
@@ -69,6 +93,22 @@ export class RedisHandleRegistry implements HandleRegistry {
         return `${this.prefix}:handle:${handle}`;
     }
 
+    /**
+     * The two keys holding the fields that change after creation.
+     *
+     * Each is owned by exactly one operation — `touch` writes the first, `awaitInput` the second —
+     * so every mutation is a single-key command whose value is computed from the clock rather than
+     * from a record read a moment earlier. A handle is base64url, so neither suffix can collide
+     * with another handle's record key.
+     */
+    private usedKey(handle: string): string {
+        return `${this.recordKey(handle)}:used`;
+    }
+
+    private awaitKey(handle: string): string {
+        return `${this.recordKey(handle)}:await`;
+    }
+
     /** Index of one principal's handles, so a count or a list never scans another tenant's records. */
     private principalKey(principal: string): string {
         return `${this.prefix}:principal:${principal}`;
@@ -79,19 +119,43 @@ export class RedisHandleRegistry implements HandleRegistry {
         return `${this.prefix}:live`;
     }
 
+    /** Reassembles a record from its immutable JSON and the two keys holding its mutable fields. */
     private async read(handle: string): Promise<HandleRecord | null> {
-        const raw = await this.commands.get(this.recordKey(handle));
+        // Issued together so reading three keys costs one round trip rather than three.
+        const [raw, used, awaiting] = await Promise.all([
+            this.commands.get(this.recordKey(handle)),
+            this.commands.get(this.usedKey(handle)),
+            this.commands.get(this.awaitKey(handle)),
+        ]);
+        // The record is what decides whether the handle exists at all; the other two are only ever
+        // read for a handle that does, so a stray one left by a released handle changes nothing.
         if (raw === null) return null;
+
+        let stored: StoredRecord;
         try {
-            return JSON.parse(raw) as HandleRecord;
+            stored = JSON.parse(raw) as StoredRecord;
         } catch {
             // A record we cannot read is a record we cannot authorise, so it is answered exactly
             // like an unknown handle. The next sweep clears the key out.
             return null;
         }
+
+        return {
+            ...stored,
+            // No use recorded means none since creation — see MUTABLE_FIELD_TTL_MS for why an
+            // expired key is the same answer.
+            lastUsedAt: readTimestamp(used) ?? stored.createdAt,
+            awaitingInputUntil: readTimestamp(awaiting),
+        };
     }
 
-    private async write(record: HandleRecord): Promise<void> {
+    /**
+     * Writes the immutable record. Called once per handle, by `create` and nothing else.
+     *
+     * That it is written exactly once is what makes a released handle unresurrectable: no later
+     * operation can put the record back after a `release` has deleted it.
+     */
+    private async write(record: StoredRecord): Promise<void> {
         // Never below the grace period: a handle that is already long expired still needs a record
         // to release, and Redis rejects a non-positive expiry outright.
         const ttlMs = Math.max(record.expiresAt - this.now().getTime() + RECORD_GRACE_MS, RECORD_GRACE_MS);
@@ -99,14 +163,16 @@ export class RedisHandleRegistry implements HandleRegistry {
     }
 
     /**
-     * Removes a record and both of its index entries.
+     * Removes a record, its two mutable-field keys and both of its index entries.
      *
      * Returns whether this caller was the one that removed the record. Two replicas sweeping at
-     * once both see the handle, so `del` deciding the winner is what keeps the release counters
-     * honest without a distributed lock.
+     * once both see the handle, so `del` of the record deciding the winner is what keeps the
+     * release counters honest without a distributed lock — which is also why it goes first.
      */
     private async forget(principal: string, handle: string): Promise<boolean> {
         const removed = await this.commands.del(this.recordKey(handle));
+        await this.commands.del(this.usedKey(handle));
+        await this.commands.del(this.awaitKey(handle));
         await this.commands.srem(this.principalKey(principal), handle);
         await this.commands.srem(this.liveKey, `${principal}:${handle}`);
         return removed > 0;
@@ -114,22 +180,25 @@ export class RedisHandleRegistry implements HandleRegistry {
 
     async create(input: CreateHandleInput): Promise<HandleRecord> {
         const now = this.now().getTime();
-        const record: HandleRecord = {
+        const stored: StoredRecord = {
             handle: mintHandle(),
             steelSessionId: input.steelSessionId,
             principal: input.principal,
             createdAt: now,
-            lastUsedAt: now,
             expiresAt: input.expiresAt,
             viewerUrl: input.viewerUrl,
+            // The live-player URL the human-in-the-loop handoff hands a person. Without it every
+            // login wall and CAPTCHA degrades to an error no one can act on.
+            debugUrl: input.debugUrl,
             mitigation: input.mitigation ?? {},
         };
         // The record is written before it is indexed, so an index entry never names a handle that
         // cannot be read back and released.
-        await this.write(record);
-        await this.commands.sadd(this.principalKey(record.principal), record.handle);
-        await this.commands.sadd(this.liveKey, `${record.principal}:${record.handle}`);
-        return record;
+        await this.write(stored);
+        await this.commands.sadd(this.principalKey(stored.principal), stored.handle);
+        await this.commands.sadd(this.liveKey, `${stored.principal}:${stored.handle}`);
+        // No `lastUsedAt` key is written: at creation it is `createdAt`, which is what `read` reports.
+        return { ...stored, lastUsedAt: now };
     }
 
     async resolve(handle: string, principal: string): Promise<HandleRecord> {
@@ -145,18 +214,26 @@ export class RedisHandleRegistry implements HandleRegistry {
         return record;
     }
 
+    /**
+     * Records a real call against the handle.
+     *
+     * Deliberately reads nothing. Writing a value derived from a record read a round trip earlier
+     * is what let a touch put back a record another replica had just released, and undo a handoff
+     * another replica had just registered. Both writes here are single-key and unconditional, so
+     * concurrent operations resolve in the order Redis runs them, exactly as they do in one process.
+     *
+     * The cost is that an unknown handle leaves a stray key behind rather than doing nothing. No
+     * caller reaches this without a successful `resolve` first, and the key expires by itself.
+     */
     async touch(handle: string): Promise<void> {
-        const record = await this.read(handle);
-        if (!record) return;
+        await this.commands.set(this.usedKey(handle), String(this.now().getTime()), MUTABLE_FIELD_TTL_MS);
         // A real call arrived, so whatever a person was asked to do is over as far as the idle
-        // clock is concerned; normal accounting resumes even if the handoff is re-issued below.
-        await this.write({ ...record, lastUsedAt: this.now().getTime(), awaitingInputUntil: undefined });
+        // clock is concerned; normal accounting resumes even if the handoff is re-issued after.
+        await this.commands.del(this.awaitKey(handle));
     }
 
     async awaitInput(handle: string, untilMs: number): Promise<void> {
-        const record = await this.read(handle);
-        if (!record) return;
-        await this.write({ ...record, awaitingInputUntil: untilMs });
+        await this.commands.set(this.awaitKey(handle), String(untilMs), MUTABLE_FIELD_TTL_MS);
     }
 
     /**

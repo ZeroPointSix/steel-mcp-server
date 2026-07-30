@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { SteelToolError } from '../../src/core/errors.js';
 import { principalFromCredential, type RegistryDeps } from '../../src/core/registry.js';
 import { RedisHandleRegistry } from '../../src/core/registry-redis.js';
-import { FakeRedis } from '../helpers/fake-redis.js';
+import { FakeRedis, GatedRedis } from '../helpers/fake-redis.js';
 
 const ORG_A = principalFromCredential('ste-key-a');
 const ORG_B = principalFromCredential('ste-key-b');
@@ -527,6 +527,42 @@ describe('RedisHandleRegistry across replicas', () => {
         expect(second.released, 'the second replica released a session the first had already released').toEqual([]);
     });
 
+    it('does not let a touch already in flight put back a handle another replica released', async () => {
+        // A resurrected record is worse than a leaked key: `release` has already removed both index
+        // entries, so nothing lists it and no sweep on any replica will ever visit it again, while
+        // it keeps resolving as a live handle whose browser Steel has already torn down.
+        const clock = testClock();
+        const store = new FakeRedis({ now: clock.now });
+        const gated = new GatedRedis(store);
+        const releasing = harness({ store, clock });
+        const touching = new RedisHandleRegistry({
+            commands: gated,
+            now: clock.now,
+            releaseSteelSession: async () => {},
+        });
+        const { handle } = await releasing.registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 600_000,
+        });
+
+        // The touch sees a live handle, and is caught before it has finished writing.
+        gated.hold(1);
+        const pending = touching.touch(handle);
+        expect(await releasing.registry.release(handle, ORG_A, 'explicit')).toBeTruthy();
+        gated.release();
+        await pending;
+
+        const error = await captureError(releasing.registry.resolve(handle, ORG_A));
+        expect(error.code, 'the released handle resolved again').toBe('not_found');
+        expect(await releasing.registry.list(ORG_A)).toEqual([]);
+        expect(await releasing.registry.reap({ idleMs: 0 })).toBe(0);
+        expect(releasing.released, 'the session was released twice').toEqual(['steel-1']);
+        // Nothing that could be read back as a handle survives: the release swept the last-use key
+        // the touch had already written, and one written after a sweep expires on its own.
+        expect(store.valueKeys()).not.toContain(`steel-mcp:handle:${handle}`);
+    });
+
     it('counts one release when two replicas sweep the same handle at once', async () => {
         // No distributed lock: whichever replica deletes the record wins, and the loser must not
         // count a release it did not perform.
@@ -633,6 +669,44 @@ describe('RedisHandleRegistry.awaitInput', () => {
 
         expect(await registry.reap({ idleMs: 120_000 })).toBe(1);
         expect(released).toEqual(['steel-1']);
+    });
+
+    it('does not roll back a touch that landed while the handoff was being registered', async () => {
+        // The write that lost this update was a whole-record rewrite built from a read taken before
+        // the touch. Both operations now write only the one key they own, so neither can undo the
+        // other, and the order they settle in stops mattering.
+        const clock = testClock();
+        const store = new FakeRedis({ now: clock.now });
+        const gated = new GatedRedis(store);
+        const touching = harness({ store, clock });
+        const awaiting = new RedisHandleRegistry({
+            commands: gated,
+            now: clock.now,
+            releaseSteelSession: async () => {},
+        });
+        const { handle } = await touching.registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 900_000,
+        });
+
+        clock.advance(100_000);
+        // Whatever the handoff reads, it reads before the touch; whatever it writes, it writes after.
+        gated.hold(1);
+        const pending = awaiting.awaitInput(handle, clock.ms + 60_000);
+        await touching.registry.touch(handle);
+        const touchedAt = clock.ms;
+        gated.release();
+        await pending;
+
+        const record = await touching.registry.resolve(handle, ORG_A);
+        expect(record.lastUsedAt, 'the handoff write rolled the last use back to before the touch').toBe(touchedAt);
+
+        // The consequence of that rollback: idleness measured from the older timestamp reclaims the
+        // slot while the session is in active use.
+        clock.advance(90_000);
+        expect(await touching.registry.reap({ idleMs: 120_000 })).toBe(0);
+        expect(touching.released).toEqual([]);
     });
 
     it('defers the other replica reaper too, because the mark lives in the shared record', async () => {
