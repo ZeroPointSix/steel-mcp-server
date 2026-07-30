@@ -49,8 +49,13 @@ export interface HandleRegistry {
 }
 
 export interface RegistryDeps {
-    /** Called exactly once per handle, on whichever release path fires first. */
-    releaseSteelSession(steelSessionId: string): Promise<void>;
+    /**
+     * Called exactly once per handle, on whichever release path fires first.
+     *
+     * The record's principal comes along because releasing a Steel session needs that principal's
+     * credential, and a replica that did not create the session has no other way to find it.
+     */
+    releaseSteelSession(steelSessionId: string, principal: string): Promise<void>;
     /** Reaper failures are reported here rather than thrown, so one bad session cannot stall a sweep. */
     onReapError?: ((error: unknown) => void) | undefined;
 }
@@ -70,7 +75,27 @@ const NOT_FOUND_MESSAGE =
     'No live browser session for that session_id. It may have been released, may have expired, ' +
     'or may belong to a different credential. Call steel_session_create to start a new one.';
 
-function mintHandle(): string {
+/**
+ * The one error for an unknown handle and for someone else's handle.
+ *
+ * Every backend raises exactly this, so the error cannot be used to probe for the existence of
+ * other people's sessions.
+ */
+export function handleNotFoundError(): SteelToolError {
+    return new SteelToolError(NOT_FOUND_MESSAGE, { code: 'not_found' });
+}
+
+/** The distinct error for a handle that is ours but has passed its hard deadline. */
+export function handleExpiredError(handle: string): SteelToolError {
+    return new SteelToolError(
+        'That browser session reached its hard timeout and has been released by Steel. ' +
+            'Call steel_session_create to start a new one.',
+        { code: 'session_expired', details: { handle } }
+    );
+}
+
+/** Mints an opaque handle. Shared by every backend so entropy and prefix never diverge. */
+export function mintHandle(): string {
     return `sess_${randomBytes(16).toString('base64url')}`;
 }
 
@@ -102,14 +127,10 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         // A handle belonging to another principal is answered exactly like an unknown handle,
         // so the error cannot be used to probe for the existence of other people's sessions.
         if (!record || record.principal !== principal) {
-            throw new SteelToolError(NOT_FOUND_MESSAGE, { code: 'not_found' });
+            throw handleNotFoundError();
         }
         if (record.expiresAt <= Date.now()) {
-            throw new SteelToolError(
-                'That browser session reached its hard timeout and has been released by Steel. ' +
-                    'Call steel_session_create to start a new one.',
-                { code: 'session_expired', details: { handle } }
-            );
+            throw handleExpiredError(handle);
         }
         return record;
     }
@@ -130,9 +151,9 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         const record = this.records.get(handle);
         if (!record) return null;
         if (record.principal !== principal) {
-            throw new SteelToolError(NOT_FOUND_MESSAGE, { code: 'not_found' });
+            throw handleNotFoundError();
         }
-        await this.deps.releaseSteelSession(record.steelSessionId);
+        await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
         this.records.delete(handle);
         this.counts[path] += 1;
         return record;
@@ -155,7 +176,7 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             if (!idle && !expired) continue;
 
             try {
-                await this.deps.releaseSteelSession(record.steelSessionId);
+                await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
                 this.records.delete(record.handle);
                 this.counts.reaper += 1;
                 reaped += 1;

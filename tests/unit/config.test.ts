@@ -1,7 +1,13 @@
 // ABOUTME: Unit tests for environment configuration: base URL normalisation, deployment detection
 // ABOUTME: and the CDP connect URL, which must always carry both apiKey and sessionId on cloud.
 import { describe, expect, it } from 'vitest';
-import { buildCdpUrl, loadConfig, normalizeBaseUrl, resolveInactivityTimeout } from '../../src/core/config.js';
+import {
+    buildCdpUrl,
+    loadConfig,
+    loadRegistryConfig,
+    normalizeBaseUrl,
+    resolveInactivityTimeout,
+} from '../../src/core/config.js';
 
 describe('normalizeBaseUrl', () => {
     it('strips a trailing /v1 so the CLI-style and SDK-style values agree', () => {
@@ -133,5 +139,34 @@ describe('buildCdpUrl', () => {
 
     it('refuses to build a URL without a session id, which would silently start a billed session', () => {
         expect(() => buildCdpUrl({ deployment: 'cloud', apiKey: 'k', connectUrl: 'wss://c' }, '')).toThrow(/sessionId/);
+    });
+});
+
+describe('loadRegistryConfig', () => {
+    it('keeps handle records in this process when REDIS_URL is absent or blank', () => {
+        expect(loadRegistryConfig({}).redisUrl).toBeUndefined();
+        expect(loadRegistryConfig({ REDIS_URL: '   ' }).redisUrl).toBeUndefined();
+    });
+
+    it('accepts a redis and a rediss URL', () => {
+        expect(loadRegistryConfig({ REDIS_URL: ' redis://cache:6379 ' }).redisUrl).toBe('redis://cache:6379');
+        expect(loadRegistryConfig({ REDIS_URL: 'rediss://cache:6380' }).redisUrl).toBe('rediss://cache:6380');
+    });
+
+    it('namespaces keys so one store can serve more than one deployment', () => {
+        expect(loadRegistryConfig({}).keyPrefix).toBe('steel-mcp');
+        expect(loadRegistryConfig({ REDIS_KEY_PREFIX: 'staging' }).keyPrefix).toBe('staging');
+    });
+
+    it('rejects a URL that is not Redis, rather than handing a password to whatever answers', () => {
+        for (const value of ['https://cache:6379', 'cache:6379', 'not a url']) {
+            expect(() => loadRegistryConfig({ REDIS_URL: value }), `${value} was accepted`).toThrow(/rediss?:\/\//);
+        }
+    });
+
+    it('never echoes the URL, which usually carries a password', () => {
+        expect(() => loadRegistryConfig({ REDIS_URL: 'https://user:hunter2@cache:6379' })).toThrow(
+            expect.objectContaining({ message: expect.not.stringContaining('hunter2') })
+        );
     });
 });

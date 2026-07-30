@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import { principalFromCredential } from '../../src/core/registry.js';
 import type { CreateSessionRequest, SteelSession } from '../../src/core/steel/types.js';
-import { HostedRuntime } from '../../src/hosted-runtime.js';
+import { createHandleRegistryBackend, HostedRuntime } from '../../src/hosted-runtime.js';
 import { createSteelHttpHandler, type RequestDepsInput } from '../../src/http.js';
+import { FakeRedis } from '../helpers/fake-redis.js';
 import { FakeSteelApi, testDeps } from '../helpers/fakes.js';
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
@@ -242,6 +243,66 @@ describe('hosted HTTP session isolation', () => {
             toolRequest('ste-owner', 'steel_session_release', { session_id: sessionId })
         );
         expect(releaseResponse.status).toBe(200);
+    });
+
+    it('serves a handle from a replica that did not create it, with no sticky routing', async () => {
+        // Two replicas behind round-robin, sharing one handle store: the second request lands
+        // somewhere else and must still find the session, then release it through its own client.
+        const store = new FakeRedis();
+        const backend = createHandleRegistryBackend({
+            env: { REDIS_URL: 'redis://cache:6379' },
+            connect: () => ({ commands: store, close: async () => {} }),
+            onError: error => {
+                throw error;
+            },
+        });
+
+        function replica() {
+            const api = new FakeSteelApi();
+            const runtime = new HostedRuntime({
+                configForCredential: credential => loadConfig({ STEEL_API_KEY: credential }),
+                createApi: () => api,
+                createPool: () => testDeps().pool,
+                createRegistry: backend.createRegistry,
+            });
+            const handler = createSteelHttpHandler({
+                allowedHostnames: ['mcp.steel.dev'],
+                allowedOriginHostnames: ['steel.dev'],
+                depsForRequest: runtime.depsForRequest,
+            });
+            openHandlers.push({
+                close: async () => {
+                    await handler.close();
+                    await runtime.close();
+                },
+            });
+            return { api, runtime, handler };
+        }
+
+        const first = replica();
+        const second = replica();
+
+        const createdResponse = await first.handler.fetch(toolRequest('ste-a', 'steel_session_create', {}));
+        const created = (await createdResponse.json()) as { result: { structuredContent?: { session_id?: string } } };
+        const sessionId = created.result.structuredContent?.session_id;
+        expect(sessionId).toMatch(/^sess_/);
+        expect(first.api.created).toHaveLength(1);
+
+        const elsewhere = await second.handler.fetch(
+            toolRequest('ste-a', 'steel_session_diagnostics', { session_id: sessionId })
+        );
+        const diagnostics = (await elsewhere.json()) as { result: { isError?: boolean } };
+        expect(diagnostics.result.isError, 'the second replica could not see the handle').not.toBe(true);
+
+        const releaseResponse = await second.handler.fetch(
+            toolRequest('ste-a', 'steel_session_release', { session_id: sessionId })
+        );
+        expect(releaseResponse.status).toBe(200);
+        expect(second.api.released).toEqual([first.api.created[0]?.sessionId]);
+        expect(first.api.released, 'the creating replica released it as well').toEqual([]);
+        expect(await first.runtime.registry.countLive(principalFromCredential('ste-a'))).toBe(0);
+
+        await backend.close();
     });
 
     it('releases a session when the creating HTTP request disconnects after Steel accepted it', async () => {

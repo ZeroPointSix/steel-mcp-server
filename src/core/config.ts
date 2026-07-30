@@ -115,6 +115,40 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
     };
 }
 
+/** Where handle records live, which is what decides whether replicas can serve each other's handles. */
+export interface RegistryConfig {
+    /** Absent means records stay in this process, which is correct for exactly one replica. */
+    redisUrl: string | undefined;
+    /** Key namespace, so one store can hold more than one deployment's records. */
+    keyPrefix: string;
+}
+
+const DEFAULT_REGISTRY_KEY_PREFIX = 'steel-mcp';
+
+/**
+ * Reads the handle-registry backend from the environment.
+ *
+ * The URL is checked but never echoed: it usually carries a password, and an unusable value must
+ * fail here rather than send that password to whatever happens to answer.
+ */
+export function loadRegistryConfig(env: Record<string, string | undefined>): RegistryConfig {
+    const redisUrl = env.REDIS_URL?.trim() || undefined;
+    if (redisUrl !== undefined) {
+        const protocol = URL.canParse(redisUrl) ? new URL(redisUrl).protocol : undefined;
+        if (protocol !== 'redis:' && protocol !== 'rediss:') {
+            throw new Error(
+                'REDIS_URL must be a redis:// or rediss:// URL. Its value is not shown here because ' +
+                    'it usually contains a password.'
+            );
+        }
+    }
+
+    return {
+        redisUrl,
+        keyPrefix: env.REDIS_KEY_PREFIX?.trim() || DEFAULT_REGISTRY_KEY_PREFIX,
+    };
+}
+
 /**
  * The smallest idle timeout worth sending. Below this a session would be reclaimed faster than a
  * model can take its next turn, so the hard timeout is left to do the work on its own.
