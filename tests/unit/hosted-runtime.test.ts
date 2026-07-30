@@ -1,12 +1,14 @@
-// ABOUTME: Unit tests for the hosted dependency runtime: clients are reused within one principal,
-// ABOUTME: isolated across credentials, budgets are per-principal, and releases route to their owner.
+// ABOUTME: Unit tests for the hosted dependency runtime: clients reused per principal and isolated
+// ABOUTME: across credentials, per-principal budgets, owner-routed releases, and the registry backend.
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import type { SessionPool } from '../../src/core/context.js';
 import type { BrowserPage } from '../../src/core/page.js';
 import { DEFAULT_RATE_LIMIT_POLICY, RATE_LIMIT_NAME, toolCost } from '../../src/core/rate-limit.js';
-import { principalFromCredential } from '../../src/core/registry.js';
-import { HostedRuntime } from '../../src/hosted-runtime.js';
+import { InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
+import { RedisHandleRegistry } from '../../src/core/registry-redis.js';
+import { createHandleRegistryBackend, HostedRuntime } from '../../src/hosted-runtime.js';
+import { FakeRedis } from '../helpers/fake-redis.js';
 import { FakeSteelApi } from '../helpers/fakes.js';
 
 class RecordingPool implements SessionPool {
@@ -31,7 +33,13 @@ function input(credential: string) {
     };
 }
 
-function harness() {
+interface HarnessOptions {
+    /** Shared store, so two harnesses become two replicas of one deployment. */
+    store?: FakeRedis;
+    onReapError?: ((error: unknown) => void) | undefined;
+}
+
+function harness(options: HarnessOptions = {}) {
     const apis = new Map<string, FakeSteelApi>();
     const pools = new Map<string, RecordingPool>();
     const runtime = new HostedRuntime({
@@ -46,6 +54,10 @@ function harness() {
             pools.set(config.apiKey!, pool);
             return pool;
         },
+        createRegistry: options.store
+            ? deps => new RedisHandleRegistry({ ...deps, commands: options.store! })
+            : undefined,
+        onReapError: options.onReapError,
     });
     return { runtime, apis, pools };
 }
@@ -135,5 +147,117 @@ describe('HostedRuntime dependency isolation', () => {
         );
 
         await runtime.close();
+    });
+});
+
+describe('HostedRuntime over a shared handle store', () => {
+    it('releases through this replica own client a session another replica created', async () => {
+        const store = new FakeRedis();
+        const first = harness({ store });
+        const second = harness({ store });
+
+        const creating = first.runtime.depsForRequest(input('ste-a'));
+        await creating.api.createSession({ sessionId: 'steel-a', timeout: 60_000 });
+        const record = await creating.registry.create({
+            principal: creating.principal,
+            steelSessionId: 'steel-a',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        // The release lands on a replica that never saw the create, carrying the same credential.
+        const releasing = second.runtime.depsForRequest(input('ste-a'));
+        await releasing.registry.release(record.handle, releasing.principal, 'explicit');
+
+        expect(second.apis.get('ste-a')?.released).toEqual(['steel-a']);
+        expect(second.pools.get('ste-a')?.closed).toEqual(['steel-a']);
+        expect(first.apis.get('ste-a')?.released, 'the creating replica released it twice').toEqual([]);
+        expect(await creating.registry.countLive(creating.principal)).toBe(0);
+
+        await first.runtime.close();
+        await second.runtime.close();
+    });
+
+    it('keeps a record it cannot release, because only a replica with that credential can', async () => {
+        // Steel's own inactivity timeout is the guarantee here; our job is not to lose the record.
+        const store = new FakeRedis();
+        const failures: unknown[] = [];
+        const creating = harness({ store });
+        const sweeper = harness({ store, onReapError: error => failures.push(error) });
+
+        const deps = creating.runtime.depsForRequest(input('ste-a'));
+        await deps.registry.create({
+            principal: deps.principal,
+            steelSessionId: 'steel-a',
+            expiresAt: Date.now() - 1,
+        });
+
+        expect(await sweeper.runtime.registry.reap({ idleMs: 1 })).toBe(0);
+        expect(failures).toHaveLength(1);
+        expect(String(failures[0])).toMatch(/no client for/i);
+        expect(await deps.registry.countLive(deps.principal), 'a record was dropped unreleased').toBe(1);
+
+        // The replica that holds the credential still reclaims it on its own sweep.
+        expect(await creating.runtime.registry.reap({ idleMs: 1 })).toBe(1);
+        expect(creating.apis.get('ste-a')?.released).toEqual(['steel-a']);
+
+        await creating.runtime.close();
+        await sweeper.runtime.close();
+    });
+});
+
+describe('createHandleRegistryBackend', () => {
+    it('keeps records in this process when no store is configured', async () => {
+        const backend = createHandleRegistryBackend({ env: {} });
+        const registry = backend.createRegistry({ releaseSteelSession: async () => {} });
+
+        expect(registry).toBeInstanceOf(InMemoryHandleRegistry);
+        await backend.close();
+    });
+
+    it('shares records through the configured store, so any replica can serve a handle', async () => {
+        const store = new FakeRedis();
+        let closed = false;
+        const backend = createHandleRegistryBackend({
+            env: { REDIS_URL: 'redis://cache:6379', REDIS_KEY_PREFIX: 'mcp-test' },
+            connect: () => ({
+                commands: store,
+                close: async () => {
+                    closed = true;
+                },
+            }),
+            onError: () => {},
+        });
+
+        const deps = { releaseSteelSession: async () => {} };
+        const first = backend.createRegistry(deps);
+        const second = backend.createRegistry(deps);
+        expect(first).toBeInstanceOf(RedisHandleRegistry);
+
+        const principal = principalFromCredential('ste-a');
+        const record = await first.create({ principal, steelSessionId: 'steel-a', expiresAt: Date.now() + 60_000 });
+        await expect(second.resolve(record.handle, principal)).resolves.toMatchObject({ steelSessionId: 'steel-a' });
+        expect(store.valueKeys()).toEqual([`mcp-test:handle:${record.handle}`]);
+
+        await backend.close();
+        expect(closed, 'closing the backend left the store connection open').toBe(true);
+    });
+
+    it('passes the configured URL to the connector', () => {
+        const seen: string[] = [];
+        createHandleRegistryBackend({
+            env: { REDIS_URL: 'rediss://cache:6380' },
+            connect: url => {
+                seen.push(url);
+                return { commands: new FakeRedis(), close: async () => {} };
+            },
+            onError: () => {},
+        });
+
+        expect(seen).toEqual(['rediss://cache:6380']);
+    });
+
+    it('refuses a shared store with no way to report a connection failure', () => {
+        // An ioredis client with no error listener takes the whole replica down on a blip.
+        expect(() => createHandleRegistryBackend({ env: { REDIS_URL: 'redis://cache:6379' } })).toThrow(/onError/);
     });
 });

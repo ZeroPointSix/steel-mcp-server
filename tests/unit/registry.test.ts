@@ -139,6 +139,24 @@ describe('InMemoryHandleRegistry.release', () => {
         expect(await registry.countLive(ORG_A)).toBe(0);
     });
 
+    it('names the owning principal, so a hosted replica can pick the credential allowed to release', async () => {
+        // A replica that did not create the session has no other way to find the right Steel client.
+        const releases: Array<[string, string]> = [];
+        const registry = new InMemoryHandleRegistry({
+            releaseSteelSession: async (id: string, principal: string) => {
+                releases.push([id, principal]);
+            },
+        });
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        await registry.release(handle, ORG_A, 'explicit');
+        expect(releases).toEqual([['steel-1', ORG_A]]);
+    });
+
     it('is idempotent: a second release neither throws nor re-releases', async () => {
         const { registry, released } = newRegistry();
         const { handle } = await registry.create({
