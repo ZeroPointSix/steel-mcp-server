@@ -1,11 +1,14 @@
 // ABOUTME: Unit tests for the CDP session pool lifecycle: one connection per Steel session, dead
 // ABOUTME: connections evicted and reconnected, and concurrent callers sharing a single connect.
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
 import { CdpSessionPool, type PooledConnection } from '../../src/core/context.js';
 import type { CdpSession } from '../../src/core/steel/cdp.js';
+import { tracingHarness } from '../helpers/tracing.js';
 
-const config = loadConfig({ STEEL_API_KEY: 'ste-test' });
+const API_KEY = 'ste-test';
+const config = loadConfig({ STEEL_API_KEY: API_KEY });
 
 function fakeSession(): CdpSession {
     return {
@@ -139,6 +142,44 @@ describe('CdpSessionPool.page', () => {
         expect(opened[0]!.isClosed, 'a cancelled tool call closed the pooled connection').toBe(false);
         expect(await pool.page('steel-1')).toBe(page);
         expect(opened).toHaveLength(1);
+    });
+});
+
+describe('CdpSessionPool tracing', () => {
+    it('records one span per connect, and none for a reused connection', async () => {
+        const harness = tracingHarness();
+        const { connect } = connector();
+        const pool = new CdpSessionPool(config, 1, connect, harness.tracer);
+
+        await pool.page('steel-1');
+        await pool.page('steel-1');
+
+        const span = harness.span('cdp connect');
+        expect(span.kind).toBe(SpanKind.CLIENT);
+        expect(span.attributes).toEqual({ 'steel.session.id': 'steel-1' });
+        await harness.shutdown();
+    });
+
+    it('never records the CDP URL, which carries the API key as a query parameter', async () => {
+        const harness = tracingHarness();
+        const { connect } = connector();
+        const pool = new CdpSessionPool(config, 1, connect, harness.tracer);
+
+        await pool.page('steel-1');
+
+        expect(JSON.stringify(harness.span('cdp connect').attributes)).not.toContain(API_KEY);
+        await harness.shutdown();
+    });
+
+    it('marks the span failed when the browser connection cannot be opened', async () => {
+        const harness = tracingHarness();
+        const { connect } = connector({ failFirst: true });
+        const pool = new CdpSessionPool(config, 1, connect, harness.tracer);
+
+        await expect(pool.page('steel-1')).rejects.toThrow(/connect refused/);
+
+        expect(harness.span('cdp connect').status.code).toBe(SpanStatusCode.ERROR);
+        await harness.shutdown();
     });
 });
 

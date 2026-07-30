@@ -1,6 +1,7 @@
 // ABOUTME: The dependency bundle every tool closes over, and the browser-pool contract that keeps
 // ABOUTME: one attached CDP page per Steel session so element refs survive across tool calls.
 import { randomUUID } from 'node:crypto';
+import type { Tracer } from '@opentelemetry/api';
 import type { SteelConfig } from './config.js';
 import { buildCdpUrl } from './config.js';
 import { SteelToolError } from './errors.js';
@@ -9,6 +10,7 @@ import type { HandleRegistry } from './registry.js';
 import { resolveSettleBudgets } from './settle.js';
 import { CdpConnection, type CdpSession } from './steel/cdp.js';
 import type { SteelApi } from './steel/types.js';
+import { resolveTracer, withCdpSpan } from './telemetry.js';
 
 /** Hands out the attached page for a Steel session, creating the CDP connection on first use. */
 export interface SessionPool {
@@ -33,6 +35,11 @@ export interface ServerDeps {
     now(): Date;
     /** Overridable so tests get deterministic Steel session ids. */
     newSessionId?: (() => string) | undefined;
+    /**
+     * Tracer the tool layer opens its per-call spans on. Left unset, the globally registered
+     * OpenTelemetry tracer is used, which is a no-op until an entrypoint configures an exporter.
+     */
+    tracer?: Tracer | undefined;
 }
 
 /** Mints the session UUID before the create call, closing the create-then-crash gap. */
@@ -71,10 +78,15 @@ export class CdpSessionPool implements SessionPool {
     constructor(
         private readonly config: SteelConfig,
         private readonly settleMultiplier: number,
-        private readonly connect: CdpConnector = CdpConnection.connect
+        private readonly connect: CdpConnector = CdpConnection.connect,
+        private readonly tracer: Tracer = resolveTracer()
     ) {}
 
     private async open(steelSessionId: string, signal?: AbortSignal): Promise<PoolEntry> {
+        return withCdpSpan(this.tracer, 'connect', steelSessionId, () => this.openConnection(steelSessionId, signal));
+    }
+
+    private async openConnection(steelSessionId: string, signal?: AbortSignal): Promise<PoolEntry> {
         const connection = await this.connect(buildCdpUrl(this.config, steelSessionId), signal);
         try {
             const session = await connection.attachToPage();

@@ -98,7 +98,7 @@ export function registerScrape(server: McpServer, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            guard(async () => {
+            guard(deps, 'steel_scrape', ctx.mcpReq, async () => {
                 const format = (args.format ?? ['markdown']) as ScrapeFormat[];
                 const response = await deps.api.scrape(
                     {
@@ -177,7 +177,7 @@ export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
             // a handle and marks it as used; screenshotting in a loop must not let the reaper
             // reclaim the session out from under the agent doing it.
             if (args.session_id) {
-                return withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+                return withPage(deps, 'steel_screenshot', ctx.mcpReq, args.session_id, async page => {
                     const shot = await page.captureScreenshot({ fullPage: args.full_page ?? false });
                     return successResult(
                         { result: 'Captured the current page of this session as a JPEG.' },
@@ -187,7 +187,7 @@ export function registerScreenshot(server: McpServer, deps: ServerDeps): void {
                 });
             }
 
-            return guard(async () => {
+            return guard(deps, 'steel_screenshot', ctx.mcpReq, async () => {
                 if (!args.url) {
                     throw new SteelToolError('steel_screenshot needs either a url or a session_id.', {
                         code: 'invalid_argument',
@@ -237,7 +237,7 @@ export function registerPdf(server: McpServer, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            guard(async () => {
+            guard(deps, 'steel_pdf', ctx.mcpReq, async () => {
                 const artifact = await deps.api.pdf({ url: args.url, delay: args.delay_ms }, ctx.mcpReq.signal);
                 return successResult({ result: `Rendered ${args.url} to PDF.` }, { url: artifact.url }, [
                     {

@@ -14,4 +14,12 @@ export { InMemoryHandleRegistry, principalFromCredential } from './registry.js';
 export { createSteelMcpServer } from './server.js';
 export { SteelRestClient } from './steel/rest.js';
 export type { SteelApi } from './steel/types.js';
+export {
+    activeTraceparent,
+    contextFromRequestMeta,
+    formatTraceparent,
+    parseTraceparent,
+    resolveTracer,
+    TRACER_NAME,
+} from './telemetry.js';
 export { SERVER_VERSION } from './version.js';

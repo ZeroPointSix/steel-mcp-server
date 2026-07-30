@@ -7,6 +7,7 @@ import { CdpSessionPool, type ServerDeps } from './core/context.js';
 import { InMemoryHandleRegistry, principalFromCredential } from './core/registry.js';
 import { createSteelMcpServer } from './core/server.js';
 import { SteelRestClient } from './core/steel/rest.js';
+import { startTracing } from './tracing.js';
 
 /** How often the reaper sweeps, and how idle a handle must be before it reclaims the slot. */
 const REAPER_INTERVAL_MS = 30_000;
@@ -43,7 +44,10 @@ function buildDeps(): ServerDeps {
     };
 }
 
-function main(): void {
+async function main(): Promise<void> {
+    // Started before anything else so the tracer the core resolves is already the real one.
+    const tracing = await startTracing(process.env, { onWarn: message => log('info', message) });
+
     let deps: ServerDeps;
     try {
         deps = buildDeps();
@@ -84,6 +88,10 @@ function main(): void {
             });
             await deps.pool.closeAll().catch(() => undefined);
             await handle.close().catch(() => undefined);
+            // Last, so the spans this shutdown produced are flushed rather than dropped.
+            await tracing?.shutdown().catch(error => {
+                log('error', 'failed to flush traces during shutdown', { error: String(error) });
+            });
             process.exit(0);
         })();
     };
@@ -98,4 +106,4 @@ function main(): void {
     process.stdin.on('close', () => shutdown('stdin-close'));
 }
 
-main();
+void main();

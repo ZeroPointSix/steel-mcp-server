@@ -23,7 +23,8 @@
         ".": "./dist/core/index.js",
         "./hosted-runtime": "./dist/hosted-runtime.js",
         "./http": "./dist/http.js",
-        "./stdio": "./dist/stdio.js"
+        "./stdio": "./dist/stdio.js",
+        "./tracing": "./dist/tracing.js"
     },
     "files": [
         "dist"
@@ -48,6 +49,7 @@
     "dependencies": {
         "@modelcontextprotocol/node": "2.0.0",
         "@modelcontextprotocol/server": "2.0.0",
+        "@opentelemetry/api": "^1.9.1",
         "ws": "^8.21.1",
         "zod": "^4.2.0"
     },
@@ -55,6 +57,8 @@
         "@biomejs/biome": "^2.5.5",
         "@modelcontextprotocol/client": "2.0.0",
         "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
+        "@opentelemetry/context-async-hooks": "^2.10.0",
+        "@opentelemetry/sdk-trace-base": "^2.10.0",
         "@types/node": "^26.1.2",
         "@types/ws": "^8.18.1",
         "typescript": "^7.0.2",
@@ -68,5 +72,9 @@
         "automation",
         "scraping",
         "headless-chrome"
-    ]
+    ],
+    "optionalDependencies": {
+        "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+        "@opentelemetry/sdk-node": "^0.221.0"
+    }
 }

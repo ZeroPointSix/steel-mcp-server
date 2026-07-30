@@ -48,7 +48,7 @@ export function registerBatch(server: McpServer, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, args.session_id, ctx.mcpReq.signal, async page => {
+            withPage(deps, 'steel_batch', ctx.mcpReq, args.session_id, async page => {
                 const lines: string[] = [];
                 let lastChange = 'No step reported a change.';
 
