@@ -12,23 +12,27 @@ import {
 } from '@modelcontextprotocol/server';
 import type { ServerDeps } from './context.js';
 import {
-    detectInteractiveBlock,
+    assessInteractiveBlock,
+    type HandoffBlockEvidence,
     type InteractiveBlock,
     type InteractiveBlockKind,
     interactiveBlockError,
-    type PageBlockEvidence,
 } from './errors.js';
 import type { BrowserPage } from './page.js';
 import type { HandleRecord } from './registry.js';
+import { stripInvisible } from './untrusted.js';
 
 /** The key the elicitation is filed under, and the key the retry's response comes back on. */
 export const HANDOFF_KEY = 'steel_human_handoff';
 
 /**
- * How many handoffs one flow may ask for before it gives up and returns the actionable error.
+ * How many handoffs one session may ask for before it gives up and returns the actionable error.
  *
  * The spec permits asking indefinitely. A bound is better: after three attempts the person is not
  * getting through, and a caller stuck in a loop learns nothing from a fourth identical prompt.
+ *
+ * Counted per handle rather than per flow, and server-side, so the number of times a session can
+ * interrupt a person does not depend on the client returning anything.
  */
 export const MAX_HANDOFF_ROUNDS = 3;
 
@@ -45,15 +49,59 @@ export const HANDOFF_GRACE_MS = 600_000;
  *
  * Signed, not encrypted: the client can read every field, so nothing secret goes in. Each field is
  * here to be checked on the way back in — the handle and tool so state minted for one session and
- * verb cannot be replayed onto another, the round so the loop is bounded, the URL for the message.
+ * verb cannot be replayed onto another, the round so a cooperative client's loop is bounded too,
+ * and the origin the dialog named.
  */
 export interface HandoffState {
     handle: string;
     tool: string;
     block: InteractiveBlockKind;
-    url: string;
+    /** The origin the dialog named, which is all of the blocked page's URL a person was shown. */
+    origin: string;
     round: number;
 }
+
+/**
+ * The server's own count of the handoffs a handle has been offered.
+ *
+ * The signed state bounds only a client that echoes it back; a host that drops it — by accident or
+ * on purpose — would otherwise restart at round one forever, and every call would interrupt a
+ * person again. An entry lives until the handle's own hard expiry, which the registry enforces, so
+ * a session structurally cannot outlast its budget and the map cannot grow without bound.
+ *
+ * Process-local: a retry that lands on another replica finds no entry there, and the client-held
+ * round count is all that bounds that case. A registry-backed count would close it.
+ */
+export class HandoffLedger {
+    private readonly entries = new Map<string, { rounds: number; expiresAt: number }>();
+
+    /** Entries currently held, so a test can prove an expired one is dropped rather than kept. */
+    get size(): number {
+        return this.entries.size;
+    }
+
+    /** How many handoffs this handle has already been offered. */
+    offered(handle: string, now: number): number {
+        const entry = this.entries.get(handle);
+        if (entry === undefined) return 0;
+        if (entry.expiresAt <= now) {
+            this.entries.delete(handle);
+            return 0;
+        }
+        return entry.rounds;
+    }
+
+    /** Records one more handoff for this handle and returns the round number it is. */
+    record(handle: string, now: number, expiresAt: number): number {
+        for (const [key, entry] of this.entries) if (entry.expiresAt <= now) this.entries.delete(key);
+        const rounds = this.offered(handle, now) + 1;
+        this.entries.set(handle, { rounds, expiresAt });
+        return rounds;
+    }
+}
+
+/** The ledger every flow is counted against, since handles are namespaced per principal. */
+const handoffLedger = new HandoffLedger();
 
 /**
  * Builds the HMAC codec for the handoff state.
@@ -69,15 +117,22 @@ export function createHandoffCodec(secret: string): RequestStateCodec<HandoffSta
     });
 }
 
-/** Query parameters that would turn the handed-out player URL into a leaked credential. */
-const CREDENTIAL_PARAMS = ['apiKey', 'api_key', 'token', 'access_token', 'authorization', 'key'];
+/**
+ * The only query parameters Steel's player reads, per a probe of the live player.
+ *
+ * An allowlist rather than a denylist of credential-shaped names: a name list has to guess every
+ * spelling and casing a deployment might use, and the parameters the player actually honours are
+ * two. Anything else is dropped, so a credential cannot ride out on a name nobody thought of.
+ */
+const PLAYER_PARAMS = ['hideOverlay', 'hideInteractionDialog'];
 
 /**
  * Prepares the live-player URL for the one place it is allowed to go: the elicitation payload.
  *
  * The player URL is already an unauthenticated bearer capability — whoever holds it can watch and
- * drive the browser — so it must not also carry the Steel API key. Any credential-shaped parameter
- * is dropped, and a URL that is not http(s) is refused rather than handed to a person to open.
+ * drive the browser — so it must not also carry a credential. Only the player's own parameters
+ * survive, the fragment is cleared, and a URL that is not http(s) or that carries userinfo is
+ * refused rather than handed to a person to open.
  */
 export function handoffViewerUrl(raw: string | undefined): string | undefined {
     if (!raw) return undefined;
@@ -88,8 +143,48 @@ export function handoffViewerUrl(raw: string | undefined): string | undefined {
         return undefined;
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
-    for (const param of CREDENTIAL_PARAMS) url.searchParams.delete(param);
+    // Userinfo is a credential by construction. Dropping it silently would change which server the
+    // URL reaches for some clients, so a URL carrying it is not made safe, it is refused.
+    if (url.username !== '' || url.password !== '') return undefined;
+
+    const kept = new URLSearchParams();
+    for (const param of PLAYER_PARAMS) {
+        const value = url.searchParams.get(param);
+        if (value !== null) kept.set(param, value);
+    }
+    url.search = kept.toString();
+    // A fragment never reaches the player's server, so nothing there can be load-bearing, and it is
+    // the classic place an implicit-flow token ends up.
+    url.hash = '';
     return url.toString();
+}
+
+/**
+ * How much of a page's origin the dialog will name.
+ *
+ * A hostname is capped at 253 characters and an origin a person cannot read at a glance is worse
+ * than no origin at all, so anything longer is left out of the message entirely.
+ */
+const MAX_ORIGIN_CHARS = 100;
+
+/**
+ * Renders the blocked page's location for the dialog a person reads.
+ *
+ * Only the origin: a path and query are page-controlled prose, and the dialog opens a different
+ * origin than the one it is describing, which is the whole setup for a phishing line in a window
+ * a person trusts. `URL` punycodes the host, so what comes back is ASCII; it is invisible-stripped
+ * anyway because this string is read by a person, not parsed.
+ */
+export function handoffOrigin(rawUrl: string): string | undefined {
+    let url: URL;
+    try {
+        url = new URL(rawUrl);
+    } catch {
+        return undefined;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+    const origin = stripInvisible(url.origin);
+    return origin.length > MAX_ORIGIN_CHARS ? undefined : origin;
 }
 
 /**
@@ -128,10 +223,17 @@ export interface HandoffRequest {
     page: BrowserPage;
     /** The tool being served, sealed into the state and checked on the way back in. */
     tool: string;
+    /** The server-side round count. Defaults to the one every flow in this process shares. */
+    ledger?: HandoffLedger | undefined;
 }
 
-/** Reads the live page into the evidence the one detector in `errors.ts` classifies. */
-async function pageEvidence(page: BrowserPage): Promise<PageBlockEvidence> {
+/**
+ * Reads the live page into the evidence the one detector in `errors.ts` classifies.
+ *
+ * The controls travel alongside the prose because the handoff decision may not rest on wording: an
+ * element that is rendered, visible and takes input is the part of a page its text cannot fake.
+ */
+async function pageEvidence(page: BrowserPage): Promise<HandoffBlockEvidence> {
     // Captured for detection only and never returned, so it costs CDP round trips and no tokens.
     const snapshot = await page.snapshot({});
     return {
@@ -139,6 +241,15 @@ async function pageEvidence(page: BrowserPage): Promise<PageBlockEvidence> {
         title: snapshot.title,
         text: snapshot.nodes.map(node => `${node.role} ${node.name}`).join('\n'),
         hasPasswordField: snapshot.nodes.some(node => node.sensitive),
+        controls: snapshot.nodes.map(node => ({
+            role: node.role,
+            name: node.name,
+            sensitive: node.sensitive,
+            // A ref is only issued to a node that is rendered, visible and takes pointer events,
+            // so it is the snapshot's own answer to whether a person could operate this control.
+            visible: node.inViewport || node.ref !== undefined,
+            interactable: node.ref !== undefined,
+        })),
     };
 }
 
@@ -148,20 +259,25 @@ async function pageEvidence(page: BrowserPage): Promise<PageBlockEvidence> {
  * Returns `undefined` when the page is clear, which is also the verification result on a retry:
  * the live page is read again on every round, so the client's report that a person finished is
  * never what unblocks the call. Throws the actionable tool-execution error when a handoff cannot
- * or should not be offered — an unchanged fallback for every client that cannot elicit.
+ * or should not be offered — an unchanged fallback for every client that cannot elicit, and the
+ * answer for a block with nothing a person could operate.
  */
 export async function resolveHumanHandoff(request: HandoffRequest): Promise<InputRequiredResult | undefined> {
     const { deps, ctx, handle, record, tool } = request;
     const evidence = await pageEvidence(request.page);
-    const block = detectInteractiveBlock(evidence);
+    const verdict = assessInteractiveBlock(evidence);
     const prior = ctx.mcpReq.requestState<HandoffState>();
 
-    if (!block) return undefined;
+    if (!verdict) return undefined;
 
     // Annotated on the binding, not only the arrow, so control-flow analysis knows a call ends here.
     const fail: () => never = () => {
-        throw interactiveBlockError(block, evidence.finalUrl, record.mitigation);
+        throw interactiveBlockError(verdict.block, evidence.finalUrl, record.mitigation);
     };
+
+    // Page text alone is never enough to open a drivable browser to a person; the page has to hold
+    // the control they would have to operate. Without one, the mitigation ladder is the answer.
+    if (!verdict.clearableByPerson) fail();
 
     if (prior !== undefined) {
         // The state was minted by this server for this session and this verb, or it is not ours to
@@ -173,27 +289,36 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
         if (prior.round >= MAX_HANDOFF_ROUNDS) fail();
     }
 
+    // The client's round count is a courtesy; this one is the bound. A client that never echoes the
+    // state gets no extra prompts out of the server for it.
+    const ledger = request.ledger ?? handoffLedger;
+    const now = deps.now().getTime();
+    if (ledger.offered(handle, now) >= MAX_HANDOFF_ROUNDS) fail();
+
     if (!supportsUrlElicitation(ctx, request.declaredAtConnect)) fail();
 
     const url = handoffViewerUrl(record.debugUrl);
     if (url === undefined) fail();
 
-    const round = (prior?.round ?? 0) + 1;
-    const state: HandoffState = { handle, tool, block: block.kind, url: evidence.finalUrl, round };
+    const round = ledger.record(handle, now, record.expiresAt);
+    const origin = handoffOrigin(evidence.finalUrl);
+    const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
     const requestState = await deps.handoffState.mint(state, ctx);
 
-    // Set only once the elicitation is certain to be returned, so a call that degrades to the
-    // error does not leave a slot pinned by a handoff nobody was ever asked to complete.
-    await deps.registry.awaitInput(handle, Math.min(deps.now().getTime() + HANDOFF_GRACE_MS, record.expiresAt));
+    // Set as late as the handler can: every reason to degrade to the error has been ruled out by
+    // here, so a call that never asks anyone to do anything does not leave a slot pinned. The
+    // client's own capability gate still runs after this handler returns, and a rejection there
+    // would leave the pin in place until the handle's own expiry clears it.
+    await deps.registry.awaitInput(handle, Math.min(now + HANDOFF_GRACE_MS, record.expiresAt));
 
     return inputRequired({
         requestState,
         inputRequests: {
             [HANDOFF_KEY]: inputRequired.elicitUrl({
                 message:
-                    `${describeBlock(block)} on ${evidence.finalUrl}. Open the live browser and finish this step ` +
-                    'by hand, then let the tool run again — it re-reads the page and carries on only if the way ' +
-                    'is actually clear.',
+                    `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Open the live ` +
+                    'browser and finish this step by hand, then let the tool run again — it re-reads the page and ' +
+                    'carries on only if the way is actually clear.',
                 url,
             }),
         },

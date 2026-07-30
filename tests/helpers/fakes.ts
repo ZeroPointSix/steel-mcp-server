@@ -215,6 +215,53 @@ export function loginWallPage(url = 'https://app.test/login'): FixturePage {
     };
 }
 
+/**
+ * A working shop page whose footer carries a reCAPTCHA v3 badge.
+ *
+ * The badge iframe is on a large share of the web. The page around it is the point: a grid of
+ * products and a basket is a page that works, not a wall a person has to be called in to clear.
+ */
+export function badgedShopPage(url = 'https://shop.test/products'): FixturePage {
+    return {
+        root: {
+            tag: 'HTML',
+            backendNodeId: 1,
+            role: 'RootWebArea',
+            name: 'Kitchen knives — Shop',
+            bounds: [0, 0, 1280, 720],
+            children: [
+                { tag: 'A', backendNodeId: 10, role: 'link', name: 'Basket (2)', bounds: [1100, 10, 100, 24] },
+                {
+                    tag: 'INPUT',
+                    backendNodeId: 11,
+                    role: 'searchbox',
+                    name: 'Search products',
+                    attributes: { type: 'search', name: 'q' },
+                    bounds: [400, 10, 240, 24],
+                },
+                ...Array.from({ length: 24 }, (_unused, index) => ({
+                    tag: 'A',
+                    backendNodeId: 100 + index,
+                    role: 'link',
+                    name: `Santoku knife model ${index}`,
+                    bounds: [20, 60 + index * 24, 200, 20] as [number, number, number, number],
+                })),
+                { tag: 'IFRAME', backendNodeId: 90, role: 'Iframe', name: 'reCAPTCHA', bounds: [1180, 640, 70, 60] },
+                {
+                    tag: 'SPAN',
+                    backendNodeId: 91,
+                    role: 'StaticText',
+                    name: 'protected by reCAPTCHA',
+                    bounds: [1180, 700, 70, 12],
+                },
+            ],
+        },
+        url,
+        title: 'Kitchen knives — Shop',
+        loaderId: 'loader-shop',
+    };
+}
+
 /** A CAPTCHA challenge page: the widget label is the only thing on it. */
 export function captchaPage(url = 'https://shop.test/cart'): FixturePage {
     return {

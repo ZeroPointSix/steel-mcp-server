@@ -2,13 +2,16 @@
 // ABOUTME: actionable tool-execution errors naming the cause and the next thing to try.
 import { describe, expect, it } from 'vitest';
 import {
+    assessInteractiveBlock,
     botDetectionError,
     clickBlockedError,
     detectBotBlock,
     detectInteractiveBlock,
+    type HandoffBlockEvidence,
     interactiveBlockError,
     mapSteelHttpError,
     nextMitigationRung,
+    type PageControl,
     SteelToolError,
     selfHostUnsupportedError,
     staleRefError,
@@ -177,6 +180,192 @@ describe('detectInteractiveBlock', () => {
         expect(
             detectInteractiveBlock({ finalUrl: 'https://example.com/', title: 'Example', text: 'heading Welcome' })
         ).toBeNull();
+    });
+});
+
+/** A control as the snapshot pipeline classifies it, with the defaults a plain text run has. */
+type FixtureControl = Partial<PageControl> & { role: string; name: string };
+
+/**
+ * Builds the evidence `mrtr` reads off a snapshot: the prose is the controls' own role and name,
+ * exactly as the handoff assembles it, so a fixture cannot claim text no element accounts for.
+ */
+function pageEvidence(options: { url?: string; title?: string; controls: FixtureControl[] }): HandoffBlockEvidence {
+    const controls: PageControl[] = options.controls.map(control => ({
+        role: control.role,
+        name: control.name,
+        sensitive: control.sensitive ?? false,
+        visible: control.visible ?? true,
+        interactable: control.interactable ?? false,
+    }));
+    return {
+        finalUrl: options.url ?? 'https://shop.test/',
+        title: options.title ?? '',
+        text: controls.map(control => `${control.role} ${control.name}`).join('\n'),
+        hasPasswordField: controls.some(control => control.sensitive),
+        controls,
+    };
+}
+
+/** The furniture of a page that works: a nav, a basket and a long grid of products. */
+function shopFurniture(): FixtureControl[] {
+    return [
+        { role: 'heading', name: 'Kitchen knives' },
+        { role: 'link', name: 'Basket (2)', interactable: true },
+        { role: 'searchbox', name: 'Search products', interactable: true },
+        ...Array.from({ length: 24 }, (_unused, index) => ({
+            role: 'link',
+            name: `Santoku knife model ${index}`,
+            interactable: true,
+        })),
+    ];
+}
+
+/** The one question the handoff decision asks: may a person be handed this drivable browser? */
+function handsOff(evidence: HandoffBlockEvidence): boolean {
+    return assessInteractiveBlock(evidence)?.clearableByPerson === true;
+}
+
+describe('assessInteractiveBlock', () => {
+    it('hands off a challenge whose widget is on an otherwise empty page', () => {
+        const verdict = assessInteractiveBlock(
+            pageEvidence({
+                url: 'https://shop.test/cart',
+                title: 'Just a moment...',
+                controls: [
+                    { role: 'heading', name: 'Just a moment...' },
+                    { role: 'Iframe', name: 'Widget containing a Cloudflare security challenge' },
+                ],
+            })
+        );
+        expect(verdict).toMatchObject({ block: { kind: 'captcha', vendor: 'Cloudflare' }, clearableByPerson: true });
+    });
+
+    it('hands off a login wall whose credential form a person could actually fill in', () => {
+        const verdict = assessInteractiveBlock(
+            pageEvidence({
+                url: 'https://app.test/login',
+                title: 'Sign in',
+                controls: [
+                    { role: 'textbox', name: 'Email', interactable: true },
+                    { role: 'textbox', name: 'Password', sensitive: true, interactable: true },
+                    { role: 'button', name: 'Sign in', interactable: true },
+                ],
+            })
+        );
+        expect(verdict).toMatchObject({ block: { kind: 'login_wall' }, clearableByPerson: true });
+    });
+
+    it('still calls a blank interstitial bot detection, with nothing for a person to operate', () => {
+        // No widget rendered, so a person in the live browser would have no control to click. The
+        // mitigation ladder is the answer here, and the error still says which vendor blocked it.
+        const verdict = assessInteractiveBlock(
+            pageEvidence({
+                url: 'https://shop.test/cart',
+                title: 'Just a moment...',
+                controls: [
+                    { role: 'heading', name: 'Just a moment...' },
+                    { role: 'StaticText', name: 'Checking your browser before you continue' },
+                ],
+            })
+        );
+        expect(verdict).toMatchObject({ block: { vendor: 'Cloudflare' }, clearableByPerson: false });
+    });
+
+    it('leaves a page with no block at all alone', () => {
+        expect(assessInteractiveBlock(pageEvidence({ controls: shopFurniture() }))).toBeNull();
+    });
+});
+
+/**
+ * Every measured false positive of the text taxonomy, asserted not to hand out a drivable browser.
+ *
+ * Each case also asserts the taxonomy verdict itself is unchanged: a marker in page prose is cheap
+ * when it only picks the words of an error, and that job is `detectInteractiveBlock`'s to keep.
+ */
+describe('a text marker alone never hands a person the browser', () => {
+    it('does not hand off an ordinary shop page carrying the reCAPTCHA v3 footer badge', () => {
+        const evidence = pageEvidence({
+            url: 'https://shop.test/products/santoku',
+            title: 'Santoku knife — Shop',
+            controls: [
+                ...shopFurniture(),
+                { role: 'Iframe', name: 'reCAPTCHA' },
+                { role: 'StaticText', name: 'protected by reCAPTCHA' },
+            ],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'reCAPTCHA' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it('does not hand off a page whose own prose happens to say "just a moment"', () => {
+        const evidence = pageEvidence({
+            url: 'https://shop.test/orders',
+            title: 'Your orders',
+            controls: [...shopFurniture(), { role: 'status', name: 'Just a moment while we fetch your order history' }],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'Cloudflare' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it("does not hand off a support page whose path contains Google's /sorry/ marker", () => {
+        const evidence = pageEvidence({
+            url: 'https://support.example.com/sorry/refunds',
+            title: 'Sorry — refunds',
+            controls: shopFurniture(),
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'Google' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it('does not hand off a page whose query string mentions a vendor', () => {
+        const evidence = pageEvidence({
+            url: 'https://evil.test/page?x=datadome',
+            title: 'Read this',
+            controls: [{ role: 'heading', name: 'Read this' }, ...shopFurniture()],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'DataDome' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it('does not hand off a blog post about anti-bot vendors', () => {
+        const evidence = pageEvidence({
+            url: 'https://blog.test/comparing-datadome-and-perimeterx',
+            title: 'Comparing DataDome and PerimeterX',
+            controls: [
+                { role: 'heading', name: 'Comparing DataDome and PerimeterX' },
+                { role: 'paragraph', name: 'Both vendors fingerprint the browser before the page renders.' },
+                { role: 'link', name: 'Subscribe', interactable: true },
+            ],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'DataDome' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it('does not hand off a page that only asks, in words, to verify you are human', () => {
+        // Nothing to click, so there is nothing a person could do in the live browser either.
+        const evidence = pageEvidence({
+            url: 'https://evil.test/verify',
+            title: 'Verify',
+            controls: [{ role: 'StaticText', name: 'Please verify you are human to continue' }],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'captcha', vendor: 'human-verification' });
+        expect(handsOff(evidence)).toBe(false);
+    });
+
+    it('does not hand off a lone password box captioned with the words "Sign in"', () => {
+        // The shape a hostile page fakes most cheaply: a credential field and a caption, with no
+        // control that would submit anything.
+        const evidence = pageEvidence({
+            url: 'https://evil.test/page',
+            title: 'Sign in',
+            controls: [
+                { role: 'StaticText', name: 'Sign in' },
+                { role: 'textbox', name: 'Password', sensitive: true, interactable: true },
+            ],
+        });
+        expect(detectInteractiveBlock(evidence)).toMatchObject({ kind: 'login_wall', marker: 'password_field' });
+        expect(handsOff(evidence)).toBe(false);
     });
 });
 

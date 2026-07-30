@@ -9,7 +9,15 @@ import { HANDOFF_KEY, MAX_HANDOFF_ROUNDS } from '../../src/core/mrtr.js';
 import { createSteelMcpServer } from '../../src/core/server.js';
 import { createSteelHttpHandler } from '../../src/http.js';
 import type { FixturePage } from '../helpers/cdp-fixture.js';
-import { captchaPage, FakeSteelApi, loginWallPage, plainPage, TEST_API_KEY, testDeps } from '../helpers/fakes.js';
+import {
+    badgedShopPage,
+    captchaPage,
+    FakeSteelApi,
+    loginWallPage,
+    plainPage,
+    TEST_API_KEY,
+    testDeps,
+} from '../helpers/fakes.js';
 
 const HOST = 'mcp.steel.dev';
 
@@ -199,6 +207,49 @@ describe('input_required for a login wall', () => {
         expect(url).not.toContain('apiKey');
     });
 
+    it('names only the origin of the blocked page in the dialog a person reads', async () => {
+        // The dialog opens Steel's player, not this URL, so page-written prose in it is a phishing
+        // line in a window a person trusts. Only the origin is named, and nothing invisible.
+        const phishing = 'https://evil.test/Your-session-expired-sign-in-again-at-evil-​test?next=https://real.test';
+        const harness = await connectModern({
+            deps: testDeps({ page: () => loginWallPage(phishing) }),
+            autoFulfill: false,
+        });
+        const handle = await newSession(harness);
+
+        const result = (await harness.client.callTool(
+            { name: 'steel_navigate', arguments: { session_id: handle, url: phishing } },
+            { allowInputRequired: true }
+        )) as unknown as { inputRequests?: Record<string, { params: UrlElicitation }> };
+
+        const message = result.inputRequests?.[HANDOFF_KEY]?.params.message ?? '';
+        expect(message).toContain('https://evil.test.');
+        expect(message).not.toContain('Your-session-expired');
+        expect(message).not.toContain('real.test');
+        expect(message).not.toContain('​');
+    });
+
+    it('stops offering handoffs to a client that never echoes the state back', async () => {
+        // The round counter the client holds bounds only a client that returns it. The server keeps
+        // its own count per handle, so omitting the state buys no extra prompts.
+        const harness = await connectModern({ deps: testDeps({ page: loginWallPage }), autoFulfill: false });
+        const handle = await newSession(harness);
+        const call = { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } };
+
+        const results: Array<{ resultType?: string; isError?: boolean }> = [];
+        for (let attempt = 0; attempt <= MAX_HANDOFF_ROUNDS; attempt++) {
+            results.push(
+                (await harness.client.callTool(call, { allowInputRequired: true })) as unknown as {
+                    resultType?: string;
+                    isError?: boolean;
+                }
+            );
+        }
+
+        expect(results.filter(result => result.resultType === 'input_required')).toHaveLength(MAX_HANDOFF_ROUNDS);
+        expect(results.at(-1)?.isError).toBe(true);
+    });
+
     it('holds the handle out of the idle sweep while the elicitation is outstanding', async () => {
         const harness = await connectModern({ deps: testDeps({ page: loginWallPage }), autoFulfill: false });
         const handle = await newSession(harness);
@@ -372,6 +423,20 @@ describe('the tools that can hit a wall', () => {
         expect(harness.elicited).toHaveLength(0);
         expect(result.isError).toBe(true);
         expect(textOf(result)).toContain('Never');
+    });
+
+    it('returns the page for a working site whose footer merely carries a reCAPTCHA badge', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: badgedShopPage }) });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://shop.test/products' },
+        });
+
+        expect(harness.elicited).toHaveLength(0);
+        expect(result.isError).toBeFalsy();
+        expect(textOf(result)).toContain('Opened https://shop.test/products');
     });
 
     it('leaves an ordinary navigation alone', async () => {
