@@ -95,6 +95,28 @@ describe('loadConfig', () => {
     it('refuses a cloud deployment with no API key', () => {
         expect(() => loadConfig({})).toThrow(/STEEL_API_KEY/);
     });
+
+    it('uses the operator request-state secret so every replica can verify a retried handoff', () => {
+        const secret = 'x'.repeat(48);
+        expect(loadConfig({ STEEL_API_KEY: 'k', STEEL_REQUEST_STATE_SECRET: secret }).requestStateSecret).toBe(secret);
+    });
+
+    it('generates a distinct per-process secret when none is configured', () => {
+        const first = loadConfig({ STEEL_API_KEY: 'k' }).requestStateSecret;
+        const second = loadConfig({ STEEL_API_KEY: 'k' }).requestStateSecret;
+        expect(Buffer.byteLength(first, 'utf8')).toBeGreaterThanOrEqual(32);
+        expect(first).not.toBe(second);
+    });
+
+    it('refuses a configured secret too short to be an HMAC key, rather than truncating it', () => {
+        expect(() => loadConfig({ STEEL_API_KEY: 'k', STEEL_REQUEST_STATE_SECRET: 'short' })).toThrow(
+            /STEEL_REQUEST_STATE_SECRET/
+        );
+    });
+
+    it('does not put the Steel credential in the request-state secret', () => {
+        expect(loadConfig({ STEEL_API_KEY: 'ste-supersecret' }).requestStateSecret).not.toContain('supersecret');
+    });
 });
 
 describe('resolveInactivityTimeout', () => {

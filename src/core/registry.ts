@@ -19,6 +19,22 @@ export interface HandleRecord {
     /** Hard deadline; past this the handle is refused even if Steel has not reclaimed it yet. */
     expiresAt: number;
     viewerUrl?: string | undefined;
+    /**
+     * The self-contained live player for this session — the URL a person is handed to finish a
+     * step by hand. Unauthenticated, and whoever holds it can drive the browser.
+     */
+    debugUrl?: string | undefined;
+    /**
+     * Until this instant, an elicitation is outstanding and the idle sweep leaves the handle alone.
+     *
+     * Steel's `inactivityTimeout` counts remote input in the live session, so a person working in
+     * the player keeps the browser alive; our idle clock only sees tool calls, and a human takes
+     * longer than any idle budget worth setting. During a handoff ours is the less informed clock,
+     * so it defers. The hard expiry below is untouched, and so are both Steel timeouts, which
+     * remain the actual guarantee — this only suspends our slot-reclamation optimisation, and only
+     * for a bounded window, so a person who walks away still frees the slot.
+     */
+    awaitingInputUntil?: number | undefined;
     /** Session capabilities already in play, so bot-detection errors name the right next rung. */
     mitigation: MitigationState;
 }
@@ -28,6 +44,7 @@ export interface CreateHandleInput {
     steelSessionId: string;
     expiresAt: number;
     viewerUrl?: string | undefined;
+    debugUrl?: string | undefined;
     mitigation?: MitigationState | undefined;
 }
 
@@ -41,6 +58,8 @@ export interface HandleRegistry {
     create(input: CreateHandleInput): Promise<HandleRecord>;
     resolve(handle: string, principal: string): Promise<HandleRecord>;
     touch(handle: string): Promise<void>;
+    /** Suspends idle reclamation until `untilMs` while a person finishes a step in the live session. */
+    awaitInput(handle: string, untilMs: number): Promise<void>;
     release(handle: string, principal: string, path: ReleasePath): Promise<HandleRecord | null>;
     list(principal: string): Promise<HandleRecord[]>;
     countLive(principal: string): Promise<number>;
@@ -116,6 +135,7 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             lastUsedAt: now,
             expiresAt: input.expiresAt,
             viewerUrl: input.viewerUrl,
+            debugUrl: input.debugUrl,
             mitigation: input.mitigation ?? {},
         };
         this.records.set(record.handle, record);
@@ -137,7 +157,16 @@ export class InMemoryHandleRegistry implements HandleRegistry {
 
     async touch(handle: string): Promise<void> {
         const record = this.records.get(handle);
-        if (record) record.lastUsedAt = Date.now();
+        if (!record) return;
+        record.lastUsedAt = Date.now();
+        // A real call arrived, so whatever a person was asked to do is over as far as the idle
+        // clock is concerned; normal accounting resumes even if the handoff is re-issued below.
+        record.awaitingInputUntil = undefined;
+    }
+
+    async awaitInput(handle: string, untilMs: number): Promise<void> {
+        const record = this.records.get(handle);
+        if (record) record.awaitingInputUntil = untilMs;
     }
 
     /**
@@ -171,7 +200,8 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         const now = Date.now();
         let reaped = 0;
         for (const record of [...this.records.values()]) {
-            const idle = now - record.lastUsedAt >= options.idleMs;
+            const awaitingHuman = (record.awaitingInputUntil ?? 0) > now;
+            const idle = !awaitingHuman && now - record.lastUsedAt >= options.idleMs;
             const expired = record.expiresAt <= now;
             if (!idle && !expired) continue;
 

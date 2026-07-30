@@ -574,3 +574,81 @@ describe('RedisHandleRegistry across replicas', () => {
         expect(store.setMembers()).toEqual({});
     });
 });
+
+describe('RedisHandleRegistry.awaitInput', () => {
+    it('suspends idle reclamation while a person finishes a step in the live session', async () => {
+        const { registry, clock, released } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 600_000,
+        });
+        await registry.awaitInput(handle, clock.ms + 300_000);
+        clock.advance(200_000);
+
+        expect(await registry.reap({ idleMs: 120_000 })).toBe(0);
+        expect(released).toEqual([]);
+    });
+
+    it('still reaps a handle awaiting human input once its hard expiry passes', async () => {
+        // The grace window suspends our slot reclamation only. The hard timeout is Steel's, and
+        // nothing about a pending elicitation may extend it.
+        const { registry, clock, released } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 1_000,
+        });
+        await registry.awaitInput(handle, clock.ms + 600_000);
+        clock.advance(2_000);
+
+        expect(await registry.reap({ idleMs: 120_000 })).toBe(1);
+        expect(released).toEqual(['steel-1']);
+    });
+
+    it('reaps a handle again once its grace window lapses, so a walked-away human frees the slot', async () => {
+        const { registry, clock, released } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 900_000,
+        });
+        await registry.awaitInput(handle, clock.ms + 60_000);
+        clock.advance(120_000);
+
+        expect(await registry.reap({ idleMs: 90_000 })).toBe(1);
+        expect(released).toEqual(['steel-1']);
+    });
+
+    it('clears the grace window on the next real call, so normal idle accounting resumes', async () => {
+        const { registry, clock, released } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 900_000,
+        });
+        await registry.awaitInput(handle, clock.ms + 600_000);
+        await registry.touch(handle);
+        clock.advance(200_000);
+
+        expect(await registry.reap({ idleMs: 120_000 })).toBe(1);
+        expect(released).toEqual(['steel-1']);
+    });
+
+    it('defers the other replica reaper too, because the mark lives in the shared record', async () => {
+        const clock = testClock();
+        const store = new FakeRedis({ now: clock.now });
+        const first = harness({ store, clock });
+        const second = harness({ store, clock });
+        const { handle } = await first.registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 600_000,
+        });
+        await first.registry.awaitInput(handle, clock.ms + 300_000);
+        clock.advance(200_000);
+
+        expect(await second.registry.reap({ idleMs: 120_000 })).toBe(0);
+        expect(second.released).toEqual([]);
+    });
+});

@@ -1,7 +1,9 @@
 // ABOUTME: Shared hosted dependency runtime that reuses Steel clients within one credential while
 // ABOUTME: isolating tenants, picking the handle store, and releasing through the owning principal's client.
+import type { RequestStateCodec } from '@modelcontextprotocol/server';
 import { loadRegistryConfig, type SteelConfig } from './core/config.js';
 import { CdpSessionPool, type ServerDeps, type SessionPool } from './core/context.js';
+import { createHandoffCodec, type HandoffState } from './core/mrtr.js';
 import { InMemoryRateLimiter, type RateLimiter } from './core/rate-limit.js';
 import { connectRedis, type RedisConnection } from './core/redis.js';
 import {
@@ -34,6 +36,13 @@ interface TenantClients {
     api: SteelApi;
     pool: SessionPool;
     settleMultiplier: number;
+    /**
+     * Built once per tenant so both rounds of one human-in-the-loop flow share a key.
+     *
+     * With no `STEEL_REQUEST_STATE_SECRET` configured this holds a per-process key, which only
+     * works while one replica serves the whole flow; a multi-replica deployment must configure one.
+     */
+    handoffState: RequestStateCodec<HandoffState>;
 }
 
 /**
@@ -91,7 +100,14 @@ export class HostedRuntime {
         const settleMultiplier = config.deployment === 'cloud' ? 2 : 1;
         const api = this.createApi(config);
         const pool = this.createPool(config, settleMultiplier);
-        const tenant = { credential: input.credential, config, api, pool, settleMultiplier };
+        const tenant: TenantClients = {
+            credential: input.credential,
+            config,
+            api,
+            pool,
+            settleMultiplier,
+            handoffState: createHandoffCodec(config.requestStateSecret),
+        };
         this.tenants.set(input.principal, tenant);
         return tenant;
     }
@@ -104,6 +120,7 @@ export class HostedRuntime {
             pool: tenant.pool,
             registry: this.registry,
             limiter: this.limiter,
+            handoffState: tenant.handoffState,
             principal: input.principal,
             settleMultiplier: tenant.settleMultiplier,
             now: this.now,

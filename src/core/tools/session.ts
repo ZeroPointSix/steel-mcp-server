@@ -125,6 +125,10 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         steelSessionId,
                         expiresAt: expiresAt.getTime(),
                         viewerUrl: session.sessionViewerUrl,
+                        // Kept for the human-in-the-loop handoff, which needs the self-contained
+                        // player rather than the dashboard: a person with no Steel login can open
+                        // the player, and the dashboard would show them a sign-in page instead.
+                        debugUrl: session.debugUrl,
                         mitigation: {
                             profileId: args.profile_id,
                             useProxy: args.use_proxy,

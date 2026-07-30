@@ -1,14 +1,44 @@
 // ABOUTME: The stateful browsing tools — navigate, snapshot, find, act and wait_for — each taking a
 // ABOUTME: session handle and returning a change signal rather than a bare success.
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps, ToolHost } from '../context.js';
+import { SteelToolError } from '../errors.js';
+import { resolveHumanHandoff } from '../mrtr.js';
 import { ACTIONS, type ActRequest, type BrowserPage } from '../page.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
+import type { HandleRecord } from '../registry.js';
 import type { SnapshotNode } from '../snapshot.js';
 import { renderSnapshot } from '../snapshot.js';
 import { fenceUntrusted } from '../untrusted.js';
-import { cursorSchema, maxTokensSchema, pageStateLine, sessionIdSchema, successResult, withPage } from './shared.js';
+import {
+    cursorSchema,
+    maxTokensSchema,
+    pageStateLine,
+    sessionIdSchema,
+    successResult,
+    type ToolOutcome,
+    withPage,
+} from './shared.js';
+
+/**
+ * Offers the page to a person when only a person can get past it.
+ *
+ * Bound to one server so the handoff can read the capabilities an older connection declared at
+ * initialize, which is the only capability view a request without a `_meta` envelope has.
+ */
+function handoffFor(host: ToolHost, deps: ServerDeps, tool: string) {
+    return (ctx: ServerContext, handle: string, record: HandleRecord, page: BrowserPage) =>
+        resolveHumanHandoff({
+            deps,
+            ctx,
+            declaredAtConnect: () => host.server.getClientCapabilities(),
+            handle,
+            record,
+            page,
+            tool,
+        });
+}
 
 /** Captures and renders a fenced, budgeted snapshot section for a tool that was asked for one. */
 export async function snapshotSection(
@@ -37,6 +67,7 @@ export async function snapshotSection(
 }
 
 export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
+    const handoff = handoffFor(host, deps, 'steel_navigate');
     host.registerTool(
         'steel_navigate',
         {
@@ -57,8 +88,11 @@ export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, 'steel_navigate', ctx.mcpReq, args.session_id, async page => {
+            withPage(deps, 'steel_navigate', ctx.mcpReq, args.session_id, async (page, record) => {
                 const outcome = await page.navigate(args.url);
+                const handedOff = await handoff(ctx, args.session_id, record, page);
+                if (handedOff) return handedOff;
+
                 const sections = args.include_snapshot
                     ? await snapshotSection(page, deps, { maxTokens: args.max_tokens })
                     : undefined;
@@ -195,6 +229,7 @@ export function registerFind(host: ToolHost, deps: ServerDeps): void {
 }
 
 export function registerAct(host: ToolHost, deps: ServerDeps): void {
+    const handoff = handoffFor(host, deps, 'steel_act');
     host.registerTool(
         'steel_act',
         {
@@ -228,7 +263,7 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, 'steel_act', ctx.mcpReq, args.session_id, async page => {
+            withPage(deps, 'steel_act', ctx.mcpReq, args.session_id, async (page, record) => {
                 const request: ActRequest = {
                     action: args.action,
                     target: args.target,
@@ -236,6 +271,9 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
                     fields: args.fields,
                 };
                 const outcome = await page.act(request);
+                const handedOff = await handoff(ctx, args.session_id, record, page);
+                if (handedOff) return handedOff;
+
                 const sections = args.include_snapshot
                     ? await snapshotSection(page, deps, { maxTokens: args.max_tokens })
                     : undefined;
@@ -259,6 +297,7 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
 }
 
 export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
+    const handoff = handoffFor(host, deps, 'steel_wait_for');
     host.registerTool(
         'steel_wait_for',
         {
@@ -278,13 +317,24 @@ export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, 'steel_wait_for', ctx.mcpReq, args.session_id, async (page): Promise<CallToolResult> => {
-                const outcome = await page.waitFor({
-                    text: args.text,
-                    selector: args.selector,
-                    url: args.url,
-                    timeoutMs: args.timeout_ms,
-                });
+            withPage(deps, 'steel_wait_for', ctx.mcpReq, args.session_id, async (page, record): Promise<ToolOutcome> => {
+                let outcome: Awaited<ReturnType<BrowserPage['waitFor']>>;
+                try {
+                    outcome = await page.waitFor({
+                        text: args.text,
+                        selector: args.selector,
+                        url: args.url,
+                        timeoutMs: args.timeout_ms,
+                    });
+                } catch (error) {
+                    // A wait that ran out is where a sign-in page or a challenge shows up: whatever
+                    // was expected never arrived because something is standing in front of it. Any
+                    // other failure is not about the page's contents and is reported unchanged.
+                    if (!(error instanceof SteelToolError) || error.code !== 'timeout') throw error;
+                    const handedOff = await handoff(ctx, args.session_id, record, page);
+                    if (handedOff) return handedOff;
+                    throw error;
+                }
                 return successResult(
                     {
                         result: `Waited ${outcome.waitedMs}ms for ${outcome.condition}, and it happened.`,

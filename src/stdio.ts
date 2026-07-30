@@ -4,6 +4,7 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { loadConfig } from './core/config.js';
 import { CdpSessionPool, type ServerDeps } from './core/context.js';
+import { createHandoffCodec } from './core/mrtr.js';
 import { InMemoryHandleRegistry, principalFromCredential } from './core/registry.js';
 import { createSteelMcpServer } from './core/server.js';
 import { SteelRestClient } from './core/steel/rest.js';
@@ -36,6 +37,9 @@ function buildDeps(): ServerDeps {
         api,
         pool,
         registry,
+        // One process serves every round of a flow here, so the per-process key the config
+        // generates when no secret is configured is enough.
+        handoffState: createHandoffCodec(config.requestStateSecret),
         // One process serves one credential, so the principal is fixed for the connection. The
         // per-call re-authorisation in the tool layer is what makes the hosted entry safe later.
         principal: principalFromCredential(config.apiKey ?? `self-hosted:${config.baseUrl}`),

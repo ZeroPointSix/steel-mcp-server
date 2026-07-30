@@ -1,11 +1,12 @@
 // ABOUTME: The dependency bundle and registration surface every tool closes over, and the browser-pool
 // ABOUTME: contract that keeps one attached CDP page per Steel session so refs survive across calls.
 import { randomUUID } from 'node:crypto';
-import type { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer, RequestStateCodec } from '@modelcontextprotocol/server';
 import type { Tracer } from '@opentelemetry/api';
 import type { SteelConfig } from './config.js';
 import { buildCdpUrl } from './config.js';
 import { SteelToolError } from './errors.js';
+import type { HandoffState } from './mrtr.js';
 import { BrowserPage } from './page.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { HandleRegistry } from './registry.js';
@@ -19,9 +20,10 @@ import { resolveTracer, withCdpSpan } from './telemetry.js';
  *
  * Narrower than `McpServer` on purpose: because a tool can only register itself through it, the
  * hosted entry can hand over a wrapper that charges the request budget before any handler runs,
- * and a tool added later is metered without anyone having to remember to ask for it.
+ * and a tool added later is metered without anyone having to remember to ask for it. `server` is
+ * passed through unwrapped so a tool can read connect-time client capabilities.
  */
-export type ToolHost = Pick<McpServer, 'registerTool'>;
+export type ToolHost = Pick<McpServer, 'registerTool' | 'server'>;
 
 /** Hands out the attached page for a Steel session, creating the CDP connection on first use. */
 export interface SessionPool {
@@ -36,6 +38,13 @@ export interface ServerDeps {
     api: SteelApi;
     registry: HandleRegistry;
     pool: SessionPool;
+    /**
+     * Seals and verifies the multi-round-trip state a human-in-the-loop handoff round-trips.
+     *
+     * Injected rather than derived per request because every replica that might receive the retry
+     * has to hold the same key; a per-instance codec would reject its own flow's second round.
+     */
+    handoffState: RequestStateCodec<HandoffState>;
     /** The principal for this request's own credential; handles are re-authorised against it. */
     principal: string;
     /**

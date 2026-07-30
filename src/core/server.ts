@@ -36,7 +36,7 @@ function meteredHost(server: McpServer, limiter: RateLimiter, principal: string)
             }
             return handler(...args);
         });
-    return { registerTool: metered as unknown as ToolHost['registerTool'] };
+    return { registerTool: metered as unknown as ToolHost['registerTool'], server: server.server };
 }
 
 /**
@@ -59,6 +59,9 @@ export function createSteelMcpServer(deps: ServerDeps): McpServer {
                 'resources/read': { ttlMs: 0, cacheScope: 'private' },
                 'resources/list': { ttlMs: 0, cacheScope: 'private' },
             },
+            // Runs before any handler sees a retried human-in-the-loop call, so tampered, expired
+            // or replayed state is refused at the seam and never reaches the tool layer.
+            requestState: { verify: deps.handoffState.verify },
         }
     );
 

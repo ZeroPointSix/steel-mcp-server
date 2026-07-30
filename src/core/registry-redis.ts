@@ -148,7 +148,15 @@ export class RedisHandleRegistry implements HandleRegistry {
     async touch(handle: string): Promise<void> {
         const record = await this.read(handle);
         if (!record) return;
-        await this.write({ ...record, lastUsedAt: this.now().getTime() });
+        // A real call arrived, so whatever a person was asked to do is over as far as the idle
+        // clock is concerned; normal accounting resumes even if the handoff is re-issued below.
+        await this.write({ ...record, lastUsedAt: this.now().getTime(), awaitingInputUntil: undefined });
+    }
+
+    async awaitInput(handle: string, untilMs: number): Promise<void> {
+        const record = await this.read(handle);
+        if (!record) return;
+        await this.write({ ...record, awaitingInputUntil: untilMs });
     }
 
     /**
@@ -213,7 +221,8 @@ export class RedisHandleRegistry implements HandleRegistry {
                 continue;
             }
 
-            const idle = now - record.lastUsedAt >= options.idleMs;
+            const awaitingHuman = (record.awaitingInputUntil ?? 0) > now;
+            const idle = !awaitingHuman && now - record.lastUsedAt >= options.idleMs;
             const expired = record.expiresAt <= now;
             if (!idle && !expired) continue;
 

@@ -11,6 +11,7 @@ export type SteelErrorCode =
     | 'not_found'
     | 'proxy_failure'
     | 'bot_detection'
+    | 'login_required'
     | 'stale_ref'
     | 'ref_not_found'
     | 'click_blocked'
@@ -201,6 +202,93 @@ export function botDetectionError(block: BotBlock, url: string, state: Mitigatio
             'Change one thing at a time — stacking proxies, CAPTCHA solving and fingerprint changes at once makes the block harder to diagnose and costs more.',
         { code: 'bot_detection', details: { vendor: block.vendor, marker: block.marker, url, rung: step.rung } }
     );
+}
+
+/** What a live page revealed about being blocked, read from its snapshot rather than its headers. */
+export interface PageBlockEvidence {
+    /** The URL the page settled on, after redirects. */
+    finalUrl: string;
+    title?: string | undefined;
+    /** The rendered accessibility text. Already invisible-stripped and password-redacted. */
+    text?: string | undefined;
+    /** True when the page holds a field the snapshot classified as sensitive, such as a password. */
+    hasPasswordField?: boolean | undefined;
+}
+
+/** A block nobody but a person can clear: a challenge to solve, or a credential to enter. */
+export type InteractiveBlockKind = 'captcha' | 'login_wall';
+
+export interface InteractiveBlock {
+    kind: InteractiveBlockKind;
+    /** The vendor or mechanism recognised, always from this table and never from the page text. */
+    vendor: string;
+    marker: string;
+}
+
+/**
+ * CAPTCHA widgets a person can clear in a live browser.
+ *
+ * Kept apart from `VENDOR_MARKERS` because these are only ever matched against rendered page text,
+ * where a widget label is strong evidence. Matching them against a scrape response body would call
+ * every contact form with a reCAPTCHA box a blocked page.
+ */
+const CAPTCHA_WIDGET_MARKERS: ReadonlyArray<{ vendor: string; marker: string; test: RegExp }> = [
+    { vendor: 'reCAPTCHA', marker: 'recaptcha', test: /recaptcha|i'?m not a robot/i },
+    { vendor: 'hCaptcha', marker: 'hcaptcha', test: /hcaptcha/i },
+    { vendor: 'Cloudflare Turnstile', marker: 'turnstile', test: /turnstile/i },
+    {
+        vendor: 'human-verification',
+        marker: 'human_check',
+        test: /verify (that )?you('re| are) (a )?human|are you a robot/i,
+    },
+];
+
+/** Words that confirm a page holding a password field is asking for one, not offering a reset. */
+const LOGIN_TEXT = /\b(log ?in|sign ?in|password|passphrase|authenticate)\b/i;
+
+/**
+ * Recognises a page only a person can get past.
+ *
+ * The anti-bot verdict comes from `detectBotBlock`, so there is one vendor taxonomy rather than
+ * two: a challenge page is the subset of anti-bot responses a person can clear by hand.
+ */
+export function detectInteractiveBlock(evidence: PageBlockEvidence): InteractiveBlock | null {
+    const haystack = [evidence.title ?? '', evidence.text ?? ''].join('\n');
+
+    const vendorBlock = detectBotBlock({ status: 200, body: haystack, finalUrl: evidence.finalUrl });
+    if (vendorBlock) return { kind: 'captcha', vendor: vendorBlock.vendor, marker: vendorBlock.marker };
+
+    const widget = CAPTCHA_WIDGET_MARKERS.find(candidate => candidate.test.test(haystack));
+    if (widget) return { kind: 'captcha', vendor: widget.vendor, marker: widget.marker };
+
+    // The password field is required, not merely corroborating: nearly every page carries a "Sign
+    // in" link, and treating those as login walls would hand a human the browser on every hop. The
+    // cost is that a wall offering only "Continue with Google" has no field and is not recognised.
+    if (evidence.hasPasswordField && LOGIN_TEXT.test(haystack)) {
+        return { kind: 'login_wall', vendor: 'credentials', marker: 'password_field' };
+    }
+    return null;
+}
+
+/** Builds the error for a login wall: name the identity options, never ask for a typed secret. */
+export function loginWallError(url: string, state: MitigationState): SteelToolError {
+    const advice = state.profileId
+        ? 'This session already reuses a browser profile, so that saved identity is not signed in here. Sign in ' +
+          'once in the live session and the profile keeps the cookies for next time.'
+        : 'Create the session with profile_id to reuse an identity that is already signed in, or with namespace ' +
+          'to inject managed credentials. Never put a password in a tool argument.';
+    return new SteelToolError(
+        `${url} is asking for credentials before it will show anything. Nothing on this page can be read or ` +
+            `acted on until someone signs in. ${advice}`,
+        { code: 'login_required', details: { url } }
+    );
+}
+
+/** The single tool-execution error for an interactive block, and the fallback when a client cannot elicit. */
+export function interactiveBlockError(block: InteractiveBlock, url: string, state: MitigationState): SteelToolError {
+    return block.kind === 'login_wall'
+        ? loginWallError(url, state)
+        : botDetectionError({ vendor: block.vendor, marker: block.marker }, url, state);
 }
 
 /** CDP error texts that mean the proxy, not the site, refused the connection. */
