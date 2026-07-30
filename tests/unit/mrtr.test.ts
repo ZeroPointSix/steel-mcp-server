@@ -5,7 +5,9 @@ import { CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import {
     createHandoffCodec,
+    HandoffLedger,
     type HandoffState,
+    handoffOrigin,
     handoffViewerUrl,
     supportsUrlElicitation,
 } from '../../src/core/mrtr.js';
@@ -29,7 +31,7 @@ const STATE: HandoffState = {
     handle: 'sess_abc',
     tool: 'steel_navigate',
     block: 'login_wall',
-    url: 'https://app.test/login',
+    origin: 'https://app.test',
     round: 1,
 };
 
@@ -117,9 +119,75 @@ describe('handoffViewerUrl', () => {
         expect(url).toContain('hideOverlay=true');
     });
 
+    it('keeps only the parameters the player itself reads, whatever a credential is named', () => {
+        // Every one of these survived a denylist that matched exact lower-camel names.
+        const url = handoffViewerUrl(
+            'https://api.steel.dev/v1/sessions/abc/player?APIKEY=a&ApiKey=b&Authorization=c&steel-api-key=d' +
+                '&session_token=e&secret=f&password=g&sig=h&signature=i&jwt=j' +
+                '&hideOverlay=true&hideInteractionDialog=true'
+        );
+        expect(url).toBe('https://api.steel.dev/v1/sessions/abc/player?hideOverlay=true&hideInteractionDialog=true');
+    });
+
+    it('clears the fragment, which never reaches a server and is where a token hides', () => {
+        expect(handoffViewerUrl('https://api.steel.dev/v1/sessions/abc/player#apiKey=ste-secret')).toBe(
+            'https://api.steel.dev/v1/sessions/abc/player'
+        );
+    });
+
+    it('refuses userinfo rather than quietly changing which host a person is asked to trust', () => {
+        expect(handoffViewerUrl('https://ste-secret@api.steel.dev/v1/sessions/abc/player')).toBeUndefined();
+        expect(handoffViewerUrl('https://user:ste-secret@api.steel.dev/v1/sessions/abc/player')).toBeUndefined();
+    });
+
     it('refuses a non-http URL rather than handing a person something unopenable', () => {
         expect(handoffViewerUrl('javascript:alert(1)')).toBeUndefined();
         expect(handoffViewerUrl('not a url')).toBeUndefined();
         expect(handoffViewerUrl(undefined)).toBeUndefined();
+    });
+});
+
+describe('handoffOrigin', () => {
+    it('names the origin and drops the attacker-written prose a path can carry', () => {
+        expect(handoffOrigin('https://evil.test/Your-session-expired-sign-in-again-at-evil-test?u=x#y')).toBe(
+            'https://evil.test'
+        );
+    });
+
+    it('keeps the port, which is part of which server a person is being told about', () => {
+        expect(handoffOrigin('http://localhost:3000/login')).toBe('http://localhost:3000');
+    });
+
+    it('names nothing rather than something a person cannot check', () => {
+        expect(handoffOrigin('about:blank')).toBeUndefined();
+        expect(handoffOrigin('data:text/html,<h1>Sign in</h1>')).toBeUndefined();
+        expect(handoffOrigin('not a url')).toBeUndefined();
+        expect(handoffOrigin(`https://${'a'.repeat(300)}.test/login`)).toBeUndefined();
+    });
+
+    it('leaves no invisible character in what a person reads', () => {
+        expect(handoffOrigin('https://evil.test/​sign-in')).toBe('https://evil.test');
+    });
+});
+
+describe('HandoffLedger', () => {
+    const EXPIRES_AT = 10_000;
+
+    it('counts what a handle was already offered, whatever the client echoes back', () => {
+        const ledger = new HandoffLedger();
+        expect(ledger.offered('sess_abc', 0)).toBe(0);
+        expect(ledger.record('sess_abc', 0, EXPIRES_AT)).toBe(1);
+        expect(ledger.record('sess_abc', 1, EXPIRES_AT)).toBe(2);
+        expect(ledger.offered('sess_abc', 2)).toBe(2);
+        // A different session has its own budget; the count is per handle, not per process.
+        expect(ledger.offered('sess_other', 2)).toBe(0);
+    });
+
+    it('forgets a handle once the session it names can no longer exist', () => {
+        const ledger = new HandoffLedger();
+        ledger.record('sess_abc', 0, EXPIRES_AT);
+        expect(ledger.offered('sess_abc', EXPIRES_AT + 1)).toBe(0);
+        // The expired entry is dropped rather than kept for the life of the process.
+        expect(ledger.size).toBe(0);
     });
 });

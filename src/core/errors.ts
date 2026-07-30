@@ -270,6 +270,112 @@ export function detectInteractiveBlock(evidence: PageBlockEvidence): Interactive
     return null;
 }
 
+/** A control the page renders, as the snapshot pipeline classified it. */
+export interface PageControl {
+    role: string;
+    name: string;
+    /** True when the snapshot classified this control as a credential field, such as a password. */
+    sensitive: boolean;
+    /** True when the control is rendered inside the viewport. */
+    visible: boolean;
+    /** True when the control also takes pointer input — the snapshot gave it a `@eN` ref. */
+    interactable: boolean;
+}
+
+/** Page evidence plus the controls on it, which is the part of a page its prose cannot fake. */
+export interface HandoffBlockEvidence extends PageBlockEvidence {
+    controls: readonly PageControl[];
+}
+
+/**
+ * Roles a challenge widget wears in the accessibility tree.
+ *
+ * Deliberately narrow: a heading, a paragraph or a text run that names a vendor is prose, and prose
+ * is what a hostile or merely chatty page controls. Turnstile, hCaptcha and reCAPTCHA all render an
+ * iframe; the classic checkbox and the press-and-hold button are the other two shapes.
+ */
+const CHALLENGE_CONTROL_ROLES = new Set(['iframe', 'Iframe', 'checkbox', 'button', 'switch']);
+
+/** What a challenge widget a person can operate is called, matched against control names only. */
+const CHALLENGE_CONTROL_NAME =
+    /captcha|turnstile|challenge|not a robot|are you a robot|verify|human|press (and hold|&)/i;
+
+/** What the control that submits a credential form is called. */
+const LOGIN_SUBMIT_NAME = /log ?in|sign ?in|continue|next|submit|authenticate|unlock/i;
+
+/**
+ * How much else a page may hold before a block on it is read as furniture rather than a wall.
+ *
+ * A page only a person can get past has nothing else on it: a challenge interstitial is a widget
+ * and a sentence, and a login wall is a form. A reCAPTCHA v3 badge sits in the footer of a large
+ * share of the working web, and a shop page that merely carries one is a page, not a block.
+ *
+ * Erring high here costs an unrecognised wall, which degrades to the actionable error the caller
+ * used to get. Erring low costs a person being handed a drivable browser for a page that works.
+ */
+const MAX_INTERSTITIAL_CONTROLS = 12;
+const MAX_INTERSTITIAL_TEXT = 3_000;
+
+/** True when the page is the block and nothing else, judged on structure rather than wording. */
+function isInterstitial(evidence: HandoffBlockEvidence): boolean {
+    const operable = evidence.controls.filter(control => control.interactable).length;
+    return operable <= MAX_INTERSTITIAL_CONTROLS && (evidence.text?.length ?? 0) <= MAX_INTERSTITIAL_TEXT;
+}
+
+/**
+ * True when a person standing in this page would have something to operate.
+ *
+ * A challenge needs its widget rendered. Visibility rather than a ref is the bar there because the
+ * widget is a cross-origin iframe, which takes no pointer events of its own — the person clicks
+ * inside it. A login wall needs a credential field that is genuinely visible and takes input, plus
+ * the button that submits it: a caption reading "Sign in" beside a lone password box is the cheapest
+ * thing a hostile page can draw, and it submits nothing. Only a button counts as that submit, since
+ * "Continue" and "Next" are ordinary words for a link to wear anywhere on the web.
+ */
+function hasClearableControl(kind: InteractiveBlockKind, controls: readonly PageControl[]): boolean {
+    if (kind === 'captcha') {
+        return controls.some(
+            control =>
+                control.visible &&
+                CHALLENGE_CONTROL_ROLES.has(control.role) &&
+                CHALLENGE_CONTROL_NAME.test(control.name)
+        );
+    }
+    return (
+        controls.some(control => control.interactable && control.sensitive) &&
+        controls.some(
+            control => control.interactable && control.role === 'button' && LOGIN_SUBMIT_NAME.test(control.name)
+        )
+    );
+}
+
+/** A recognised block, and whether the evidence supports asking a person to clear it. */
+export interface BlockVerdict {
+    block: InteractiveBlock;
+    /**
+     * True when the page is an interstitial and holds the control a person would have to operate.
+     *
+     * Only this may open a live browser to a person. It is a higher bar than the block itself on
+     * purpose: the player URL is an unauthenticated capability to watch and drive a possibly
+     * signed-in browser, so page prose must never be the whole reason one is handed out.
+     */
+    clearableByPerson: boolean;
+}
+
+/**
+ * Decides what a live page is, and whether a person could get past it.
+ *
+ * `null` means the page works: either nothing matched, or a marker matched prose on a page that is
+ * plainly not a wall, such as a footer badge or an article about anti-bot vendors. A verdict with
+ * `clearableByPerson: false` is a real block with nothing for a person to do — a blank interstitial
+ * whose answer is the mitigation ladder, not a human.
+ */
+export function assessInteractiveBlock(evidence: HandoffBlockEvidence): BlockVerdict | null {
+    const block = detectInteractiveBlock(evidence);
+    if (block === null || !isInterstitial(evidence)) return null;
+    return { block, clearableByPerson: hasClearableControl(block.kind, evidence.controls) };
+}
+
 /** Builds the error for a login wall: name the identity options, never ask for a typed secret. */
 export function loginWallError(url: string, state: MitigationState): SteelToolError {
     const advice = state.profileId
