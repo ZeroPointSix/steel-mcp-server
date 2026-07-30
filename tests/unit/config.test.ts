@@ -117,6 +117,25 @@ describe('loadConfig', () => {
     it('does not put the Steel credential in the request-state secret', () => {
         expect(loadConfig({ STEEL_API_KEY: 'ste-supersecret' }).requestStateSecret).not.toContain('supersecret');
     });
+
+    it('warns when handles are shared across replicas but the handoff secret is per process', () => {
+        const config = loadConfig({ STEEL_API_KEY: 'k', REDIS_URL: 'redis://cache:6379' });
+
+        const warning = config.warnings.join(' ');
+        expect(warning).toMatch(/STEEL_REQUEST_STATE_SECRET/);
+        expect(warning, 'the warning does not say which deployment shape it applies to').toMatch(/REDIS_URL/);
+    });
+
+    it('stays quiet once the two are configured consistently', () => {
+        expect(
+            loadConfig({
+                STEEL_API_KEY: 'k',
+                REDIS_URL: 'redis://cache:6379',
+                STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48),
+            }).warnings
+        ).toEqual([]);
+        expect(loadConfig({ STEEL_API_KEY: 'k' }).warnings, 'a single-replica deployment needs no secret').toEqual([]);
+    });
 });
 
 describe('resolveInactivityTimeout', () => {

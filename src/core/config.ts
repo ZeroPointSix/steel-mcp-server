@@ -123,6 +123,18 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
         );
     }
 
+    // Sharing handles across replicas is the one deployment shape the generated per-process secret
+    // cannot serve: a retried handoff is routed to whichever replica answers, and any replica but
+    // the one that minted the state refuses it after the person has already done the work.
+    if (env.REDIS_URL?.trim() && !env.STEEL_REQUEST_STATE_SECRET?.trim()) {
+        warnings.push(
+            'REDIS_URL is set but STEEL_REQUEST_STATE_SECRET is not, so each replica signs ' +
+                'human-in-the-loop handoff state with its own per-process key. A retried handoff that ' +
+                'lands on another replica will be refused as expired once the person has finished. Set ' +
+                'the same STEEL_REQUEST_STATE_SECRET on every replica: openssl rand -base64 32'
+        );
+    }
+
     if (deployment === 'cloud' && !apiKey) {
         throw new Error(
             'STEEL_API_KEY is required to reach Steel Cloud. Set it, or point STEEL_BASE_URL at a self-hosted steel-browser.'
