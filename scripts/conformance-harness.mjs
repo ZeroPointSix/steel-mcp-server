@@ -5,6 +5,7 @@ import { localhostHostValidation, localhostOriginValidation, toNodeHandler } fro
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { loadConfig } from '../dist/core/config.js';
 import { CdpSessionPool } from '../dist/core/context.js';
+import { createHandoffCodec } from '../dist/core/mrtr.js';
 import { InMemoryHandleRegistry, principalFromCredential } from '../dist/core/registry.js';
 import { createSteelMcpServer } from '../dist/core/server.js';
 import { SteelRestClient } from '../dist/core/steel/rest.js';
@@ -26,6 +27,7 @@ const deps = {
     api,
     pool,
     registry,
+    handoffState: createHandoffCodec(config.requestStateSecret),
     principal: principalFromCredential(config.apiKey ?? 'conformance'),
     settleMultiplier: 1,
     now: () => new Date(),

@@ -1,7 +1,9 @@
 // ABOUTME: Shared hosted dependency runtime that reuses Steel clients within one credential while
 // ABOUTME: isolating tenants and routing every session release through the client that created it.
+import type { RequestStateCodec } from '@modelcontextprotocol/server';
 import type { SteelConfig } from './core/config.js';
 import { CdpSessionPool, type ServerDeps, type SessionPool } from './core/context.js';
+import { createHandoffCodec, type HandoffState } from './core/mrtr.js';
 import {
     type HandleRegistry,
     InMemoryHandleRegistry,
@@ -40,6 +42,13 @@ interface TenantClients {
     api: SteelApi;
     pool: SessionPool;
     settleMultiplier: number;
+    /**
+     * Built once per tenant so both rounds of one human-in-the-loop flow share a key.
+     *
+     * With no `STEEL_REQUEST_STATE_SECRET` configured this holds a per-process key, which only
+     * works while one replica serves the whole flow; a multi-replica deployment must configure one.
+     */
+    handoffState: RequestStateCodec<HandoffState>;
 }
 
 /**
@@ -146,7 +155,14 @@ export class HostedRuntime {
             steelSessionId => this.sessionOwners.set(steelSessionId, input.principal),
             steelSessionId => this.sessionOwners.delete(steelSessionId)
         );
-        const tenant = { credential: input.credential, config, api, pool, settleMultiplier };
+        const tenant: TenantClients = {
+            credential: input.credential,
+            config,
+            api,
+            pool,
+            settleMultiplier,
+            handoffState: createHandoffCodec(config.requestStateSecret),
+        };
         this.tenants.set(input.principal, tenant);
         return tenant;
     }
@@ -158,6 +174,7 @@ export class HostedRuntime {
             api: tenant.api,
             pool: tenant.pool,
             registry: this.registry,
+            handoffState: tenant.handoffState,
             principal: input.principal,
             settleMultiplier: tenant.settleMultiplier,
             now: this.now,

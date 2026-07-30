@@ -1,5 +1,6 @@
 // ABOUTME: Reads Steel credentials and deployment settings from the environment and derives the
 // ABOUTME: CDP connect URL, which must always carry a sessionId or Steel starts an untracked session.
+import { randomBytes } from 'node:crypto';
 
 /** The named tool presets a connection can select. */
 export const PROFILE_NAMES = ['scrape', 'browse', 'vision', 'full'] as const;
@@ -31,9 +32,22 @@ export interface SteelConfig {
      * cap rather than assuming the API will correct it.
      */
     sessionTimeoutMs: number;
+    /**
+     * HMAC key for the multi-round-trip `requestState` a human-in-the-loop handoff round-trips
+     * through the client.
+     *
+     * Read from `STEEL_REQUEST_STATE_SECRET` when the operator supplies one; otherwise a fresh
+     * per-process key. That default is correct for one process serving every round of a flow, and
+     * wrong for a multi-replica deployment, where a retry landing on another replica cannot verify
+     * state this one minted and the caller sees `Invalid or expired requestState`.
+     */
+    requestStateSecret: string;
     /** Configuration problems worth telling the operator about, logged by the entrypoint. */
     warnings: string[];
 }
+
+/** HMAC-SHA256 wants a full-width key; the codec refuses anything shorter. */
+const MIN_REQUEST_STATE_SECRET_BYTES = 32;
 
 const CLOUD_BASE_URL = 'https://api.steel.dev';
 const CLOUD_CONNECT_URL = 'wss://connect.steel.dev';
@@ -42,6 +56,24 @@ const LOCAL_BASE_URL = 'http://localhost:3000';
 const CLOUD_HOSTNAME = 'steel.dev';
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
 const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
+
+/**
+ * Resolves the request-state HMAC key.
+ *
+ * A short configured value is refused rather than padded: silently strengthening a weak operator
+ * secret would make the deployment look protected while every replica agreed on a guessable key.
+ */
+function resolveRequestStateSecret(raw: string | undefined): string {
+    const configured = raw?.trim();
+    if (!configured) return randomBytes(MIN_REQUEST_STATE_SECRET_BYTES).toString('base64url');
+    if (Buffer.byteLength(configured, 'utf8') < MIN_REQUEST_STATE_SECRET_BYTES) {
+        throw new Error(
+            `STEEL_REQUEST_STATE_SECRET must be at least ${MIN_REQUEST_STATE_SECRET_BYTES} bytes long. ` +
+                'Generate one with: openssl rand -base64 32'
+        );
+    }
+    return configured;
+}
 
 /** Removes a trailing `/v1` and any trailing slashes, reconciling the SDK and CLI conventions. */
 export function normalizeBaseUrl(raw: string): string {
@@ -111,6 +143,7 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
         maxConcurrentSessions: deployment === 'self_hosted' ? 1 : parseIntEnv(env.STEEL_MAX_SESSIONS, 10),
         inactivityTimeoutMs: parseIntEnv(env.STEEL_INACTIVITY_TIMEOUT_MS, DEFAULT_INACTIVITY_TIMEOUT_MS),
         sessionTimeoutMs: parseIntEnv(env.STEEL_SESSION_TIMEOUT_MS, DEFAULT_SESSION_TIMEOUT_MS),
+        requestStateSecret: resolveRequestStateSecret(env.STEEL_REQUEST_STATE_SECRET),
         warnings,
     };
 }

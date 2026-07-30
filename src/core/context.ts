@@ -1,9 +1,11 @@
 // ABOUTME: The dependency bundle every tool closes over, and the browser-pool contract that keeps
 // ABOUTME: one attached CDP page per Steel session so element refs survive across tool calls.
 import { randomUUID } from 'node:crypto';
+import type { RequestStateCodec } from '@modelcontextprotocol/server';
 import type { SteelConfig } from './config.js';
 import { buildCdpUrl } from './config.js';
 import { SteelToolError } from './errors.js';
+import type { HandoffState } from './mrtr.js';
 import { BrowserPage } from './page.js';
 import type { HandleRegistry } from './registry.js';
 import { resolveSettleBudgets } from './settle.js';
@@ -23,6 +25,13 @@ export interface ServerDeps {
     api: SteelApi;
     registry: HandleRegistry;
     pool: SessionPool;
+    /**
+     * Seals and verifies the multi-round-trip state a human-in-the-loop handoff round-trips.
+     *
+     * Injected rather than derived per request because every replica that might receive the retry
+     * has to hold the same key; a per-instance codec would reject its own flow's second round.
+     */
+    handoffState: RequestStateCodec<HandoffState>;
     /** The principal for this request's own credential; handles are re-authorised against it. */
     principal: string;
     /**

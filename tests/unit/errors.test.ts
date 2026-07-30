@@ -5,6 +5,8 @@ import {
     botDetectionError,
     clickBlockedError,
     detectBotBlock,
+    detectInteractiveBlock,
+    interactiveBlockError,
     mapSteelHttpError,
     nextMitigationRung,
     SteelToolError,
@@ -123,6 +125,94 @@ describe('detectBotBlock', () => {
 
     it('returns null for an ordinary page', () => {
         expect(detectBotBlock({ status: 200, body: '<h1>Welcome</h1>', finalUrl: 'https://example.com/' })).toBeNull();
+    });
+});
+
+describe('detectInteractiveBlock', () => {
+    it('reuses the vendor taxonomy so an interstitial is classified as a challenge, not a login', () => {
+        const block = detectInteractiveBlock({
+            finalUrl: 'https://shop.test/cart',
+            title: 'Just a moment...',
+            text: 'RootWebArea Just a moment...',
+        });
+        expect(block).toMatchObject({ kind: 'captcha', vendor: 'Cloudflare', marker: 'cf-chl' });
+    });
+
+    it('recognises the CAPTCHA widgets a person can clear in a live browser', () => {
+        for (const [text, vendor] of [
+            ["checkbox I'm not a robot", 'reCAPTCHA'],
+            ['iframe hCaptcha challenge', 'hCaptcha'],
+            ['Verify you are human', 'human-verification'],
+        ] as const) {
+            expect(detectInteractiveBlock({ finalUrl: 'https://x.test/', text })).toMatchObject({
+                kind: 'captcha',
+                vendor,
+            });
+        }
+    });
+
+    it('calls a page with a password field a login wall', () => {
+        const block = detectInteractiveBlock({
+            finalUrl: 'https://app.test/login',
+            title: 'Sign in',
+            text: 'textbox Email\ntextbox Password\nbutton Sign in',
+            hasPasswordField: true,
+        });
+        expect(block).toMatchObject({ kind: 'login_wall', marker: 'password_field' });
+    });
+
+    it('does not call every page with a Sign in link a login wall', () => {
+        // Nearly every page on the web has a "Sign in" link in its header. Without the password
+        // field the detector would hand a human control of the browser on ordinary navigations.
+        expect(
+            detectInteractiveBlock({
+                finalUrl: 'https://shop.test/products',
+                title: 'Products',
+                text: 'link Sign in\nheading Products\nbutton Add to basket',
+            })
+        ).toBeNull();
+    });
+
+    it('returns null for an ordinary page', () => {
+        expect(
+            detectInteractiveBlock({ finalUrl: 'https://example.com/', title: 'Example', text: 'heading Welcome' })
+        ).toBeNull();
+    });
+});
+
+describe('interactiveBlockError', () => {
+    it('routes a challenge to the bot-detection error, keeping the one-rung ladder', () => {
+        const err = interactiveBlockError(
+            { kind: 'captcha', vendor: 'DataDome', marker: 'datadome' },
+            'https://shop.test/cart',
+            {}
+        );
+        expect(err.code).toBe('bot_detection');
+        expect(err.message).toBe(
+            botDetectionError({ vendor: 'DataDome', marker: 'datadome' }, 'https://shop.test/cart', {}).message
+        );
+    });
+
+    it('tells a login wall apart and points at the identity options, never at typing a password', () => {
+        const err = interactiveBlockError(
+            { kind: 'login_wall', vendor: 'credentials', marker: 'password_field' },
+            'https://app.test/login',
+            {}
+        );
+        expect(err.code).toBe('login_required');
+        expect(err.message).toContain('https://app.test/login');
+        expect(err.message).toMatch(/profile_id/);
+        expect(err.message).toMatch(/namespace/);
+        expect(err.message).toMatch(/never put a password in a tool argument/i);
+    });
+
+    it('says the saved identity is not signed in when the session already reuses a profile', () => {
+        const err = interactiveBlockError(
+            { kind: 'login_wall', vendor: 'credentials', marker: 'password_field' },
+            'https://app.test/login',
+            { profileId: 'p1' }
+        );
+        expect(err.message).toMatch(/already reuses a browser profile/i);
     });
 });
 

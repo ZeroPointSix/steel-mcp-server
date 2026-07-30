@@ -2,6 +2,7 @@
 // ABOUTME: surface can be driven through a real MCP client without a network or a browser.
 import { loadConfig, type SteelConfig } from '../../src/core/config.js';
 import type { ServerDeps, SessionPool } from '../../src/core/context.js';
+import { createHandoffCodec } from '../../src/core/mrtr.js';
 import { BrowserPage } from '../../src/core/page.js';
 import { InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
 import type {
@@ -24,6 +25,8 @@ export interface FakeSteelApiOptions {
     traces?: AgentTrace[];
     logs?: SessionLogEntry[];
     failCreateWith?: Error;
+    /** Overrides the live-player URL; `null` models a deployment that returns none at all. */
+    debugUrl?: string | null;
 }
 
 /** Records every call so tests can assert on the wire shape without a network. */
@@ -64,6 +67,11 @@ export class FakeSteelApi implements SteelApi {
             status: 'live',
             createdAt: '2026-07-27T10:00:00.000Z',
             sessionViewerUrl: `https://app.steel.dev/sessions/${request.sessionId}`,
+            // The self-contained player, which is what a person without a Steel login can open.
+            debugUrl:
+                this.options.debugUrl === null
+                    ? undefined
+                    : (this.options.debugUrl ?? `https://api.steel.dev/v1/sessions/${request.sessionId}/player`),
         };
     }
 
@@ -146,6 +154,91 @@ export class FakeSessionPool implements SessionPool {
     }
 }
 
+/** The ordinary two-element page the stateful tools are exercised against by default. */
+export function plainPage(): FixturePage {
+    return {
+        root: {
+            tag: 'HTML',
+            backendNodeId: 1,
+            role: 'RootWebArea',
+            name: 'Example',
+            bounds: [0, 0, 1280, 720],
+            children: [
+                { tag: 'BUTTON', backendNodeId: 10, role: 'button', name: 'Save', bounds: [100, 200, 80, 40] },
+                { tag: 'A', backendNodeId: 11, role: 'link', name: 'About us', bounds: [10, 60, 60, 20] },
+            ],
+        },
+        url: 'https://example.com/',
+        loaderId: 'loader-1',
+    };
+}
+
+/**
+ * A login wall: an email field, a password field and a submit button.
+ *
+ * The password input is what makes this a wall rather than a page with a sign-in link, and the
+ * snapshot pipeline is what classifies it as sensitive, so the fixture states the attributes it
+ * reads rather than a flag.
+ */
+export function loginWallPage(url = 'https://app.test/login'): FixturePage {
+    return {
+        root: {
+            tag: 'HTML',
+            backendNodeId: 1,
+            role: 'RootWebArea',
+            name: 'Sign in to Example',
+            bounds: [0, 0, 1280, 720],
+            children: [
+                {
+                    tag: 'INPUT',
+                    backendNodeId: 20,
+                    role: 'textbox',
+                    name: 'Email',
+                    attributes: { type: 'email', name: 'email' },
+                    bounds: [100, 100, 240, 32],
+                },
+                {
+                    tag: 'INPUT',
+                    backendNodeId: 21,
+                    role: 'textbox',
+                    name: 'Password',
+                    attributes: { type: 'password', name: 'password', autocomplete: 'current-password' },
+                    bounds: [100, 150, 240, 32],
+                },
+                { tag: 'BUTTON', backendNodeId: 22, role: 'button', name: 'Sign in', bounds: [100, 200, 80, 40] },
+            ],
+        },
+        url,
+        title: 'Sign in to Example',
+        loaderId: 'loader-login',
+    };
+}
+
+/** A CAPTCHA challenge page: the widget label is the only thing on it. */
+export function captchaPage(url = 'https://shop.test/cart'): FixturePage {
+    return {
+        root: {
+            tag: 'HTML',
+            backendNodeId: 1,
+            role: 'RootWebArea',
+            name: 'Verify you are human',
+            bounds: [0, 0, 1280, 720],
+            children: [
+                {
+                    tag: 'DIV',
+                    backendNodeId: 30,
+                    role: 'checkbox',
+                    name: "I'm not a robot",
+                    bounds: [100, 100, 300, 74],
+                },
+            ],
+        },
+        url,
+        title: 'Verify you are human',
+        loaderId: 'loader-captcha',
+    };
+}
+
 export const TEST_API_KEY = 'ste-test-key';
 
 export interface TestDepsOptions {
@@ -163,38 +256,7 @@ export function testDeps(options: TestDepsOptions = {}): ServerDeps & {
 } {
     const config = loadConfig({ STEEL_API_KEY: TEST_API_KEY, ...options.env });
     const api = (options.api as FakeSteelApi) ?? new FakeSteelApi();
-    const pool =
-        (options.pool as FakeSessionPool) ??
-        new FakeSessionPool(
-            options.page ??
-                (() => ({
-                    root: {
-                        tag: 'HTML',
-                        backendNodeId: 1,
-                        role: 'RootWebArea',
-                        name: 'Example',
-                        bounds: [0, 0, 1280, 720],
-                        children: [
-                            {
-                                tag: 'BUTTON',
-                                backendNodeId: 10,
-                                role: 'button',
-                                name: 'Save',
-                                bounds: [100, 200, 80, 40],
-                            },
-                            {
-                                tag: 'A',
-                                backendNodeId: 11,
-                                role: 'link',
-                                name: 'About us',
-                                bounds: [10, 60, 60, 20],
-                            },
-                        ],
-                    },
-                    url: 'https://example.com/',
-                    loaderId: 'loader-1',
-                }))
-        );
+    const pool = (options.pool as FakeSessionPool) ?? new FakeSessionPool(options.page ?? plainPage);
 
     const registry = new InMemoryHandleRegistry({
         releaseSteelSession: async (id: string) => {
@@ -208,6 +270,7 @@ export function testDeps(options: TestDepsOptions = {}): ServerDeps & {
         api,
         pool,
         registry,
+        handoffState: createHandoffCodec(config.requestStateSecret),
         principal: principalFromCredential(TEST_API_KEY),
         settleMultiplier: 1,
         // Real time: the registry checks handle expiry against the real clock.

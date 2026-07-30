@@ -269,6 +269,88 @@ describe('InMemoryHandleRegistry.reap', () => {
         }
     });
 
+    it('leaves a handle awaiting human input alone, because our idle clock cannot see the human', async () => {
+        // Steel's own inactivityTimeout counts remote input in the live session, so a person typing
+        // in the viewer keeps the browser alive. Our reaper only sees tool calls, so during a
+        // pending elicitation it is the less informed of the two clocks and must defer.
+        vi.useFakeTimers();
+        try {
+            const { registry, released } = newRegistry();
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 'steel-1',
+                expiresAt: Date.now() + 600_000,
+            });
+            await registry.awaitInput(handle, Date.now() + 300_000);
+            vi.advanceTimersByTime(200_000);
+
+            expect(await registry.reap({ idleMs: 120_000 })).toBe(0);
+            expect(released).toEqual([]);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('still reaps a handle awaiting human input once its hard expiry passes', async () => {
+        // The grace window suspends our slot reclamation only. The hard timeout is Steel's, and
+        // nothing about a pending elicitation may extend it.
+        vi.useFakeTimers();
+        try {
+            const { registry, released } = newRegistry();
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 'steel-1',
+                expiresAt: Date.now() + 1_000,
+            });
+            await registry.awaitInput(handle, Date.now() + 600_000);
+            vi.advanceTimersByTime(2_000);
+
+            expect(await registry.reap({ idleMs: 120_000 })).toBe(1);
+            expect(released).toEqual(['steel-1']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('reaps a handle again once its grace window lapses, so a walked-away human frees the slot', async () => {
+        vi.useFakeTimers();
+        try {
+            const { registry, released } = newRegistry();
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 'steel-1',
+                expiresAt: Date.now() + 900_000,
+            });
+            await registry.awaitInput(handle, Date.now() + 60_000);
+            vi.advanceTimersByTime(120_000);
+
+            expect(await registry.reap({ idleMs: 90_000 })).toBe(1);
+            expect(released).toEqual(['steel-1']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('clears the grace window on the next real call, so normal idle accounting resumes', async () => {
+        vi.useFakeTimers();
+        try {
+            const { registry, released } = newRegistry();
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 'steel-1',
+                expiresAt: Date.now() + 900_000,
+            });
+            await registry.awaitInput(handle, Date.now() + 600_000);
+            await registry.touch(handle);
+            vi.advanceTimersByTime(200_000);
+
+            expect(await registry.reap({ idleMs: 120_000 })).toBe(1);
+            expect(released).toEqual(['steel-1']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('counts releases by path so the Steel backstop can be alerted on', async () => {
         const { registry } = newRegistry();
         const a = await registry.create({ principal: ORG_A, steelSessionId: 's1', expiresAt: Date.now() + 60_000 });

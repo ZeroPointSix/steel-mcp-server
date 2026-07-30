@@ -7,6 +7,8 @@ export type { ServerDeps, SessionPool } from './context.js';
 export { CdpSessionPool, mintSteelSessionId } from './context.js';
 export { SteelToolError } from './errors.js';
 export { SERVER_INSTRUCTIONS } from './instructions.js';
+export type { HandoffState } from './mrtr.js';
+export { createHandoffCodec } from './mrtr.js';
 export type { ToolDefinition } from './profiles.js';
 export { TOOL_TABLE, toolsForProfile } from './profiles.js';
 export type { HandleRegistry, ReleasePath } from './registry.js';

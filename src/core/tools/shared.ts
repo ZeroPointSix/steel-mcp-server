@@ -1,6 +1,6 @@
 // ABOUTME: Shared plumbing for tool handlers: the handle-to-page resolution that re-authorises on
 // ABOUTME: every call, the untrusted-content fence around page text, and uniform error handling.
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, InputRequiredResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps } from '../context.js';
 import { type EnvelopeSections, successResult } from '../envelope.js';
@@ -28,8 +28,14 @@ export const cursorSchema = z
     .optional()
     .describe('Cursor from a previous truncated response, to continue reading where it stopped.');
 
+/**
+ * A tool outcome: an ordinary result, or the input_required result a human-in-the-loop handoff
+ * returns when a person has to finish the step in the live browser.
+ */
+export type ToolOutcome = CallToolResult | InputRequiredResult;
+
 /** Runs a handler and converts anything it throws into a tool-execution error result. */
-export async function guard(work: () => Promise<CallToolResult>): Promise<CallToolResult> {
+export async function guard(work: () => Promise<ToolOutcome>): Promise<ToolOutcome> {
     try {
         return await work();
     } catch (error) {
@@ -48,8 +54,8 @@ export async function withPage(
     deps: ServerDeps,
     sessionId: string,
     signal: AbortSignal | undefined,
-    work: (page: BrowserPage, record: HandleRecord) => Promise<CallToolResult>
-): Promise<CallToolResult> {
+    work: (page: BrowserPage, record: HandleRecord) => Promise<ToolOutcome>
+): Promise<ToolOutcome> {
     return guard(async () => {
         const record = await deps.registry.resolve(sessionId, deps.principal);
         await deps.registry.touch(sessionId);
