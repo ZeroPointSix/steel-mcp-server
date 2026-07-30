@@ -90,6 +90,7 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
                 viewerUrl: 'https://app.steel.dev/sessions/steel-1',
                 debugUrl: 'https://api.steel.dev/v1/sessions/steel-1/player',
                 mitigation: { useProxy: true, profileId: 'profile-1' },
+                handoffRounds: 0,
             };
             expect(created).toMatchObject(expected);
             expect(await registry.resolve(created.handle, ORG_A)).toMatchObject(expected);
@@ -227,6 +228,56 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
 
         it('ignores an unknown handle instead of throwing', async () => {
             await expect(registry.awaitInput('sess_nope', Date.now() + 1_000)).resolves.toBeUndefined();
+        });
+    });
+
+    describe('recordHandoff', () => {
+        async function newHandle(): Promise<string> {
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 'steel-1',
+                expiresAt: Date.now() + 600_000,
+            });
+            return handle;
+        }
+
+        it('starts every handle at no handoffs offered', async () => {
+            const handle = await newHandle();
+            expect((await registry.resolve(handle, ORG_A)).handoffRounds).toBe(0);
+        });
+
+        it('returns the round each handoff is, and reports it back on the record', async () => {
+            // The bound has to hold for a client that never returns the signed state, so the count
+            // a tool reads is this one rather than anything the caller echoes.
+            const handle = await newHandle();
+
+            expect(await registry.recordHandoff(handle)).toBe(1);
+            expect(await registry.recordHandoff(handle)).toBe(2);
+            expect((await registry.resolve(handle, ORG_A)).handoffRounds).toBe(2);
+        });
+
+        it('counts per handle, so one session budget is never spent by another', async () => {
+            const first = await newHandle();
+            const second = await newHandle();
+
+            await registry.recordHandoff(first);
+            await registry.recordHandoff(first);
+            expect(await registry.recordHandoff(second)).toBe(1);
+            expect((await registry.resolve(first, ORG_A)).handoffRounds).toBe(2);
+        });
+
+        it('starts a replacement handle from zero once the first is released', async () => {
+            const spent = await newHandle();
+            await registry.recordHandoff(spent);
+            await registry.release(spent, ORG_A, 'explicit');
+
+            expect((await registry.resolve(await newHandle(), ORG_A)).handoffRounds).toBe(0);
+        });
+
+        it('does not throw for a handle it cannot find', async () => {
+            // The count of a handle that does not exist is not meaningful, and no caller reaches
+            // this without resolving first; what matters is that it is not an error path.
+            await expect(registry.recordHandoff('sess_nope')).resolves.toEqual(expect.any(Number));
         });
     });
 

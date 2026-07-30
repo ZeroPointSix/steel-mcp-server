@@ -13,6 +13,8 @@ export interface RedisClient {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, mode: 'PX', ttlMs: number): Promise<unknown>;
     del(key: string): Promise<number>;
+    incr(key: string): Promise<number>;
+    pexpire(key: string, ttlMs: number): Promise<number>;
     sadd(key: string, member: string): Promise<number>;
     srem(key: string, member: string): Promise<number>;
     smembers(key: string): Promise<string[]>;
@@ -40,6 +42,10 @@ export function redisConnection(client: RedisClient, onError: (error: unknown) =
             await client.set(key, value, 'PX', ttlMs);
         },
         del: key => client.del(key),
+        incr: key => client.incr(key),
+        pexpire: async (key, ttlMs) => {
+            await client.pexpire(key, ttlMs);
+        },
         sadd: async (key, member) => {
             await client.sadd(key, member);
         },

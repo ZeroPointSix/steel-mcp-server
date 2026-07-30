@@ -5,7 +5,6 @@ import { CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import {
     createHandoffCodec,
-    HandoffLedger,
     type HandoffState,
     handoffOrigin,
     handoffViewerUrl,
@@ -170,24 +169,6 @@ describe('handoffOrigin', () => {
     });
 });
 
-describe('HandoffLedger', () => {
-    const EXPIRES_AT = 10_000;
-
-    it('counts what a handle was already offered, whatever the client echoes back', () => {
-        const ledger = new HandoffLedger();
-        expect(ledger.offered('sess_abc', 0)).toBe(0);
-        expect(ledger.record('sess_abc', 0, EXPIRES_AT)).toBe(1);
-        expect(ledger.record('sess_abc', 1, EXPIRES_AT)).toBe(2);
-        expect(ledger.offered('sess_abc', 2)).toBe(2);
-        // A different session has its own budget; the count is per handle, not per process.
-        expect(ledger.offered('sess_other', 2)).toBe(0);
-    });
-
-    it('forgets a handle once the session it names can no longer exist', () => {
-        const ledger = new HandoffLedger();
-        ledger.record('sess_abc', 0, EXPIRES_AT);
-        expect(ledger.offered('sess_abc', EXPIRES_AT + 1)).toBe(0);
-        // The expired entry is dropped rather than kept for the life of the process.
-        expect(ledger.size).toBe(0);
-    });
-});
+// The server-side round count now lives on the handle record. Its own behaviour is covered for both
+// registry backends in registry-conformance.test.ts, and the bound it enforces end to end — a client
+// that never echoes the signed state back — in integration/mrtr.test.ts.

@@ -6,9 +6,11 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it } from 'vitest';
 import { interactiveBlockError, toolErrorResult } from '../../src/core/errors.js';
 import { HANDOFF_KEY, MAX_HANDOFF_ROUNDS } from '../../src/core/mrtr.js';
+import { RedisHandleRegistry } from '../../src/core/registry-redis.js';
 import { createSteelMcpServer } from '../../src/core/server.js';
 import { createSteelHttpHandler } from '../../src/http.js';
 import type { FixturePage } from '../helpers/cdp-fixture.js';
+import { FakeRedis } from '../helpers/fake-redis.js';
 import {
     badgedShopPage,
     captchaPage,
@@ -243,6 +245,41 @@ describe('input_required for a login wall', () => {
                     resultType?: string;
                     isError?: boolean;
                 }
+            );
+        }
+
+        expect(results.filter(result => result.resultType === 'input_required')).toHaveLength(MAX_HANDOFF_ROUNDS);
+        expect(results.at(-1)?.isError).toBe(true);
+    });
+
+    it('stops offering handoffs however the retries are routed across replicas', async () => {
+        // Round-robin routing with no sticky sessions is the hosted shape, so the whole stack has to
+        // hold the bound when consecutive calls are served by different servers over a shared store.
+        // What this pins is that the bound comes from the handle rather than from the signed state,
+        // which is absent here. That the count is shared through the store rather than held per
+        // process is proven in registry-redis.test.ts instead: two servers in one Node process would
+        // share a module-scope counter, so this test could not tell the two apart.
+        const store = new FakeRedis();
+        const shared = () => new RedisHandleRegistry({ commands: store, releaseSteelSession: async () => {} });
+        const env = { STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48) };
+        const first = await connectModern({
+            deps: testDeps({ page: loginWallPage, registry: shared(), env }),
+            autoFulfill: false,
+        });
+        const second = await connectModern({
+            deps: testDeps({ page: loginWallPage, registry: shared(), env }),
+            autoFulfill: false,
+        });
+        const handle = await newSession(first);
+
+        const results: Array<{ resultType?: string; isError?: boolean }> = [];
+        for (let attempt = 0; attempt <= MAX_HANDOFF_ROUNDS; attempt++) {
+            const replica = attempt % 2 === 0 ? first : second;
+            results.push(
+                (await replica.client.callTool(
+                    { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } },
+                    { allowInputRequired: true }
+                )) as unknown as { resultType?: string; isError?: boolean }
             );
         }
 

@@ -29,6 +29,15 @@ export interface RedisCommands {
     set(key: string, value: string, ttlMs: number): Promise<void>;
     /** Returns how many keys were removed, which is how one of two concurrent sweepers wins. */
     del(key: string): Promise<number>;
+    /**
+     * Atomically adds one to the integer at `key` and returns the new value.
+     *
+     * A missing key counts as zero, so the first call returns 1. Redis creates that key with no
+     * expiry at all and an increment never changes an existing one, so a TTL is `pexpire`'s job.
+     */
+    incr(key: string): Promise<number>;
+    /** Puts a millisecond time-to-live on a key that exists. A missing key is left alone. */
+    pexpire(key: string, ttlMs: number): Promise<void>;
     sadd(key: string, member: string): Promise<void>;
     srem(key: string, member: string): Promise<void>;
     smembers(key: string): Promise<string[]>;
@@ -53,21 +62,23 @@ const DEFAULT_KEY_PREFIX = 'steel-mcp';
 const RECORD_GRACE_MS = 86_400_000;
 
 /**
- * How long a `lastUsedAt` or `awaitingInputUntil` key lives.
+ * How long each of the three mutable-field keys lives.
  *
  * Its expiry is not a deadline anything depends on: a missing `lastUsedAt` means nothing has
  * touched the handle for this long, so falling back to `createdAt` reports it as idle, which it
- * demonstrably is. That holds for any session duration, so this needs no relation to one.
+ * demonstrably is. That holds for any session duration, so this needs no relation to one. It always
+ * outlives the record for the same reason, so a live handle never loses a handoff round to it.
  */
 const MUTABLE_FIELD_TTL_MS = RECORD_GRACE_MS;
 
 /**
  * The immutable part of a record, which is the only part stored as JSON.
  *
- * `lastUsedAt` and `awaitingInputUntil` are deliberately absent: they change after creation, and a
- * whole-record rewrite is what made a concurrent touch able to undo a release or a handoff.
+ * `lastUsedAt`, `awaitingInputUntil` and `handoffRounds` are deliberately absent: they change after
+ * creation, and a whole-record rewrite is what made a concurrent touch able to undo a release or a
+ * handoff.
  */
-type StoredRecord = Omit<HandleRecord, 'lastUsedAt' | 'awaitingInputUntil'>;
+type StoredRecord = Omit<HandleRecord, 'lastUsedAt' | 'awaitingInputUntil' | 'handoffRounds'>;
 
 /** Reads a timestamp key, treating anything unparseable as absent. */
 function readTimestamp(raw: string | null): number | undefined {
@@ -94,12 +105,12 @@ export class RedisHandleRegistry implements HandleRegistry {
     }
 
     /**
-     * The two keys holding the fields that change after creation.
+     * The three keys holding the fields that change after creation.
      *
-     * Each is owned by exactly one operation — `touch` writes the first, `awaitInput` the second —
-     * so every mutation is a single-key command whose value is computed from the clock rather than
-     * from a record read a moment earlier. A handle is base64url, so neither suffix can collide
-     * with another handle's record key.
+     * Each is owned by exactly one operation — `touch` writes the first, `awaitInput` the second,
+     * `recordHandoff` the third — so every mutation is a single-key command that depends on no
+     * record read a moment earlier. A handle is base64url, so no suffix can collide with another
+     * handle's record key.
      */
     private usedKey(handle: string): string {
         return `${this.recordKey(handle)}:used`;
@@ -107,6 +118,10 @@ export class RedisHandleRegistry implements HandleRegistry {
 
     private awaitKey(handle: string): string {
         return `${this.recordKey(handle)}:await`;
+    }
+
+    private roundsKey(handle: string): string {
+        return `${this.recordKey(handle)}:rounds`;
     }
 
     /** Index of one principal's handles, so a count or a list never scans another tenant's records. */
@@ -119,15 +134,16 @@ export class RedisHandleRegistry implements HandleRegistry {
         return `${this.prefix}:live`;
     }
 
-    /** Reassembles a record from its immutable JSON and the two keys holding its mutable fields. */
+    /** Reassembles a record from its immutable JSON and the three keys holding its mutable fields. */
     private async read(handle: string): Promise<HandleRecord | null> {
-        // Issued together so reading three keys costs one round trip rather than three.
-        const [raw, used, awaiting] = await Promise.all([
+        // Issued together so reading four keys costs one round trip rather than four.
+        const [raw, used, awaiting, rounds] = await Promise.all([
             this.commands.get(this.recordKey(handle)),
             this.commands.get(this.usedKey(handle)),
             this.commands.get(this.awaitKey(handle)),
+            this.commands.get(this.roundsKey(handle)),
         ]);
-        // The record is what decides whether the handle exists at all; the other two are only ever
+        // The record is what decides whether the handle exists at all; the other three are only ever
         // read for a handle that does, so a stray one left by a released handle changes nothing.
         if (raw === null) return null;
 
@@ -146,6 +162,8 @@ export class RedisHandleRegistry implements HandleRegistry {
             // expired key is the same answer.
             lastUsedAt: readTimestamp(used) ?? stored.createdAt,
             awaitingInputUntil: readTimestamp(awaiting),
+            // No counter key means no handoff has been offered yet.
+            handoffRounds: readTimestamp(rounds) ?? 0,
         };
     }
 
@@ -173,6 +191,7 @@ export class RedisHandleRegistry implements HandleRegistry {
         const removed = await this.commands.del(this.recordKey(handle));
         await this.commands.del(this.usedKey(handle));
         await this.commands.del(this.awaitKey(handle));
+        await this.commands.del(this.roundsKey(handle));
         await this.commands.srem(this.principalKey(principal), handle);
         await this.commands.srem(this.liveKey, `${principal}:${handle}`);
         return removed > 0;
@@ -197,8 +216,9 @@ export class RedisHandleRegistry implements HandleRegistry {
         await this.write(stored);
         await this.commands.sadd(this.principalKey(stored.principal), stored.handle);
         await this.commands.sadd(this.liveKey, `${stored.principal}:${stored.handle}`);
-        // No `lastUsedAt` key is written: at creation it is `createdAt`, which is what `read` reports.
-        return { ...stored, lastUsedAt: now };
+        // Neither mutable key is written: at creation the last use is `createdAt` and no handoff has
+        // been offered, which is exactly what `read` reports for an absent key.
+        return { ...stored, lastUsedAt: now, handoffRounds: 0 };
     }
 
     async resolve(handle: string, principal: string): Promise<HandleRecord> {
@@ -234,6 +254,20 @@ export class RedisHandleRegistry implements HandleRegistry {
 
     async awaitInput(handle: string, untilMs: number): Promise<void> {
         await this.commands.set(this.awaitKey(handle), String(untilMs), MUTABLE_FIELD_TTL_MS);
+    }
+
+    /**
+     * Counts one handoff against the handle, atomically across replicas.
+     *
+     * `incr` is the whole point: read-then-write would hand the same round number to two replicas
+     * offering a handoff at the same moment, and one extra person would be pulled into the browser
+     * between them. The expiry is a second command because Redis creates a counter key with none,
+     * and it is refreshed every round rather than only the first, as the other two keys are.
+     */
+    async recordHandoff(handle: string): Promise<number> {
+        const rounds = await this.commands.incr(this.roundsKey(handle));
+        await this.commands.pexpire(this.roundsKey(handle), MUTABLE_FIELD_TTL_MS);
+        return rounds;
     }
 
     /**

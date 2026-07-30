@@ -463,6 +463,38 @@ describe('RedisHandleRegistry.countLive', () => {
     });
 });
 
+describe('RedisHandleRegistry.recordHandoff', () => {
+    it('gives the counter an expiry, which an increment on its own would not', async () => {
+        // INCR creates its key with no TTL at all, so without the explicit expiry the counter for
+        // every handle a deployment ever mints would sit in Redis for good.
+        const { registry, store, clock } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 600_000,
+        });
+
+        await registry.recordHandoff(handle);
+
+        const ttl = store.ttlMs(`steel-mcp:handle:${handle}:rounds`);
+        expect(ttl, 'the counter key was never given an expiry').toBeLessThan(Number.POSITIVE_INFINITY);
+        expect(ttl).toBeGreaterThan(0);
+    });
+
+    it('is swept with the handle, so a released session leaves no counter behind', async () => {
+        const { registry, store, clock } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 600_000,
+        });
+        await registry.recordHandoff(handle);
+
+        await registry.release(handle, ORG_A, 'explicit');
+        expect(store.valueKeys()).toEqual([]);
+    });
+});
+
 describe('RedisHandleRegistry across replicas', () => {
     /** Two registries over one store: exactly the hosted shape, where no request is routed stickily. */
     function twoReplicas(options: HarnessOptions = {}) {
@@ -496,6 +528,25 @@ describe('RedisHandleRegistry across replicas', () => {
         const error = await captureError(second.registry.resolve(handle, ORG_B));
         expect(error.code).toBe('not_found');
         expect(await second.registry.countLive(ORG_B)).toBe(0);
+    });
+
+    it('counts handoff rounds as one sequence however the calls are routed', async () => {
+        // The bound is per handle, not per replica. A per-process count would restart on whichever
+        // replica had not seen the handle, and a person would be interrupted again for free.
+        const { first, second, clock } = twoReplicas();
+        const { handle } = await first.registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: clock.ms + 900_000,
+        });
+
+        expect(await first.registry.recordHandoff(handle)).toBe(1);
+        expect(await second.registry.recordHandoff(handle), 'the second replica started its own count').toBe(2);
+        expect(await first.registry.recordHandoff(handle)).toBe(3);
+
+        // Whichever replica serves the next retry reads the same total and stops offering.
+        expect((await first.registry.resolve(handle, ORG_A)).handoffRounds).toBe(3);
+        expect((await second.registry.resolve(handle, ORG_A)).handoffRounds).toBe(3);
     });
 
     it('carries a touch on one replica over to the other replica idle math', async () => {

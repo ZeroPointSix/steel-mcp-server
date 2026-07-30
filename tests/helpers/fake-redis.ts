@@ -42,6 +42,32 @@ export class FakeRedis implements RedisCommands {
         return this.values.delete(key) ? 1 : 0;
     }
 
+    /**
+     * Redis INCR: a missing key counts as zero and is created with **no expiry**, and an increment
+     * never touches the expiry of a key that already had one. Both matter — the first is why a
+     * caller has to set a TTL itself, the second is why setting it every round is not a bug.
+     */
+    async incr(key: string): Promise<number> {
+        const current = await this.get(key);
+        if (current !== null && !/^-?\d+$/.test(current)) {
+            throw new Error('ERR value is not an integer or out of range');
+        }
+        const next = (current === null ? 0 : Number.parseInt(current, 10)) + 1;
+        const existing = this.values.get(key);
+        this.values.set(key, {
+            value: String(next),
+            expiresAtMs: existing?.expiresAtMs ?? Number.POSITIVE_INFINITY,
+        });
+        return next;
+    }
+
+    /** Redis PEXPIRE: sets a millisecond TTL, and does nothing at all when the key is gone. */
+    async pexpire(key: string, ttlMs: number): Promise<void> {
+        const existing = this.values.get(key);
+        if (!existing) return;
+        existing.expiresAtMs = this.nowMs() + ttlMs;
+    }
+
     async sadd(key: string, member: string): Promise<void> {
         const members = this.sets.get(key) ?? new Set<string>();
         members.add(member);
@@ -131,6 +157,14 @@ export class GatedRedis implements RedisCommands {
         return this.gated(() => this.inner.del(key));
     }
 
+    async incr(key: string): Promise<number> {
+        return this.gated(() => this.inner.incr(key));
+    }
+
+    async pexpire(key: string, ttlMs: number): Promise<void> {
+        return this.gated(() => this.inner.pexpire(key, ttlMs));
+    }
+
     async sadd(key: string, member: string): Promise<void> {
         return this.gated(() => this.inner.sadd(key, member));
     }
@@ -147,6 +181,7 @@ export class GatedRedis implements RedisCommands {
 export interface RecordingRedisClientReplies {
     get?: string | null;
     del?: number;
+    incr?: number;
     smembers?: string[];
 }
 
@@ -174,6 +209,16 @@ export class RecordingRedisClient implements RedisClient {
     async del(key: string): Promise<number> {
         this.record('del', [key]);
         return this.replies.del ?? 0;
+    }
+
+    async incr(key: string): Promise<number> {
+        this.record('incr', [key]);
+        return this.replies.incr ?? 1;
+    }
+
+    async pexpire(key: string, ttlMs: number): Promise<number> {
+        this.record('pexpire', [key, ttlMs]);
+        return 1;
     }
 
     async sadd(key: string, member: string): Promise<number> {

@@ -31,8 +31,9 @@ export const HANDOFF_KEY = 'steel_human_handoff';
  * The spec permits asking indefinitely. A bound is better: after three attempts the person is not
  * getting through, and a caller stuck in a loop learns nothing from a fourth identical prompt.
  *
- * Counted per handle rather than per flow, and server-side, so the number of times a session can
- * interrupt a person does not depend on the client returning anything.
+ * Counted per handle rather than per flow, and on the handle's own record rather than in this
+ * process, so the number of times a session can interrupt a person depends on neither the client
+ * returning anything nor which replica happens to serve the retry.
  */
 export const MAX_HANDOFF_ROUNDS = 3;
 
@@ -60,48 +61,6 @@ export interface HandoffState {
     origin: string;
     round: number;
 }
-
-/**
- * The server's own count of the handoffs a handle has been offered.
- *
- * The signed state bounds only a client that echoes it back; a host that drops it — by accident or
- * on purpose — would otherwise restart at round one forever, and every call would interrupt a
- * person again. An entry lives until the handle's own hard expiry, which the registry enforces, so
- * a session structurally cannot outlast its budget and the map cannot grow without bound.
- *
- * Process-local: a retry that lands on another replica finds no entry there, and the client-held
- * round count is all that bounds that case. A registry-backed count would close it.
- */
-export class HandoffLedger {
-    private readonly entries = new Map<string, { rounds: number; expiresAt: number }>();
-
-    /** Entries currently held, so a test can prove an expired one is dropped rather than kept. */
-    get size(): number {
-        return this.entries.size;
-    }
-
-    /** How many handoffs this handle has already been offered. */
-    offered(handle: string, now: number): number {
-        const entry = this.entries.get(handle);
-        if (entry === undefined) return 0;
-        if (entry.expiresAt <= now) {
-            this.entries.delete(handle);
-            return 0;
-        }
-        return entry.rounds;
-    }
-
-    /** Records one more handoff for this handle and returns the round number it is. */
-    record(handle: string, now: number, expiresAt: number): number {
-        for (const [key, entry] of this.entries) if (entry.expiresAt <= now) this.entries.delete(key);
-        const rounds = this.offered(handle, now) + 1;
-        this.entries.set(handle, { rounds, expiresAt });
-        return rounds;
-    }
-}
-
-/** The ledger every flow is counted against, since handles are namespaced per principal. */
-const handoffLedger = new HandoffLedger();
 
 /**
  * Builds the HMAC codec for the handoff state.
@@ -223,8 +182,6 @@ export interface HandoffRequest {
     page: BrowserPage;
     /** The tool being served, sealed into the state and checked on the way back in. */
     tool: string;
-    /** The server-side round count. Defaults to the one every flow in this process shares. */
-    ledger?: HandoffLedger | undefined;
 }
 
 /**
@@ -289,18 +246,18 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
         if (prior.round >= MAX_HANDOFF_ROUNDS) fail();
     }
 
-    // The client's round count is a courtesy; this one is the bound. A client that never echoes the
-    // state gets no extra prompts out of the server for it.
-    const ledger = request.ledger ?? handoffLedger;
+    // The client's round count is a courtesy; this one is the bound. It comes off the handle's own
+    // record, so a client that never echoes the state — and a retry served by a replica that has
+    // never seen this handle before — gets no extra prompts out of the server for it.
     const now = deps.now().getTime();
-    if (ledger.offered(handle, now) >= MAX_HANDOFF_ROUNDS) fail();
+    if (record.handoffRounds >= MAX_HANDOFF_ROUNDS) fail();
 
     if (!supportsUrlElicitation(ctx, request.declaredAtConnect)) fail();
 
     const url = handoffViewerUrl(record.debugUrl);
     if (url === undefined) fail();
 
-    const round = ledger.record(handle, now, record.expiresAt);
+    const round = await deps.registry.recordHandoff(handle);
     const origin = handoffOrigin(evidence.finalUrl);
     const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
     const requestState = await deps.handoffState.mint(state, ctx);

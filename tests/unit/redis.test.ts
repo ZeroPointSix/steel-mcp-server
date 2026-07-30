@@ -33,6 +33,20 @@ describe('redisConnection commands', () => {
     it('reports how many keys a delete removed, which is what settles a concurrent sweep', async () => {
         expect(await connection(new RecordingRedisClient({ del: 0 })).commands.del('gone')).toBe(0);
     });
+
+    it('increments a counter and expires it in milliseconds, as two commands', async () => {
+        // INCR creates its key with no expiry, so the TTL cannot ride along with the increment.
+        const client = new RecordingRedisClient({ incr: 2 });
+        const commands = connection(client).commands;
+
+        expect(await commands.incr('steel-mcp:handle:sess_1:rounds')).toBe(2);
+        await commands.pexpire('steel-mcp:handle:sess_1:rounds', 90_000);
+
+        expect(client.calls).toEqual([
+            { command: 'incr', args: ['steel-mcp:handle:sess_1:rounds'] },
+            { command: 'pexpire', args: ['steel-mcp:handle:sess_1:rounds', 90_000] },
+        ]);
+    });
 });
 
 describe('redisConnection lifecycle', () => {

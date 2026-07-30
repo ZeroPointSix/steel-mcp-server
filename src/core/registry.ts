@@ -35,6 +35,14 @@ export interface HandleRecord {
      * for a bounded window, so a person who walks away still frees the slot.
      */
     awaitingInputUntil?: number | undefined;
+    /**
+     * How many human-in-the-loop handoffs this handle has already been offered.
+     *
+     * Lives here rather than in the process because the bound has to hold for a client that never
+     * echoes the signed state back: a retry may be served by any replica, and one that had never
+     * seen the handle would otherwise start counting from zero and interrupt a person again.
+     */
+    handoffRounds: number;
     /** Session capabilities already in play, so bot-detection errors name the right next rung. */
     mitigation: MitigationState;
 }
@@ -60,6 +68,13 @@ export interface HandleRegistry {
     touch(handle: string): Promise<void>;
     /** Suspends idle reclamation until `untilMs` while a person finishes a step in the live session. */
     awaitInput(handle: string, untilMs: number): Promise<void>;
+    /**
+     * Counts one handoff against the handle and returns the round it is.
+     *
+     * Atomic, so two replicas offering a handoff at the same moment cannot be handed the same round
+     * number and talk one extra person into the browser between them.
+     */
+    recordHandoff(handle: string): Promise<number>;
     release(handle: string, principal: string, path: ReleasePath): Promise<HandleRecord | null>;
     list(principal: string): Promise<HandleRecord[]>;
     countLive(principal: string): Promise<number>;
@@ -136,6 +151,7 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             expiresAt: input.expiresAt,
             viewerUrl: input.viewerUrl,
             debugUrl: input.debugUrl,
+            handoffRounds: 0,
             mitigation: input.mitigation ?? {},
         };
         this.records.set(record.handle, record);
@@ -167,6 +183,13 @@ export class InMemoryHandleRegistry implements HandleRegistry {
     async awaitInput(handle: string, untilMs: number): Promise<void> {
         const record = this.records.get(handle);
         if (record) record.awaitingInputUntil = untilMs;
+    }
+
+    async recordHandoff(handle: string): Promise<number> {
+        const record = this.records.get(handle);
+        if (!record) return 0;
+        record.handoffRounds += 1;
+        return record.handoffRounds;
     }
 
     /**

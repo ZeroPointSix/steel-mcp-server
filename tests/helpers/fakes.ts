@@ -5,7 +5,7 @@ import { loadConfig, type SteelConfig } from '../../src/core/config.js';
 import type { ServerDeps, SessionPool } from '../../src/core/context.js';
 import { createHandoffCodec } from '../../src/core/mrtr.js';
 import { BrowserPage } from '../../src/core/page.js';
-import { InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
+import { type HandleRegistry, InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
 import type {
     AccountDetails,
     AgentTrace,
@@ -295,6 +295,13 @@ export interface TestDepsOptions {
     env?: Record<string, string | undefined>;
     page?: () => FixturePage;
     tracer?: Tracer;
+    /**
+     * Handle store to use instead of a fresh in-process one.
+     *
+     * Pass the same one to two bundles and they become two replicas of one deployment, which is the
+     * only way to test what a request routed to a replica that has never seen the handle does.
+     */
+    registry?: HandleRegistry;
 }
 
 /** Assembles the dependency bundle a server needs, with fakes at both external boundaries. */
@@ -307,12 +314,14 @@ export function testDeps(options: TestDepsOptions = {}): ServerDeps & {
     const api = (options.api as FakeSteelApi) ?? new FakeSteelApi();
     const pool = (options.pool as FakeSessionPool) ?? new FakeSessionPool(options.page ?? plainPage);
 
-    const registry = new InMemoryHandleRegistry({
-        releaseSteelSession: async (id: string) => {
-            await pool.close(id);
-            await api.releaseSession(id);
-        },
-    });
+    const registry =
+        options.registry ??
+        new InMemoryHandleRegistry({
+            releaseSteelSession: async (id: string) => {
+                await pool.close(id);
+                await api.releaseSession(id);
+            },
+        });
 
     return {
         config,
