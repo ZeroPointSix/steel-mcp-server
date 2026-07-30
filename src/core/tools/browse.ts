@@ -317,31 +317,37 @@ export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
             }),
         },
         async (args, ctx) =>
-            withPage(deps, 'steel_wait_for', ctx.mcpReq, args.session_id, async (page, record): Promise<ToolOutcome> => {
-                let outcome: Awaited<ReturnType<BrowserPage['waitFor']>>;
-                try {
-                    outcome = await page.waitFor({
-                        text: args.text,
-                        selector: args.selector,
-                        url: args.url,
-                        timeoutMs: args.timeout_ms,
-                    });
-                } catch (error) {
-                    // A wait that ran out is where a sign-in page or a challenge shows up: whatever
-                    // was expected never arrived because something is standing in front of it. Any
-                    // other failure is not about the page's contents and is reported unchanged.
-                    if (!(error instanceof SteelToolError) || error.code !== 'timeout') throw error;
-                    const handedOff = await handoff(ctx, args.session_id, record, page);
-                    if (handedOff) return handedOff;
-                    throw error;
+            withPage(
+                deps,
+                'steel_wait_for',
+                ctx.mcpReq,
+                args.session_id,
+                async (page, record): Promise<ToolOutcome> => {
+                    let outcome: Awaited<ReturnType<BrowserPage['waitFor']>>;
+                    try {
+                        outcome = await page.waitFor({
+                            text: args.text,
+                            selector: args.selector,
+                            url: args.url,
+                            timeoutMs: args.timeout_ms,
+                        });
+                    } catch (error) {
+                        // A wait that ran out is where a sign-in page or a challenge shows up: whatever
+                        // was expected never arrived because something is standing in front of it. Any
+                        // other failure is not about the page's contents and is reported unchanged.
+                        if (!(error instanceof SteelToolError) || error.code !== 'timeout') throw error;
+                        const handedOff = await handoff(ctx, args.session_id, record, page);
+                        if (handedOff) return handedOff;
+                        throw error;
+                    }
+                    return successResult(
+                        {
+                            result: `Waited ${outcome.waitedMs}ms for ${outcome.condition}, and it happened.`,
+                            change: 'The condition you named is now true on the page.',
+                        },
+                        { satisfied: true, waited_ms: outcome.waitedMs }
+                    );
                 }
-                return successResult(
-                    {
-                        result: `Waited ${outcome.waitedMs}ms for ${outcome.condition}, and it happened.`,
-                        change: 'The condition you named is now true on the page.',
-                    },
-                    { satisfied: true, waited_ms: outcome.waitedMs }
-                );
-            })
+            )
     );
 }
