@@ -329,7 +329,7 @@ describe('hosted HTTP session isolation', () => {
         // somewhere else and must still find the session, then release it through its own client.
         const store = new FakeRedis();
         const backend = createHandleRegistryBackend({
-            env: { REDIS_URL: 'redis://cache:6379' },
+            env: { REDIS_URL: 'redis://cache:6379', STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48) },
             connect: () => ({ commands: store, close: async () => {} }),
             onError: error => {
                 throw error;

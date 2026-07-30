@@ -118,23 +118,10 @@ describe('loadConfig', () => {
         expect(loadConfig({ STEEL_API_KEY: 'ste-supersecret' }).requestStateSecret).not.toContain('supersecret');
     });
 
-    it('warns when handles are shared across replicas but the handoff secret is per process', () => {
-        const config = loadConfig({ STEEL_API_KEY: 'k', REDIS_URL: 'redis://cache:6379' });
-
-        const warning = config.warnings.join(' ');
-        expect(warning).toMatch(/STEEL_REQUEST_STATE_SECRET/);
-        expect(warning, 'the warning does not say which deployment shape it applies to').toMatch(/REDIS_URL/);
-    });
-
-    it('stays quiet once the two are configured consistently', () => {
-        expect(
-            loadConfig({
-                STEEL_API_KEY: 'k',
-                REDIS_URL: 'redis://cache:6379',
-                STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48),
-            }).warnings
-        ).toEqual([]);
-        expect(loadConfig({ STEEL_API_KEY: 'k' }).warnings, 'a single-replica deployment needs no secret').toEqual([]);
+    it('says nothing about REDIS_URL, which is not this loader concern', () => {
+        // The stdio entrypoint is the only thing that reads these warnings today, and a shared
+        // handle store means nothing there. The refusal belongs to loadRegistryConfig instead.
+        expect(loadConfig({ STEEL_API_KEY: 'k', REDIS_URL: 'redis://cache:6379' }).warnings).toEqual([]);
     });
 });
 
@@ -184,14 +171,49 @@ describe('buildCdpUrl', () => {
 });
 
 describe('loadRegistryConfig', () => {
+    /** Sharing a handle store is refused without this, so every URL case has to carry one. */
+    const SECRET = { STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48) };
+
     it('keeps handle records in this process when REDIS_URL is absent or blank', () => {
         expect(loadRegistryConfig({}).redisUrl).toBeUndefined();
         expect(loadRegistryConfig({ REDIS_URL: '   ' }).redisUrl).toBeUndefined();
     });
 
     it('accepts a redis and a rediss URL', () => {
-        expect(loadRegistryConfig({ REDIS_URL: ' redis://cache:6379 ' }).redisUrl).toBe('redis://cache:6379');
-        expect(loadRegistryConfig({ REDIS_URL: 'rediss://cache:6380' }).redisUrl).toBe('rediss://cache:6380');
+        expect(loadRegistryConfig({ ...SECRET, REDIS_URL: ' redis://cache:6379 ' }).redisUrl).toBe(
+            'redis://cache:6379'
+        );
+        expect(loadRegistryConfig({ ...SECRET, REDIS_URL: 'rediss://cache:6380' }).redisUrl).toBe(
+            'rediss://cache:6380'
+        );
+    });
+
+    it('refuses to share a handle store while each replica signs handoffs with its own key', () => {
+        // Not a warning: with records shared and the key per process, a retried handoff is routed to
+        // whichever replica answers and every replica but one refuses state it did not mint — after
+        // the person has already signed in. Nothing downstream can recover from that.
+        const error = (() => {
+            try {
+                loadRegistryConfig({ REDIS_URL: 'redis://cache:6379' });
+            } catch (thrown) {
+                return thrown as Error;
+            }
+            throw new Error('Expected a shared store with no configured secret to be refused.');
+        })();
+
+        expect(error.message).toMatch(/STEEL_REQUEST_STATE_SECRET/);
+        expect(error.message, 'the error does not name the setting that triggered it').toMatch(/REDIS_URL/);
+        expect(error.message, 'the error does not say how to produce a secret').toMatch(/openssl/);
+    });
+
+    it('treats a blank secret as no secret at all', () => {
+        expect(() =>
+            loadRegistryConfig({ REDIS_URL: 'redis://cache:6379', STEEL_REQUEST_STATE_SECRET: '   ' })
+        ).toThrow(/STEEL_REQUEST_STATE_SECRET/);
+    });
+
+    it('checks the URL before the secret, so an unusable URL is still named first', () => {
+        expect(() => loadRegistryConfig({ REDIS_URL: 'https://cache:6379' })).toThrow(/rediss?:\/\//);
     });
 
     it('namespaces keys so one store can serve more than one deployment', () => {

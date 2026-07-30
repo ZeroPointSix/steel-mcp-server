@@ -206,6 +206,9 @@ describe('HostedRuntime over a shared handle store', () => {
 });
 
 describe('createHandleRegistryBackend', () => {
+    /** A shared store is refused without one, so every store-backed case has to carry it. */
+    const SHARED_SECRET = { STEEL_REQUEST_STATE_SECRET: 'x'.repeat(48) };
+
     it('keeps records in this process when no store is configured', async () => {
         const backend = createHandleRegistryBackend({ env: {} });
         const registry = backend.createRegistry({ releaseSteelSession: async () => {} });
@@ -218,7 +221,7 @@ describe('createHandleRegistryBackend', () => {
         const store = new FakeRedis();
         let closed = false;
         const backend = createHandleRegistryBackend({
-            env: { REDIS_URL: 'redis://cache:6379', REDIS_KEY_PREFIX: 'mcp-test' },
+            env: { ...SHARED_SECRET, REDIS_URL: 'redis://cache:6379', REDIS_KEY_PREFIX: 'mcp-test' },
             connect: () => ({
                 commands: store,
                 close: async () => {
@@ -245,7 +248,7 @@ describe('createHandleRegistryBackend', () => {
     it('passes the configured URL to the connector', () => {
         const seen: string[] = [];
         createHandleRegistryBackend({
-            env: { REDIS_URL: 'rediss://cache:6380' },
+            env: { ...SHARED_SECRET, REDIS_URL: 'rediss://cache:6380' },
             connect: url => {
                 seen.push(url);
                 return { commands: new FakeRedis(), close: async () => {} };
@@ -258,6 +261,8 @@ describe('createHandleRegistryBackend', () => {
 
     it('refuses a shared store with no way to report a connection failure', () => {
         // An ioredis client with no error listener takes the whole replica down on a blip.
-        expect(() => createHandleRegistryBackend({ env: { REDIS_URL: 'redis://cache:6379' } })).toThrow(/onError/);
+        expect(() =>
+            createHandleRegistryBackend({ env: { ...SHARED_SECRET, REDIS_URL: 'redis://cache:6379' } })
+        ).toThrow(/onError/);
     });
 });

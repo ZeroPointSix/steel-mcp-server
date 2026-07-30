@@ -123,18 +123,6 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
         );
     }
 
-    // Sharing handles across replicas is the one deployment shape the generated per-process secret
-    // cannot serve: a retried handoff is routed to whichever replica answers, and any replica but
-    // the one that minted the state refuses it after the person has already done the work.
-    if (env.REDIS_URL?.trim() && !env.STEEL_REQUEST_STATE_SECRET?.trim()) {
-        warnings.push(
-            'REDIS_URL is set but STEEL_REQUEST_STATE_SECRET is not, so each replica signs ' +
-                'human-in-the-loop handoff state with its own per-process key. A retried handoff that ' +
-                'lands on another replica will be refused as expired once the person has finished. Set ' +
-                'the same STEEL_REQUEST_STATE_SECRET on every replica: openssl rand -base64 32'
-        );
-    }
-
     if (deployment === 'cloud' && !apiKey) {
         throw new Error(
             'STEEL_API_KEY is required to reach Steel Cloud. Set it, or point STEEL_BASE_URL at a self-hosted steel-browser.'
@@ -175,6 +163,11 @@ const DEFAULT_REGISTRY_KEY_PREFIX = 'steel-mcp';
  *
  * The URL is checked but never echoed: it usually carries a password, and an unusable value must
  * fail here rather than send that password to whatever happens to answer.
+ *
+ * This is also where a shared store and a per-process handoff key are refused as a pair. The check
+ * belongs here rather than in `loadConfig` because only a deployment that actually shares handles
+ * calls this, so the stdio entrypoint — where `REDIS_URL` may be set for something else entirely
+ * and means nothing — is never affected by it.
  */
 export function loadRegistryConfig(env: Record<string, string | undefined>): RegistryConfig {
     const redisUrl = env.REDIS_URL?.trim() || undefined;
@@ -184,6 +177,21 @@ export function loadRegistryConfig(env: Record<string, string | undefined>): Reg
             throw new Error(
                 'REDIS_URL must be a redis:// or rediss:// URL. Its value is not shown here because ' +
                     'it usually contains a password.'
+            );
+        }
+
+        // Refused rather than warned about, because the two settings together are guaranteed wrong
+        // and nothing downstream can recover: a retried human-in-the-loop handoff is routed to
+        // whichever replica answers, and every replica but the one that minted the state rejects it
+        // as expired — after a person has already signed in or solved a challenge. A generated key
+        // does not survive a restart either, so one replica is no excuse for leaving it unset.
+        if (!env.STEEL_REQUEST_STATE_SECRET?.trim()) {
+            throw new Error(
+                'REDIS_URL shares handle records between replicas, so STEEL_REQUEST_STATE_SECRET must ' +
+                    'be set to the same value on every one of them. Without it each replica signs ' +
+                    'human-in-the-loop handoff state with its own per-process key, and a retried handoff ' +
+                    'is refused once the person has already done the work. Generate one with: ' +
+                    'openssl rand -base64 32'
             );
         }
     }
