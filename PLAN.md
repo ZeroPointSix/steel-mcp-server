@@ -370,6 +370,16 @@ these are the deliberate deferrals, recorded so they are decisions rather than o
 | 4 | **`steel_batch` is 6 units for up to 20 steps and has no handoff wiring.** Twenty `steel_act` calls cost 60 individually, 6 batched — a 10× discount on the tool with the heaviest CDP load; and a batch step hitting a login wall gets the plain error, though form-filling and checkout stepping are exactly the flows batch exists for | Both look intentional, so flagging rather than changing. If the pricing is deliberate it belongs in the `TOOL_COSTS` comment, which currently argues the other way |
 | 5 | **The hosted `tenants` map never evicts.** Pre-existing, not from P2 — but the limiter next door prunes at 4096 principals, so the asymmetry is now visible | Unbounded growth keyed by principal on a long-lived replica. Wants the same pruning treatment |
 | 6 | **`forget()` deletes the record key unconditionally while `list()` passes the caller's principal**, so a stale index entry naming another tenant's handle would delete that tenant's record | Unreachable: handles are 128 bits of CSPRNG, the live-index member would survive, and the next sweep self-heals. Becomes live only if handles ever stop being random |
+| 7 | **`steel_session_diagnostics` filters `since` client-side**, after fetching the whole timeline. Both Steel endpoints accept `startTime`/`endTime`, and one page load produces ~84 log entries, so the waste is real | Small change, pure efficiency, no correctness impact. Do it when the tool is next touched |
+
+**Steel API shapes still unverified** (2026-07-31, after a live probe settled the envelope bugs). Each is
+handled tolerantly in `src/core/steel/diagnostics.ts` rather than assumed, so none is a live defect:
+`hasMore` was never observed true and no `limit`/`offset`/`cursor` param is documented, so how a caller
+fetches a remainder is unknown; no `error` *activity* was produced by the probe, so `AgentTrace.error`
+stays `unknown` behind a reader accepting a string or `{message}`; whether a `Navigation` log payload
+can carry a from/to pair rather than `navigation.url`; and whether `Response`/`RequestFailed` payloads
+carry a status code worth rendering. Observed activity types include `change` and `submit`, neither of
+which Steel documents — so nothing may switch exhaustively on `type`.
 
 ---
 
