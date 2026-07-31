@@ -271,6 +271,37 @@ iframe. The human watches — and on a login wall or CAPTCHA, *acts in* — the 
 leaving the conversation. This is the §9 human-in-the-loop feature with the last mile built in:
 MRTR `input_required` points at a viewer that is already rendered inline.
 
+**The host's actual policy, measured 2026-07-31.** A throwaway probe app rendered in Claude Desktop
+(1.24012.9, Electron 42) reported the literal CSP Claude enforces on an MCP app, recovered from a
+`securitypolicyviolation` event, together with a declared-vs-undeclared control pair:
+
+```
+default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://assets.claude.ai;
+style-src 'self' 'unsafe-inline' https://assets.claude.ai; img-src 'self' data: blob: https://assets.claude.ai;
+connect-src 'self' <every connectDomains entry>; font-src 'self' https://assets.claude.ai;
+media-src 'self' blob: data: https://assets.claude.ai; worker-src 'self' blob: https://assets.claude.ai;
+frame-src 'self' blob: data:; base-uri 'self'; object-src 'none';
+frame-ancestors 'self' https://claude.ai https://preview.claude.ai app://localhost; form-action 'self';
+```
+
+What that settles:
+
+- **`connectDomains` IS honoured.** `https://api.steel.dev` answered 401 and `wss://connect.steel.dev`
+  closed with 1006 — both proving the request left the page — while an undeclared `example.com` was
+  blocked on `connect-src` with `disposition: enforce`. Real allowlist enforcement, not a wide-open
+  policy: a live view can reach Steel from inside a Claude conversation.
+- **`frame-src` is `'self' blob: data:`** with no third-party origin, consistent with Anthropic's
+  documented `frameDomains` restriction. (The probe declared only `connectDomains`, so this is
+  corroboration, not an independent test of `frameDomains`.)
+- **`blob:` is allowed for `media-src`, `worker-src` and `script-src`, and `'unsafe-eval'` is
+  permitted** — so frame decoding in a Worker and a `MediaSource` video path are both available
+  alongside a canvas.
+- The app runs on an auto-assigned `https://<32-hex>.claudemcpcontent.com` origin even from a local
+  stdio server, and the postMessage bridge (`ui/initialize`, then an app-only `tools/call`) works
+  end to end against host `Claude 1.0.0`.
+- Untested by symmetry: `resourceDomains` presumably reaches `img-src`/`media-src` the same way
+  `connectDomains` reaches `connect-src`, but nothing here measured it.
+
 **Why it goes first:** everything it needs exists today. The SDK's capability schema carries
 `extensions`; `@modelcontextprotocol/ext-apps` (1.7.5) provides the in-iframe `App` class; client
 adoption is the broadest of any extension (Claude web/Desktop, ChatGPT, VS Code Copilot, M365
