@@ -524,6 +524,259 @@ export function describeViewerPhase(phase: ViewerPhase): ViewerStatus {
     }
 }
 
+/** One CDP command the app forwards: a method name and its params object, nothing else. */
+export interface CdpCommand {
+    readonly method: string;
+    readonly params: Record<string, unknown>;
+}
+
+/**
+ * Maps a DOM mouse-event `button` index to the button string CDP takes.
+ *
+ * The DOM numbers buttons 0/1/2 for left/middle/right and 3/4 for back/forward; CDP names the first
+ * three and uses `'none'` for an event with no button. Back and forward collapse to `'none'` rather
+ * than a string the page-scoped `Input` dispatch does not need.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function mapMouseButton(button: unknown): 'left' | 'right' | 'middle' | 'none' {
+    if (button === 0) return 'left';
+    if (button === 1) return 'middle';
+    if (button === 2) return 'right';
+    return 'none';
+}
+
+/**
+ * The CDP button-state bitmask, clamped to the five bits Chrome defines.
+ *
+ * The DOM already maintains `MouseEvent.buttons` as exactly this bitmask (1 left, 2 right, 4 middle,
+ * 8 back, 16 forward); this only has to refuse a value that is not a finite non-negative integer and
+ * drop anything beyond the five real button bits.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function mouseButtonsBitmask(buttons: unknown): number {
+    if (typeof buttons !== 'number' || !Number.isFinite(buttons) || buttons < 0) return 0;
+    return Math.floor(buttons) & 31;
+}
+
+/**
+ * The click count a DOM event carries (2 for a double click), or a single click.
+ *
+ * `MouseEvent.detail` is the count the browser already keeps across a burst of clicks, so it is read
+ * verbatim and a malformed or missing value falls back to one rather than to zero.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function inferClickCount(detail: unknown): number {
+    if (typeof detail !== 'number' || !Number.isInteger(detail) || detail < 1) return 1;
+    return detail;
+}
+
+/**
+ * The CDP modifier bitmask (alt 1, ctrl 2, meta 4, shift 8) from a DOM event's modifier flags.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function modifiersBitmask(event: {
+    altKey?: unknown;
+    ctrlKey?: unknown;
+    metaKey?: unknown;
+    shiftKey?: unknown;
+}): number {
+    let mask = 0;
+    if (event.altKey) mask |= 1;
+    if (event.ctrlKey) mask |= 2;
+    if (event.metaKey) mask |= 4;
+    if (event.shiftKey) mask |= 8;
+    return mask;
+}
+
+/**
+ * Whether a key event carries one printable character that should be inserted as text.
+ *
+ * A single-character `key` is text; shift alone only changes its case, but any of ctrl/meta/alt turns
+ * the press into a shortcut (`Ctrl+C`, `Cmd+V`) that must not also drop a literal character into the
+ * page. Multi-character keys (`Enter`, `ArrowLeft`) are never text.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function isPrintableKey(key: unknown, modifiers: number): boolean {
+    if (typeof key !== 'string' || key.length !== 1) return false;
+    if ((modifiers & 7) !== 0) return false;
+    return true;
+}
+
+/**
+ * The Windows virtual-key code for a DOM `KeyboardEvent.code`, or 0 when it is unknown.
+ *
+ * `code` names the physical key (layout-independent), so it is the reliable source for the
+ * `windowsVirtualKeyCode` CDP's `Input.dispatchKeyEvent` expects. Letters, digits, the function keys
+ * and the control keys a page reacts to are covered; anything else is sent as 0, which CDP treats as
+ * "no code" rather than refusing the event.
+ *
+ * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
+ */
+export function keyCodeFor(code: unknown): number {
+    if (typeof code !== 'string' || code === '') return 0;
+    const named: Record<string, number> = {
+        Enter: 13,
+        NumpadEnter: 13,
+        Tab: 9,
+        Backspace: 8,
+        Space: 32,
+        Escape: 27,
+        Home: 36,
+        End: 35,
+        PageUp: 33,
+        PageDown: 34,
+        Insert: 45,
+        Delete: 46,
+        ShiftLeft: 16,
+        ShiftRight: 16,
+        ControlLeft: 17,
+        ControlRight: 17,
+        AltLeft: 18,
+        AltRight: 18,
+        MetaLeft: 91,
+        MetaRight: 91,
+        ContextMenu: 93,
+        CapsLock: 20,
+        ArrowUp: 38,
+        ArrowDown: 40,
+        ArrowLeft: 37,
+        ArrowRight: 39,
+    };
+    if (code in named) return named[code] ?? 0;
+    if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+    if (/^Digit[0-9]$/.test(code)) return 48 + (code.charCodeAt(5) - 48);
+    if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
+    return 0;
+}
+
+/**
+ * Builds the CDP mouse command for one pointer event over the live page, or `null` when it must not
+ * fire.
+ *
+ * The point is the viewport coordinate `mapCanvasPointToPage` already returned (or `null` for the
+ * letterbox or before a frame arrives); a `null` point, a control mode that is off, and a synthesized
+ * `click`/`dblclick` event all build nothing. `mousedown`/`mouseup`/`mousemove` map to the pressed,
+ * released and moved CDP types with `clickCount` only on the press and release, and `wheel` maps to a
+ * `mouseWheel` carrying the deltas. The command is page-scoped by the app's `cdpSend`, which adds the
+ * attached session id.
+ *
+ * Embedded into the app by source; it calls the sibling serializers above, which are in scope there.
+ */
+export function mapPointerEventToCdp(
+    event: {
+        type: unknown;
+        button?: unknown;
+        buttons?: unknown;
+        detail?: unknown;
+        deltaX?: unknown;
+        deltaY?: unknown;
+    },
+    point: { viewportX: number; viewportY: number } | null,
+    driving: boolean
+): CdpCommand | null {
+    if (!driving || !point) return null;
+    const type = event.type;
+    if (type === 'wheel') {
+        return {
+            method: 'Input.dispatchMouseEvent',
+            params: {
+                type: 'mouseWheel',
+                x: point.viewportX,
+                y: point.viewportY,
+                deltaX: Number(event.deltaX) || 0,
+                deltaY: Number(event.deltaY) || 0,
+            },
+        };
+    }
+    const cdpType =
+        type === 'mousedown'
+            ? 'mousePressed'
+            : type === 'mouseup'
+              ? 'mouseReleased'
+              : type === 'mousemove'
+                ? 'mouseMoved'
+                : null;
+    if (cdpType === null) return null;
+    const params: Record<string, unknown> = {
+        type: cdpType,
+        x: point.viewportX,
+        y: point.viewportY,
+        button: mapMouseButton(event.button),
+        buttons: mouseButtonsBitmask(event.buttons),
+    };
+    if (cdpType === 'mousePressed' || cdpType === 'mouseReleased') {
+        params.clickCount = inferClickCount(event.detail);
+    }
+    return { method: 'Input.dispatchMouseEvent', params };
+}
+
+/**
+ * Builds the CDP key command for a `keydown` or `keyup`, or `null` when it must not fire.
+ *
+ * The dispatch carries the `key` and `code` as the DOM received them, the `windowsVirtualKeyCode` for
+ * `code`, and the modifier bitmask; the browser fills in `text` for itself only on a `char` event,
+ * which this never sends, so a printable keydown does not insert twice.
+ *
+ * Embedded into the app by source; it calls the sibling serializers above, which are in scope there.
+ */
+export function mapKeyEventToCdp(
+    event: {
+        type: unknown;
+        key?: unknown;
+        code?: unknown;
+        altKey?: unknown;
+        ctrlKey?: unknown;
+        metaKey?: unknown;
+        shiftKey?: unknown;
+    },
+    driving: boolean
+): CdpCommand | null {
+    if (!driving) return null;
+    const type = event.type === 'keydown' ? 'keyDown' : event.type === 'keyup' ? 'keyUp' : null;
+    if (type === null) return null;
+    return {
+        method: 'Input.dispatchKeyEvent',
+        params: {
+            type,
+            key: typeof event.key === 'string' ? event.key : '',
+            code: typeof event.code === 'string' ? event.code : '',
+            windowsVirtualKeyCode: keyCodeFor(event.code),
+            modifiers: modifiersBitmask(event),
+        },
+    };
+}
+
+/**
+ * Builds an `Input.insertText` command for a printable `keydown`, or `null` when it is not text entry.
+ *
+ * Puppeteer/Playwright insert composing text this way because it is more reliable than encoding it on
+ * a key event. Only a single-character key with no ctrl/meta/alt qualifies; shift is allowed so an
+ * upper-case letter reaches the page as itself.
+ *
+ * Embedded into the app by source; it calls the sibling serializers above, which are in scope there.
+ */
+export function mapCharToInsertText(
+    event: {
+        type: unknown;
+        key?: unknown;
+        altKey?: unknown;
+        ctrlKey?: unknown;
+        metaKey?: unknown;
+        shiftKey?: unknown;
+    },
+    driving: boolean
+): CdpCommand | null {
+    if (!driving || event.type !== 'keydown') return null;
+    const modifiers = modifiersBitmask(event);
+    if (!isPrintableKey(event.key, modifiers)) return null;
+    return { method: 'Input.insertText', params: { text: event.key } };
+}
+
 /**
  * The app: one static document, inline CSS and JS only, no subresources and no data of its own.
  *
@@ -560,11 +813,18 @@ h1{margin:0;font-size:14px;font-weight:600;max-width:44ch}
 p{margin:0;color:var(--dim);max-width:52ch;overflow-wrap:anywhere}
 p:empty{display:none}
 .badge{position:absolute;left:8px;bottom:8px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
+.ctl{position:absolute;right:8px;top:8px;display:flex;align-items:center;gap:6px}
+.mode{padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
+#control{padding:4px 10px;border-radius:999px;border:0;background:var(--fg);color:var(--bg);font:600 11px/1.4 system-ui,sans-serif;cursor:pointer}
+#control[aria-pressed="true"]{background:#2563eb;color:#fff}
+.stage.driving{box-shadow:inset 0 0 0 2px #2563eb}
+.stage.driving canvas{cursor:crosshair}
 </style>
 </head>
 <body>
 <div class="stage" id="stage">
-<canvas id="screen" aria-label="Live view of the browser session"></canvas>
+<canvas id="screen" tabindex="0" aria-label="Live view of the browser session"></canvas>
+<div class="ctl" id="ctl" hidden><span class="mode" id="mode">Watching (read-only)</span><button id="control" type="button" aria-pressed="false">Take control</button></div>
 <div class="badge" id="badge" hidden></div>
 <div class="veil" id="veil" role="status" aria-live="polite">
 <div class="spin" id="spin"></div>
@@ -598,6 +858,15 @@ var readTeardownRequest = ${readTeardownRequest};
 var mapCanvasPointToPage = ${mapCanvasPointToPage};
 var resolveViewerPhase = ${resolveViewerPhase};
 var describeViewerPhase = ${describeViewerPhase};
+var mapMouseButton = ${mapMouseButton};
+var mouseButtonsBitmask = ${mouseButtonsBitmask};
+var inferClickCount = ${inferClickCount};
+var modifiersBitmask = ${modifiersBitmask};
+var isPrintableKey = ${isPrintableKey};
+var keyCodeFor = ${keyCodeFor};
+var mapPointerEventToCdp = ${mapPointerEventToCdp};
+var mapKeyEventToCdp = ${mapKeyEventToCdp};
+var mapCharToInsertText = ${mapCharToInsertText};
 
 var stage = document.getElementById('stage');
 var canvas = document.getElementById('screen');
@@ -607,6 +876,9 @@ var veil = document.getElementById('veil');
 var spin = document.getElementById('spin');
 var head = document.getElementById('head');
 var note = document.getElementById('note');
+var ctl = document.getElementById('ctl');
+var modeLabel = document.getElementById('mode');
+var control = document.getElementById('control');
 
 var phase = 'awaiting-session';
 var detail = '';
@@ -801,6 +1073,7 @@ function attach(){
     var attached = readAttachedSessionId(result);
     if (!attached) throw new Error('the browser did not attach to the page');
     cdpSessionId = attached;
+    ctl.hidden = false;
     setPhase('awaiting-first-frame');
     return cdpSend('Page.enable');
   }).then(function(){
@@ -848,9 +1121,54 @@ function stop(){
 
 window.addEventListener('pagehide', stop);
 
-// The takeover seam. The next step attaches pointer and key listeners to the canvas, maps each
-// pointer event with pointFromCanvasEvent and dispatches Input.* commands over cdpSend. Today the
-// viewer is read-only: the canvas has no listeners and no input is ever sent to the browser.
+// Take control: off by default, so a click on the canvas reaches nothing on the wire. Toggled on,
+// every pointer and key event the canvas receives is mapped to a CDP Input command and sent over the
+// attached session. The drive-capable CDP address never enters this path: only the mapped point and
+// the DOM event itself do, and no input-related text is ever derived from a CDP reply.
+var driving = false;
+
+function setDriving(on){
+  driving = on;
+  control.setAttribute('aria-pressed', on ? 'true' : 'false');
+  control.textContent = on ? 'Hand back' : 'Take control';
+  modeLabel.textContent = on ? 'You are driving this browser' : 'Watching (read-only)';
+  if (on) { stage.classList.add('driving'); canvas.focus(); }
+  else { stage.classList.remove('driving'); }
+}
+
+control.addEventListener('click', function(){ setDriving(!driving); });
+
+function sendCdpCommand(cmd){
+  if (!cmd) return;
+  cdpSend(cmd.method, cmd.params).catch(function(){});
+}
+
+function forwardPointer(event){
+  if (!driving) return;
+  var cmd = mapPointerEventToCdp(event, pointFromCanvasEvent(event), driving);
+  if (!cmd) return;
+  event.preventDefault();
+  sendCdpCommand(cmd);
+}
+
+function forwardKey(event){
+  var keyCmd = mapKeyEventToCdp(event, driving);
+  if (!keyCmd) return;
+  event.preventDefault();
+  sendCdpCommand(keyCmd);
+  sendCdpCommand(mapCharToInsertText(event, driving));
+}
+
+// mousedown/mouseup carry the click count, so a real click and a double-click are one press and one
+// release each; the synthesized click/dblclick events are ignored to avoid firing a click twice.
+canvas.addEventListener('mousedown', forwardPointer);
+canvas.addEventListener('mouseup', forwardPointer);
+canvas.addEventListener('mousemove', forwardPointer);
+canvas.addEventListener('wheel', forwardPointer);
+canvas.addEventListener('keydown', forwardKey);
+canvas.addEventListener('keyup', forwardKey);
+canvas.addEventListener('contextmenu', function(event){ if (driving) event.preventDefault(); });
+
 function pointFromCanvasEvent(event){
   if (!lastMetadata) return null;
   var box = canvas.getBoundingClientRect();
@@ -865,7 +1183,7 @@ function pointFromCanvasEvent(event){
 setInterval(render, 400);
 render();
 
-window.steelSessionViewer = { start: start, stop: stop, pointFromCanvasEvent: pointFromCanvasEvent };
+window.steelSessionViewer = { start: start, stop: stop, pointFromCanvasEvent: pointFromCanvasEvent, takeControl: function(){ setDriving(true); }, handBack: function(){ setDriving(false); }, isDriving: function(){ return driving; } };
 })();
 </script>
 </body>

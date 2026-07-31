@@ -1,10 +1,19 @@
 // ABOUTME: Unit tests for the MCP-App session viewer: the CDP URL and frame validators, the
-// ABOUTME: coordinate mapping, the phase reducer, and the structural properties of the HTML string.
+// ABOUTME: coordinate mapping, the input->CDP serializers, the phase reducer, and the HTML string.
 import { Script } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
     describeViewerPhase,
+    inferClickCount,
+    isPrintableKey,
+    keyCodeFor,
     mapCanvasPointToPage,
+    mapCharToInsertText,
+    mapKeyEventToCdp,
+    mapMouseButton,
+    mapPointerEventToCdp,
+    modifiersBitmask,
+    mouseButtonsBitmask,
     parseSocketMessage,
     pickPageTargetId,
     readAttachedSessionId,
@@ -508,6 +517,244 @@ describe('describeViewerPhase', () => {
     });
 });
 
+/** A DOM pointer/mouse event shape, with the fields the serializer reads, and test defaults. */
+function pointerEvent(
+    overrides: Partial<{
+        type: string;
+        button: number;
+        buttons: number;
+        detail: number;
+        deltaX: number;
+        deltaY: number;
+    }> = {}
+) {
+    return { type: 'mousedown', button: 0, buttons: 1, detail: 1, deltaX: 0, deltaY: 0, ...overrides };
+}
+
+describe('the input->CDP serializers', () => {
+    describe('mapMouseButton', () => {
+        it('maps the three real buttons and treats everything else as none', () => {
+            expect(mapMouseButton(0)).toBe('left');
+            expect(mapMouseButton(1)).toBe('middle');
+            expect(mapMouseButton(2)).toBe('right');
+            expect(mapMouseButton(3)).toBe('none');
+            expect(mapMouseButton(4)).toBe('none');
+            expect(mapMouseButton(undefined)).toBe('none');
+            expect(mapMouseButton('x')).toBe('none');
+        });
+    });
+
+    describe('mouseButtonsBitmask', () => {
+        it('passes the DOM buttons bitmask through, clamped to the five bits Chrome defines', () => {
+            expect(mouseButtonsBitmask(0)).toBe(0);
+            expect(mouseButtonsBitmask(1)).toBe(1); // left
+            expect(mouseButtonsBitmask(2)).toBe(2); // right
+            expect(mouseButtonsBitmask(4)).toBe(4); // middle
+            expect(mouseButtonsBitmask(3)).toBe(3); // left + right
+            expect(mouseButtonsBitmask(16)).toBe(16); // forward
+            expect(mouseButtonsBitmask(31)).toBe(31);
+            expect(mouseButtonsBitmask(64)).toBe(0); // beyond the five button bits
+        });
+
+        it('returns no mask for a value that is not a finite non-negative number', () => {
+            expect(mouseButtonsBitmask(-1)).toBe(0);
+            expect(mouseButtonsBitmask(Number.NaN)).toBe(0);
+            expect(mouseButtonsBitmask(1.5)).toBe(1);
+            expect(mouseButtonsBitmask('1')).toBe(0);
+            expect(mouseButtonsBitmask(undefined)).toBe(0);
+        });
+    });
+
+    describe('inferClickCount', () => {
+        it('uses the DOM detail (2 for a double click) and falls back to a single click', () => {
+            expect(inferClickCount(1)).toBe(1);
+            expect(inferClickCount(2)).toBe(2);
+            expect(inferClickCount(3)).toBe(3);
+            expect(inferClickCount(undefined)).toBe(1);
+            expect(inferClickCount(0)).toBe(1);
+            expect(inferClickCount(1.5)).toBe(1);
+            expect(inferClickCount(-2)).toBe(1);
+        });
+    });
+
+    describe('modifiersBitmask', () => {
+        it('sets the CDP bit for each held modifier', () => {
+            expect(modifiersBitmask({})).toBe(0);
+            expect(modifiersBitmask({ altKey: true })).toBe(1);
+            expect(modifiersBitmask({ ctrlKey: true })).toBe(2);
+            expect(modifiersBitmask({ metaKey: true })).toBe(4);
+            expect(modifiersBitmask({ shiftKey: true })).toBe(8);
+            expect(modifiersBitmask({ ctrlKey: true, shiftKey: true })).toBe(10);
+            expect(modifiersBitmask({ altKey: true, ctrlKey: true, metaKey: true, shiftKey: true })).toBe(15);
+        });
+    });
+
+    describe('keyCodeFor', () => {
+        it('maps letters, digits and the common control keys to their Windows virtual-key code', () => {
+            expect(keyCodeFor('KeyA')).toBe(65);
+            expect(keyCodeFor('KeyZ')).toBe(90);
+            expect(keyCodeFor('Digit0')).toBe(48);
+            expect(keyCodeFor('Digit9')).toBe(57);
+            expect(keyCodeFor('Enter')).toBe(13);
+            expect(keyCodeFor('NumpadEnter')).toBe(13);
+            expect(keyCodeFor('Tab')).toBe(9);
+            expect(keyCodeFor('Space')).toBe(32);
+            expect(keyCodeFor('Backspace')).toBe(8);
+            expect(keyCodeFor('Escape')).toBe(27);
+            expect(keyCodeFor('ArrowLeft')).toBe(37);
+            expect(keyCodeFor('ArrowUp')).toBe(38);
+            expect(keyCodeFor('ArrowRight')).toBe(39);
+            expect(keyCodeFor('ArrowDown')).toBe(40);
+            expect(keyCodeFor('ShiftLeft')).toBe(16);
+            expect(keyCodeFor('ControlRight')).toBe(17);
+            expect(keyCodeFor('MetaLeft')).toBe(91);
+            expect(keyCodeFor('F1')).toBe(112);
+            expect(keyCodeFor('F12')).toBe(123);
+        });
+
+        it('returns 0 for a key it does not know', () => {
+            expect(keyCodeFor('')).toBe(0);
+            expect(keyCodeFor('Key?')).toBe(0);
+            expect(keyCodeFor('Semicolon')).toBe(0);
+            expect(keyCodeFor(undefined)).toBe(0);
+            expect(keyCodeFor(13)).toBe(0);
+        });
+    });
+
+    describe('isPrintableKey', () => {
+        it('treats a single character as text unless a non-shift modifier is held', () => {
+            expect(isPrintableKey('a', 0)).toBe(true);
+            expect(isPrintableKey('A', 8)).toBe(true); // shift alone is still text entry
+            expect(isPrintableKey('a', 2)).toBe(false); // ctrl+a is a shortcut
+            expect(isPrintableKey('a', 4)).toBe(false); // meta+a
+            expect(isPrintableKey('a', 1)).toBe(false); // alt+a
+            expect(isPrintableKey('Enter', 0)).toBe(false);
+            expect(isPrintableKey('', 0)).toBe(false);
+            expect(isPrintableKey('ab', 0)).toBe(false);
+            expect(isPrintableKey(undefined, 0)).toBe(false);
+        });
+    });
+
+    describe('mapPointerEventToCdp', () => {
+        const point = { viewportX: 100, viewportY: 200 };
+
+        it('builds a mousePressed dispatch with the mapped button, buttons and click count', () => {
+            expect(mapPointerEventToCdp(pointerEvent(), point, true)).toEqual({
+                method: 'Input.dispatchMouseEvent',
+                params: { type: 'mousePressed', x: 100, y: 200, button: 'left', buttons: 1, clickCount: 1 },
+            });
+        });
+
+        it('builds a mouseReleased dispatch for mouseup', () => {
+            const cmd = mapPointerEventToCdp(
+                pointerEvent({ type: 'mouseup', button: 2, buttons: 0, detail: 1 }),
+                point,
+                true
+            );
+            expect(cmd?.params).toMatchObject({ type: 'mouseReleased', button: 'right', buttons: 0, clickCount: 1 });
+        });
+
+        it('builds a mouseMoved dispatch for mousemove with no click count', () => {
+            const cmd = mapPointerEventToCdp(pointerEvent({ type: 'mousemove', buttons: 0 }), point, true);
+            expect(cmd?.params).toMatchObject({ type: 'mouseMoved', buttons: 0 });
+            expect(cmd?.params).not.toHaveProperty('clickCount');
+        });
+
+        it('builds a mouseWheel dispatch carrying the deltas for wheel', () => {
+            const cmd = mapPointerEventToCdp(pointerEvent({ type: 'wheel', deltaX: 3, deltaY: 24 }), point, true);
+            expect(cmd?.params).toMatchObject({ type: 'mouseWheel', x: 100, y: 200, deltaX: 3, deltaY: 24 });
+            expect(cmd?.params).not.toHaveProperty('clickCount');
+        });
+
+        it('raises the click count for a double click', () => {
+            const cmd = mapPointerEventToCdp(pointerEvent({ detail: 2 }), point, true);
+            expect(cmd?.params.clickCount).toBe(2);
+        });
+
+        it('builds nothing when the point is null (the letterbox, or no frame yet)', () => {
+            expect(mapPointerEventToCdp(pointerEvent(), null, true)).toBe(null);
+        });
+
+        it('builds nothing when control is off, and ignores derived click/dblclick events always', () => {
+            expect(mapPointerEventToCdp(pointerEvent(), point, false)).toBe(null);
+            expect(mapPointerEventToCdp(pointerEvent({ type: 'click' }), point, true)).toBe(null);
+            expect(mapPointerEventToCdp(pointerEvent({ type: 'dblclick', detail: 2 }), point, true)).toBe(null);
+        });
+    });
+
+    describe('mapKeyEventToCdp and mapCharToInsertText', () => {
+        const keyEvent = (
+            overrides: Partial<{
+                type: string;
+                key: string;
+                code: string;
+                shiftKey: boolean;
+                ctrlKey: boolean;
+                altKey: boolean;
+                metaKey: boolean;
+            }> = {}
+        ) => ({
+            type: 'keydown',
+            key: 'a',
+            code: 'KeyA',
+            shiftKey: false,
+            ctrlKey: false,
+            altKey: false,
+            metaKey: false,
+            ...overrides,
+        });
+
+        it('builds a keyDown dispatch carrying the key, code, virtual-key code and modifiers', () => {
+            expect(mapKeyEventToCdp(keyEvent(), true)).toEqual({
+                method: 'Input.dispatchKeyEvent',
+                params: { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 0 },
+            });
+        });
+
+        it('builds a keyUp dispatch and folds the held modifiers into the bitmask', () => {
+            const cmd = mapKeyEventToCdp(keyEvent({ type: 'keyup', key: 'A', shiftKey: true }), true);
+            expect(cmd?.params).toMatchObject({ type: 'keyUp', key: 'A', windowsVirtualKeyCode: 65, modifiers: 8 });
+        });
+
+        it('maps Enter, Tab and an arrow to their virtual-key codes', () => {
+            expect(mapKeyEventToCdp(keyEvent({ key: 'Enter', code: 'Enter' }), true)?.params).toMatchObject({
+                key: 'Enter',
+                windowsVirtualKeyCode: 13,
+            });
+            expect(mapKeyEventToCdp(keyEvent({ key: 'Tab', code: 'Tab' }), true)?.params).toMatchObject({
+                windowsVirtualKeyCode: 9,
+            });
+            expect(mapKeyEventToCdp(keyEvent({ key: 'ArrowLeft', code: 'ArrowLeft' }), true)?.params).toMatchObject({
+                windowsVirtualKeyCode: 37,
+            });
+        });
+
+        it('inserts text for a printable keydown with no shortcut modifier', () => {
+            expect(mapCharToInsertText(keyEvent({ key: 'a' }), true)).toEqual({
+                method: 'Input.insertText',
+                params: { text: 'a' },
+            });
+            expect(mapCharToInsertText(keyEvent({ key: 'A', shiftKey: true }), true)).toEqual({
+                method: 'Input.insertText',
+                params: { text: 'A' },
+            });
+        });
+
+        it('does not insert text on keyup, for a control key, or when a shortcut modifier is held', () => {
+            expect(mapCharToInsertText(keyEvent({ type: 'keyup' }), true)).toBe(null);
+            expect(mapCharToInsertText(keyEvent({ key: 'Enter', code: 'Enter' }), true)).toBe(null);
+            expect(mapCharToInsertText(keyEvent({ ctrlKey: true }), true)).toBe(null);
+            expect(mapCharToInsertText(keyEvent({ metaKey: true }), true)).toBe(null);
+            expect(mapCharToInsertText(keyEvent({ altKey: true }), true)).toBe(null);
+        });
+
+        it('builds nothing at all when control is off', () => {
+            expect(mapKeyEventToCdp(keyEvent(), false)).toBe(null);
+            expect(mapCharToInsertText(keyEvent(), false)).toBe(null);
+        });
+    });
+});
+
 describe('SESSION_VIEWER_HTML', () => {
     const inlineScript = SESSION_VIEWER_HTML.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
     const inlineStyle = SESSION_VIEWER_HTML.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
@@ -592,8 +839,18 @@ describe('SESSION_VIEWER_HTML', () => {
         expect(SESSION_VIEWER_HTML).toContain('.textContent');
     });
 
-    it('forwards no input yet, but leaves the takeover seam in place', () => {
-        expect(inlineScript).not.toMatch(/Input\.dispatch/);
+    it('forwards input only once take-control is on, and ships read-only as the default', () => {
+        // The Input.* serializers are embedded, the canvas listens, and the host page is kept out of
+        // the way with preventDefault — but driving starts false, so a click before take-control is
+        // still a no-op on the wire (asserted end to end in the browser suite).
+        expect(inlineScript).toContain('Input.dispatchMouseEvent');
+        expect(inlineScript).toContain('Input.dispatchKeyEvent');
+        expect(inlineScript).toContain('Input.insertText');
+        expect(inlineScript).toContain("addEventListener('mousedown'");
+        expect(inlineScript).toContain("addEventListener('keydown'");
+        expect(inlineScript).toContain("addEventListener('wheel'");
+        expect(inlineScript).toContain('preventDefault');
+        expect(inlineScript).toMatch(/var driving = false/);
         expect(inlineScript).toContain('pointFromCanvasEvent');
         expect(inlineScript).toContain('mapCanvasPointToPage');
         expect(inlineScript).toContain('getBoundingClientRect');
@@ -623,6 +880,15 @@ describe('SESSION_VIEWER_HTML', () => {
             mapCanvasPointToPage,
             resolveViewerPhase,
             describeViewerPhase,
+            mapMouseButton,
+            mouseButtonsBitmask,
+            inferClickCount,
+            modifiersBitmask,
+            isPrintableKey,
+            keyCodeFor,
+            mapPointerEventToCdp,
+            mapKeyEventToCdp,
+            mapCharToInsertText,
         ]) {
             expect(SESSION_VIEWER_HTML).toContain(helper.toString());
         }
@@ -667,6 +933,21 @@ describe('SESSION_VIEWER_HTML', () => {
             })
         ).toBe('painting');
         expect(isolate(describeViewerPhase)('idle').busy).toBe(false);
+        // The input serializers that run standalone in the app: the primitives are self-contained, so
+        // they run with nothing but browser globals in scope. The dispatch builders reference these
+        // siblings by name and are exercised through the Node tests above, not through this isolate.
+        expect(isolate(mapMouseButton)(0)).toBe('left');
+        expect(isolate(mapMouseButton)(2)).toBe('right');
+        expect(isolate(mouseButtonsBitmask)(3)).toBe(3);
+        expect(isolate(mouseButtonsBitmask)(64)).toBe(0);
+        expect(isolate(inferClickCount)(2)).toBe(2);
+        expect(isolate(inferClickCount)(undefined)).toBe(1);
+        expect(isolate(modifiersBitmask)({ ctrlKey: true, shiftKey: true })).toBe(10);
+        expect(isolate(isPrintableKey)('a', 0)).toBe(true);
+        expect(isolate(isPrintableKey)('a', 2)).toBe(false);
+        expect(isolate(keyCodeFor)('KeyA')).toBe(65);
+        expect(isolate(keyCodeFor)('Enter')).toBe(13);
+        expect(isolate(keyCodeFor)('Semicolon')).toBe(0);
     });
 
     it('ships an inline script that parses as JavaScript', () => {
@@ -681,10 +962,12 @@ describe('SESSION_VIEWER_HTML', () => {
     });
 
     it('stays small enough to ship on every resources/read', () => {
-        // 22.3KB as this test runner emits the helper sources, 23.9KB (6.7KB gzipped) as `tsc` emits
-        // them into dist, which is what actually ships. The resource is static and publicly
-        // cacheable, so a host pays it once rather than per call. This is still a ceiling: a
-        // doubling means something was inlined that should not have been.
-        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(26_624);
+        // ~28.5KB as this test runner emits the helper sources, ~30.7KB (10.2KB gzipped) as `tsc`
+        // emits them into dist, which is what actually ships. The growth over the read-only viewer is
+        // the take-control feature: the mouse/keyboard/wheel serializers and the virtual-key-code
+        // table that a page needs to react to real keys, each unit-tested and embedded by source. The
+        // resource is static and publicly cacheable, so a host pays it once rather than per call. This
+        // is still a ceiling: a doubling means something was inlined that should not have been.
+        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(30_720);
     });
 });

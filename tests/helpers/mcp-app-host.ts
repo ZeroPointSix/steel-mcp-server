@@ -305,4 +305,90 @@ export class HostedViewer {
             `window.steelSessionViewer.pointFromCanvasEvent({ clientX: ${clientX}, clientY: ${clientY} })`
         );
     }
+
+    /** Turns take-control on inside the app, focusing the canvas for keyboard input. */
+    takeControl(): Promise<void> {
+        return this.page.evalInApp('window.steelSessionViewer.takeControl()');
+    }
+
+    /** Turns take-control off inside the app. */
+    handBack(): Promise<void> {
+        return this.page.evalInApp('window.steelSessionViewer.handBack()');
+    }
+
+    /** Whether the app is currently forwarding input. */
+    driving(): Promise<boolean> {
+        return this.page.evalInApp<boolean>('window.steelSessionViewer.isDriving()');
+    }
+
+    /** The visible mode label ("Watching (read-only)" / "You are driving this browser"). */
+    modeLabel(): Promise<string> {
+        return this.page.evalInApp<string>("document.getElementById('mode').textContent");
+    }
+
+    /** Dispatches a synthetic key event on the canvas the way a focused canvas would receive it. */
+    driveKey(
+        type: 'keydown' | 'keyup',
+        key: string,
+        code: string,
+        mods: { shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean } = {}
+    ): Promise<void> {
+        const init = JSON.stringify({
+            bubbles: true,
+            cancelable: true,
+            key,
+            code,
+            shiftKey: !!mods.shift,
+            ctrlKey: !!mods.ctrl,
+            altKey: !!mods.alt,
+            metaKey: !!mods.meta,
+        });
+        return this.page.evalInApp(
+            `document.getElementById('screen').dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, ${init}))`
+        );
+    }
+
+    /** Dispatches a synthetic wheel event at a fractional position inside the canvas. */
+    driveWheel(fracX: number, fracY: number, deltaX: number, deltaY: number): Promise<void> {
+        return this.page.evalInApp(
+            `(function(){var r=document.getElementById('screen').getBoundingClientRect();` +
+                `document.getElementById('screen').dispatchEvent(new WheelEvent('wheel',` +
+                `{bubbles:true,cancelable:true,deltaX:${deltaX},deltaY:${deltaY},` +
+                `clientX:r.left+r.width*${fracX},clientY:r.top+r.height*${fracY}}));})()`
+        );
+    }
+
+    /**
+     * Dispatches a mousedown/mouseup pair on the canvas at a fractional position, and returns the
+     * viewport point the app mapped that click to (or null when the mapping rejected it).
+     */
+    driveClick(fracX: number, fracY: number, detail = 1): Promise<{ viewportX: number; viewportY: number } | null> {
+        return this.page.evalInApp(
+            `(function(){var c=document.getElementById('screen');var r=c.getBoundingClientRect();` +
+                // Integer client coords: Chrome snaps a MouseEvent's clientX/Y to a long, so rounding
+                // here makes the probe the handler reads agree with the point the dispatch carries.
+                `var x=Math.round(r.left+r.width*${fracX});var y=Math.round(r.top+r.height*${fracY});` +
+                `var probe=window.steelSessionViewer.pointFromCanvasEvent({clientX:x,clientY:y});` +
+                `c.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,` +
+                `button:0,buttons:1,detail:${detail},clientX:x,clientY:y}));` +
+                `c.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,` +
+                `button:0,buttons:0,detail:${detail},clientX:x,clientY:y}));return probe;})()`
+        );
+    }
+
+    /**
+     * Dispatches a mousedown on the canvas at a point its own mapping rejects, and returns that point.
+     *
+     * The point sits just outside the canvas element, so a real letterbox or out-of-bounds click is
+     * reproduced: the listener runs (the event is dispatched on the canvas) but no command is built.
+     */
+    driveLetterboxMouseDown(): Promise<unknown> {
+        return this.page.evalInApp<unknown>(
+            `(function(){var c=document.getElementById('screen');var r=c.getBoundingClientRect();` +
+                `var x=r.left-5;var y=r.top+r.height/2;` +
+                `var probe=window.steelSessionViewer.pointFromCanvasEvent({clientX:x,clientY:y});` +
+                `c.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,` +
+                `button:0,buttons:1,detail:1,clientX:x,clientY:y}));return probe;})()`
+        );
+    }
 }

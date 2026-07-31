@@ -653,6 +653,10 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
         it('sends the browser no input when the canvas is clicked', async () => {
             const { cdp, viewer } = await painting();
 
+            // Take-control is off by default: the mode says so, and a click reaches nothing on the wire.
+            expect(await viewer.driving()).toBe(false);
+            expect(await viewer.modeLabel()).toBe('Watching (read-only)');
+
             await viewer.page.clickAt(400, 250);
             await new Promise(resolve => setTimeout(resolve, 400));
 
@@ -677,6 +681,144 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             expect(centre.viewportX).toBeLessThan(600);
             expect(centre.pageX, 'the document point adds the page scroll').toBe(centre.viewportX + 100);
             expect(await viewer.mapPoint(2, 2), 'the letterbox beside the frame is not in the page').toBe(null);
+        });
+    });
+
+    describe('take-control: forwarding real input over CDP', () => {
+        it('offers the toggle once attached, and switches its visible state when driven', async () => {
+            const { viewer } = await painting();
+
+            expect(await viewer.modeLabel(), 'read-only is the safe default').toBe('Watching (read-only)');
+
+            await viewer.takeControl();
+            expect(await viewer.driving()).toBe(true);
+            expect(await viewer.modeLabel()).toBe('You are driving this browser');
+
+            await viewer.handBack();
+            expect(await viewer.driving()).toBe(false);
+            expect(await viewer.modeLabel()).toBe('Watching (read-only)');
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('forwards a canvas click as a pressed and released mouse event with the mapped point', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+
+            const probe = await viewer.driveClick(0.5, 0.5);
+            await cdp.waitFor('Input.dispatchMouseEvent', 2);
+
+            const inputs = cdp.inputCommands;
+            expect(inputs.map(cmd => cmd.params.type)).toEqual(['mousePressed', 'mouseReleased']);
+            const pressed = inputs[0]!.params as {
+                x: number;
+                y: number;
+                button: string;
+                buttons: number;
+                clickCount: number;
+            };
+            expect(probe, 'the centre of the canvas maps into the page').not.toBe(null);
+            expect(pressed.x).toBe((probe as { viewportX: number }).viewportX);
+            expect(pressed.y).toBe((probe as { viewportY: number }).viewportY);
+            expect(pressed).toMatchObject({ button: 'left', buttons: 1, clickCount: 1 });
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('raises the click count for a double click', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+
+            await viewer.driveClick(0.5, 0.5, 2);
+            const [pressed] = await cdp.waitFor('Input.dispatchMouseEvent');
+            expect((pressed!.params as { clickCount: number }).clickCount).toBe(2);
+        });
+
+        it('forwards a wheel event as a mouseWheel carrying the deltas', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+
+            await viewer.driveWheel(0.5, 0.5, 3, 24);
+            const [wheel] = await cdp.waitFor('Input.dispatchMouseEvent');
+            expect(wheel!.params).toMatchObject({ type: 'mouseWheel', deltaX: 3, deltaY: 24 });
+        });
+
+        it('forwards a key as a keyDown dispatch, and inserts text only for a printable char', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+
+            await viewer.driveKey('keydown', 'a', 'KeyA');
+            await cdp.waitFor('Input.dispatchKeyEvent');
+            await cdp.waitFor('Input.insertText');
+
+            const keyDown = cdp.inputCommands.find(cmd => cmd.method === 'Input.dispatchKeyEvent')!.params as Record<
+                string,
+                unknown
+            >;
+            expect(keyDown).toEqual({
+                type: 'keyDown',
+                key: 'a',
+                code: 'KeyA',
+                windowsVirtualKeyCode: 65,
+                modifiers: 0,
+            });
+            expect(cdp.inputCommands.find(cmd => cmd.method === 'Input.insertText')!.params).toEqual({ text: 'a' });
+
+            // Enter is a control key: a keyDown is forwarded, but no text is inserted.
+            const before = cdp.inputCommands.length;
+            await viewer.driveKey('keydown', 'Enter', 'Enter');
+            await cdp.waitFor('Input.dispatchKeyEvent', 2);
+            await new Promise(resolve => setTimeout(resolve, 150));
+
+            expect(cdp.inputCommands.length, 'Enter added exactly one keyDown').toBe(before + 1);
+            expect(cdp.inputCommands.at(-1)!.method).toBe('Input.dispatchKeyEvent');
+            expect((cdp.inputCommands.at(-1)!.params as { windowsVirtualKeyCode: number }).windowsVirtualKeyCode).toBe(
+                13
+            );
+            expect(
+                cdp.inputCommands.filter(cmd => cmd.method === 'Input.insertText').length,
+                'only the earlier a was inserted'
+            ).toBe(1);
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('stops forwarding the moment control is handed back', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+            await viewer.driveClick(0.5, 0.5);
+            await cdp.waitFor('Input.dispatchMouseEvent', 2);
+            const forwardedWhileDriving = cdp.inputCommands.length;
+            expect(forwardedWhileDriving).toBeGreaterThan(0);
+
+            await viewer.handBack();
+            await viewer.driveClick(0.5, 0.5);
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            expect(cdp.inputCommands.length, 'no further input after hand-back').toBe(forwardedWhileDriving);
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('forwards nothing for a click the canvas-to-page mapping rejects', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+
+            const probe = await viewer.driveLetterboxMouseDown();
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            expect(probe, 'the point is outside the live page').toBe(null);
+            expect(cdp.inputCommands).toEqual([]);
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('keeps the drive-capable CDP address out of the document after a control session', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+            await viewer.driveClick(0.5, 0.5);
+            await viewer.driveKey('keydown', 'a', 'KeyA');
+            await cdp.waitFor('Input.dispatchMouseEvent');
+
+            const html = await viewer.documentHtml();
+            expect(html).not.toContain(cdp.token);
+            expect(html).not.toContain('token=');
+            expect(html).not.toMatch(/wss:\/\/127\.0\.0\.1/);
         });
     });
 });

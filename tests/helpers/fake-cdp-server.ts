@@ -165,6 +165,11 @@ export class FakeCdpServer {
         return this.received.map(command => command.method);
     }
 
+    /** The Input.* commands the app forwarded, in arrival order — what a take-control test reads. */
+    get inputCommands(): CdpCommand[] {
+        return this.received.filter(command => command.method.startsWith('Input.'));
+    }
+
     /** Waits until the app has opened a socket. */
     async waitForConnection(timeoutMs = 10_000): Promise<void> {
         const deadline = Date.now() + timeoutMs;
