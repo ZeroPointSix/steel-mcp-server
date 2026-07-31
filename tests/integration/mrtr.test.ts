@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { interactiveBlockError, toolErrorResult } from '../../src/core/errors.js';
 import { HANDOFF_KEY, MAX_HANDOFF_ROUNDS } from '../../src/core/mrtr.js';
 import { RedisHandleRegistry } from '../../src/core/registry-redis.js';
-import { createSteelMcpServer } from '../../src/core/server.js';
+import { createSteelMcpServer, UI_EXTENSION_NAME } from '../../src/core/server.js';
 import { createSteelHttpHandler } from '../../src/http.js';
 import type { FixturePage } from '../helpers/cdp-fixture.js';
 import { FakeRedis } from '../helpers/fake-redis.js';
@@ -546,6 +546,188 @@ describe('graceful degradation', () => {
         });
 
         expect(await harness.deps.registry.reap({ idleMs: 0 })).toBe(1);
+    });
+});
+
+describe('inline viewer handoff (UI extension)', () => {
+    // A host that renders the MCP-Apps inline viewer declares the UI extension per request. It is
+    // also a full elicitation client, so it declares both modes; the handoff then points the person
+    // at the viewer already rendered above and never emits the drivable player URL.
+    const inlineCapabilities: ClientCapabilities = {
+        elicitation: { form: {}, url: {} },
+        extensions: { [UI_EXTENSION_NAME]: {} },
+    };
+
+    /** The form-mode elicitation params the server sends, as the client receives them. */
+    interface FormElicitation {
+        mode?: string;
+        message: string;
+        url?: string;
+        requestedSchema?: unknown;
+    }
+
+    it('emits a form-mode elicitation that points at the inline viewer, not a URL', async () => {
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+            autoFulfill: false,
+        });
+        const handle = await newSession(harness);
+
+        const result = (await harness.client.callTool(
+            { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } },
+            { allowInputRequired: true }
+        )) as unknown as {
+            resultType?: string;
+            requestState?: string;
+            inputRequests?: Record<string, { method: string; params: FormElicitation }>;
+        };
+
+        expect(result.resultType).toBe('input_required');
+        const params = result.inputRequests?.[HANDOFF_KEY]?.params;
+        expect(result.inputRequests?.[HANDOFF_KEY]?.method).toBe('elicitation/create');
+        expect(params?.mode).toBe('form');
+        expect(params?.url).toBeUndefined();
+        expect(params?.requestedSchema).toBeDefined();
+        expect(params?.message).toMatch(/live browser viewer above/i);
+        expect(result.requestState).toBeTypeOf('string');
+    });
+
+    it('leaves no trace of the drivable player URL anywhere in the result', async () => {
+        // The external player URL is a drive-capable bearer capability. The inline path reaches the
+        // same browser through the scoped CDP token the app already holds, so the URL the player
+        // would have exposed must not appear at all — not in the elicitation, the opaque state, or
+        // any other field. The player URL always ends in /player, so that substring is the tell.
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+            autoFulfill: false,
+        });
+        const handle = await newSession(harness);
+
+        const result = (await harness.client.callTool(
+            { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } },
+            { allowInputRequired: true }
+        )) as unknown as Record<string, unknown>;
+
+        const serialized = JSON.stringify(result);
+        expect(serialized).not.toContain('/player');
+        expect(serialized).not.toContain('debugUrl');
+    });
+
+    it('completes the original call once the page is actually clear', async () => {
+        let harness: Harness;
+        harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+            onElicit: () => setPage(harness, plainPage()),
+        });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://app.test/private' },
+        });
+
+        expect(harness.elicited).toHaveLength(1);
+        expect(result.isError).toBeFalsy();
+        expect(textOf(result)).toContain('### Change');
+    });
+
+    it('asks again rather than trusting the client, when the page is still blocked', async () => {
+        // The person reported done and the page says otherwise; the page wins every time, exactly as
+        // the external path does. The round counter on the handle, not the signed state, bounds it.
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+        });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://app.test/private' },
+        });
+
+        expect(harness.elicited).toHaveLength(MAX_HANDOFF_ROUNDS);
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toBe(textOf(expectedLoginError()));
+    });
+
+    it('does not ask twice when the person declined', async () => {
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+            elicitAction: 'decline',
+        });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://app.test/private' },
+        });
+
+        expect(harness.elicited).toHaveLength(1);
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toBe(textOf(expectedLoginError()));
+    });
+
+    it('holds the handle out of the idle sweep while the inline elicitation is outstanding', async () => {
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: inlineCapabilities,
+            autoFulfill: false,
+        });
+        const handle = await newSession(harness);
+        await harness.client.callTool(
+            { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } },
+            { allowInputRequired: true }
+        );
+
+        expect(await harness.deps.registry.reap({ idleMs: 0 })).toBe(0);
+        await expect(harness.deps.registry.resolve(handle, harness.deps.principal)).resolves.toBeTruthy();
+    });
+});
+
+describe('the inline path falls back to the external player', () => {
+    it('hands out the player URL, unchanged, when the client declared no UI extension', async () => {
+        // A modern client with URL elicitation but no inline viewer gets byte-identical behavior to
+        // before the inline path existed: a URL-mode elicitation pointing at the session player.
+        const harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: { elicitation: { url: {} } },
+            autoFulfill: false,
+        });
+        const handle = await newSession(harness);
+
+        const result = (await harness.client.callTool(
+            { name: 'steel_navigate', arguments: { session_id: handle, url: 'https://app.test/private' } },
+            { allowInputRequired: true }
+        )) as unknown as { inputRequests?: Record<string, { params: UrlElicitation }> };
+
+        const params = result.inputRequests?.[HANDOFF_KEY]?.params;
+        expect(params?.mode).toBe('url');
+        expect(params?.url).toMatch(/^https:\/\/api\.steel\.dev\/v1\/sessions\/[0-9a-f-]+\/player$/);
+    });
+
+    it('degrades to the external player on the 2025 wire even if the UI extension was declared at connect', async () => {
+        // The inline viewer rides the per-request capability envelope, which a 2025-era connection
+        // does not carry. So a legacy client is handed the external player URL whatever it declared.
+        let harness: Harness;
+        harness = await connectLegacy({
+            deps: testDeps({ page: loginWallPage }),
+            capabilities: { elicitation: { url: {} }, extensions: { [UI_EXTENSION_NAME]: {} } },
+            onElicit: () => setPage(harness, plainPage()),
+        });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://app.test/private' },
+        });
+
+        expect(harness.elicited).toHaveLength(1);
+        expect(harness.elicited[0]?.url).toMatch(/\/player$/);
+        expect(result.isError).toBeFalsy();
     });
 });
 

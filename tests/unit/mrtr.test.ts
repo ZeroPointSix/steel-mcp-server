@@ -8,8 +8,10 @@ import {
     type HandoffState,
     handoffOrigin,
     handoffViewerUrl,
+    supportsInlineViewer,
     supportsUrlElicitation,
 } from '../../src/core/mrtr.js';
+import { UI_EXTENSION_NAME } from '../../src/core/server.js';
 
 const SECRET = 'k'.repeat(48);
 
@@ -99,6 +101,27 @@ describe('supportsUrlElicitation', () => {
         const declared = { elicitation: { url: {} } };
         expect(supportsUrlElicitation(context(), () => declared)).toBe(true);
         expect(supportsUrlElicitation(context(), () => undefined)).toBe(false);
+    });
+});
+
+describe('supportsInlineViewer', () => {
+    it('is true when the request declares the MCP-Apps UI extension', () => {
+        expect(supportsInlineViewer(context({ capabilities: { extensions: { [UI_EXTENSION_NAME]: {} } } }))).toBe(true);
+    });
+
+    it('is false when the request declared extensions but not this one', () => {
+        expect(supportsInlineViewer(context({ capabilities: { extensions: { 'some/other': {} } } }))).toBe(false);
+    });
+
+    it('is false when the request declared no extensions at all', () => {
+        expect(supportsInlineViewer(context({ capabilities: { elicitation: { url: {} } } }))).toBe(false);
+        expect(supportsInlineViewer(context({ capabilities: {} }))).toBe(false);
+    });
+
+    it('has no initialize-era fallback: a request with no per-request envelope never takes the inline path', () => {
+        // The inline viewer is a 2026-07-28 wire feature. A 2025-era connection carries no per-request
+        // capability envelope, so it degrades to the external player URL whatever it declared at connect.
+        expect(supportsInlineViewer(context())).toBe(false);
     });
 });
 
