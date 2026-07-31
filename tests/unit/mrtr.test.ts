@@ -8,6 +8,7 @@ import {
     type HandoffState,
     handoffOrigin,
     handoffViewerUrl,
+    supportsElicitation,
     supportsInlineViewer,
     supportsUrlElicitation,
 } from '../../src/core/mrtr.js';
@@ -122,6 +123,19 @@ describe('supportsInlineViewer', () => {
         // The inline viewer is a 2026-07-28 wire feature. A 2025-era connection carries no per-request
         // capability envelope, so it degrades to the external player URL whatever it declared at connect.
         expect(supportsInlineViewer(context())).toBe(false);
+    });
+});
+
+describe('supportsElicitation', () => {
+    it('is true for form elicitation (a bare object) as well as URL elicitation', () => {
+        expect(supportsElicitation(context({ capabilities: { elicitation: {} } }))).toBe(true);
+        expect(supportsElicitation(context({ capabilities: { elicitation: { url: {} } } }))).toBe(true);
+    });
+
+    it('is false when no elicitation was declared, even if other capabilities were', () => {
+        expect(supportsElicitation(context({ capabilities: { extensions: { [UI_EXTENSION_NAME]: {} } } }))).toBe(false);
+        expect(supportsElicitation(context({ capabilities: {} }))).toBe(false);
+        expect(supportsElicitation(context())).toBe(false);
     });
 });
 

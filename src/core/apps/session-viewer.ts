@@ -574,6 +574,27 @@ export function inferClickCount(detail: unknown): number {
 }
 
 /**
+ * A scroll delta in CSS pixels, which is what CDP's `mouseWheel` takes.
+ *
+ * A DOM `WheelEvent` is only in pixels when `deltaMode === 0`; mode 1 is lines and mode 2 is pages,
+ * which on some mice (notably Windows) would otherwise arrive as single-digit pixel counts and scroll
+ * almost nothing. The line- and page-height conversions are the conventional approximation browsers
+ * and automation libraries use, not an exact standard: 16 px per line, ~20 lines per page. Pure,
+ * unit-tested, and embedded by source; references nothing outside itself.
+ */
+export function wheelDelta(
+    event: { deltaX?: unknown; deltaY?: unknown; deltaMode?: unknown },
+    axis: 'deltaX' | 'deltaY'
+): number {
+    const raw = Number(event[axis]);
+    if (!Number.isFinite(raw)) return 0;
+    const mode = Number(event.deltaMode);
+    if (mode === 1) return Math.round(raw * 16);
+    if (mode === 2) return Math.round(raw * 320);
+    return raw || 0;
+}
+
+/**
  * The CDP modifier bitmask (alt 1, ctrl 2, meta 4, shift 8) from a DOM event's modifier flags.
  *
  * Pure, unit-tested, and embedded into the app by source; its body references nothing outside itself.
@@ -688,8 +709,8 @@ export function mapPointerEventToCdp(
                 type: 'mouseWheel',
                 x: point.viewportX,
                 y: point.viewportY,
-                deltaX: Number(event.deltaX) || 0,
-                deltaY: Number(event.deltaY) || 0,
+                deltaX: wheelDelta(event, 'deltaX'),
+                deltaY: wheelDelta(event, 'deltaY'),
             },
         };
     }
@@ -864,6 +885,7 @@ var inferClickCount = ${inferClickCount};
 var modifiersBitmask = ${modifiersBitmask};
 var isPrintableKey = ${isPrintableKey};
 var keyCodeFor = ${keyCodeFor};
+var wheelDelta = ${wheelDelta};
 var mapPointerEventToCdp = ${mapPointerEventToCdp};
 var mapKeyEventToCdp = ${mapKeyEventToCdp};
 var mapCharToInsertText = ${mapCharToInsertText};
@@ -1108,6 +1130,7 @@ function paint(frame){
 
 function stop(){
   stopped = true;
+  setDriving(false);
   if (!socket) return;
   var closing = socket;
   socket = null;
@@ -1152,6 +1175,7 @@ function forwardPointer(event){
 }
 
 function forwardKey(event){
+  if (!driving) return;
   var keyCmd = mapKeyEventToCdp(event, driving);
   if (!keyCmd) return;
   event.preventDefault();
@@ -1183,7 +1207,7 @@ function pointFromCanvasEvent(event){
 setInterval(render, 400);
 render();
 
-window.steelSessionViewer = { start: start, stop: stop, pointFromCanvasEvent: pointFromCanvasEvent, takeControl: function(){ setDriving(true); }, handBack: function(){ setDriving(false); }, isDriving: function(){ return driving; } };
+window.steelSessionViewer = { start: start, stop: stop, pointFromCanvasEvent: pointFromCanvasEvent };
 })();
 </script>
 </body>

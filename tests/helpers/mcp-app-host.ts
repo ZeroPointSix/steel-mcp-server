@@ -306,19 +306,23 @@ export class HostedViewer {
         );
     }
 
-    /** Turns take-control on inside the app, focusing the canvas for keyboard input. */
+    /** Turns take-control on by clicking the real toggle, the path a human takes. */
     takeControl(): Promise<void> {
-        return this.page.evalInApp('window.steelSessionViewer.takeControl()');
+        return this.page.evalInApp(
+            "var b=document.getElementById('control'); if(b.getAttribute('aria-pressed')!=='true') b.click();"
+        );
     }
 
-    /** Turns take-control off inside the app. */
+    /** Turns take-control off by clicking the real toggle again. */
     handBack(): Promise<void> {
-        return this.page.evalInApp('window.steelSessionViewer.handBack()');
+        return this.page.evalInApp(
+            "var b=document.getElementById('control'); if(b.getAttribute('aria-pressed')==='true') b.click();"
+        );
     }
 
-    /** Whether the app is currently forwarding input. */
+    /** Whether the app is currently forwarding input, read off the toggle's pressed state. */
     driving(): Promise<boolean> {
-        return this.page.evalInApp<boolean>('window.steelSessionViewer.isDriving()');
+        return this.page.evalInApp<boolean>("document.getElementById('control').getAttribute('aria-pressed')==='true'");
     }
 
     /** The visible mode label ("Watching (read-only)" / "You are driving this browser"). */

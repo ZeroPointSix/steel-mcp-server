@@ -35,6 +35,7 @@ import {
     scrubCredentials,
     type ViewerPhase,
     validateCdpUrl,
+    wheelDelta,
 } from '../../src/core/apps/session-viewer.js';
 
 const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uIjoiMSJ9.Zm9vYmFyc2lnbmF0dXJl';
@@ -526,9 +527,10 @@ function pointerEvent(
         detail: number;
         deltaX: number;
         deltaY: number;
+        deltaMode: number;
     }> = {}
 ) {
-    return { type: 'mousedown', button: 0, buttons: 1, detail: 1, deltaX: 0, deltaY: 0, ...overrides };
+    return { type: 'mousedown', button: 0, buttons: 1, detail: 1, deltaX: 0, deltaY: 0, deltaMode: 0, ...overrides };
 }
 
 describe('the input->CDP serializers', () => {
@@ -664,6 +666,22 @@ describe('the input->CDP serializers', () => {
             const cmd = mapPointerEventToCdp(pointerEvent({ type: 'wheel', deltaX: 3, deltaY: 24 }), point, true);
             expect(cmd?.params).toMatchObject({ type: 'mouseWheel', x: 100, y: 200, deltaX: 3, deltaY: 24 });
             expect(cmd?.params).not.toHaveProperty('clickCount');
+        });
+
+        it('scales wheel deltas from lines and pages into CSS pixels', () => {
+            // deltaMode 0 = pixels (passthrough), 1 = lines (x16), 2 = pages (x320).
+            const lines = mapPointerEventToCdp(
+                pointerEvent({ type: 'wheel', deltaX: 0, deltaY: 3, deltaMode: 1 }),
+                point,
+                true
+            );
+            expect(lines?.params).toMatchObject({ deltaX: 0, deltaY: 48 });
+            const pages = mapPointerEventToCdp(
+                pointerEvent({ type: 'wheel', deltaX: 1, deltaY: 2, deltaMode: 2 }),
+                point,
+                true
+            );
+            expect(pages?.params).toMatchObject({ deltaX: 320, deltaY: 640 });
         });
 
         it('raises the click count for a double click', () => {
@@ -886,6 +904,7 @@ describe('SESSION_VIEWER_HTML', () => {
             modifiersBitmask,
             isPrintableKey,
             keyCodeFor,
+            wheelDelta,
             mapPointerEventToCdp,
             mapKeyEventToCdp,
             mapCharToInsertText,
@@ -937,6 +956,7 @@ describe('SESSION_VIEWER_HTML', () => {
         // they run with nothing but browser globals in scope. The dispatch builders reference these
         // siblings by name and are exercised through the Node tests above, not through this isolate.
         expect(isolate(mapMouseButton)(0)).toBe('left');
+        expect(isolate(wheelDelta)({ deltaY: 3, deltaMode: 1 }, 'deltaY')).toBe(48);
         expect(isolate(mapMouseButton)(2)).toBe('right');
         expect(isolate(mouseButtonsBitmask)(3)).toBe(3);
         expect(isolate(mouseButtonsBitmask)(64)).toBe(0);

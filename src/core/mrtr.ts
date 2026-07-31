@@ -166,6 +166,18 @@ export function supportsUrlElicitation(
 }
 
 /**
+ * Whether this request may be answered with an elicitation of any kind (form or URL).
+ *
+ * Broader than `supportsUrlElicitation`: a bare `elicitation: {}` means form mode, which is all the
+ * inline-viewer handoff needs. Read off the modern-wire per-request envelope only, since the inline
+ * path it gates is itself modern-wire-only.
+ */
+export function supportsElicitation(ctx: ServerContext): boolean {
+    const envelope = ctx.mcpReq.envelope as Record<string, ClientCapabilities | undefined> | undefined;
+    return envelope?.[CLIENT_CAPABILITIES_META_KEY]?.elicitation !== undefined;
+}
+
+/**
  * Whether this request is being served to a client that has the inline session viewer rendered.
  *
  * The MCP-Apps UI extension is declared per request under `capabilities.extensions` on the
@@ -274,7 +286,11 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     // already holds, so the unauthenticated player URL — a drive-capable bearer capability — never
     // leaves the server on this path. The retried call re-reads the page itself, exactly as the
     // external path does, so the round counter and signed state keep working unchanged.
-    if (supportsInlineViewer(ctx)) {
+    // The inline viewer is a modern-wire feature declared under the UI extension. It also requires
+    // elicitation: a client that declared the viewer but not elicitation cannot receive the form the
+    // inline path returns, so it degrades to the external player URL below rather than getting a
+    // result shape it never said it could handle.
+    if (supportsInlineViewer(ctx) && supportsElicitation(ctx)) {
         const round = await deps.registry.recordHandoff(handle);
         const origin = handoffOrigin(evidence.finalUrl);
         const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
