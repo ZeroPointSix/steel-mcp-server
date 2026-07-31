@@ -14,7 +14,7 @@ import type {
     CreateSessionRequest,
     ScrapeRequest,
     ScrapeResponse,
-    SessionLogEntry,
+    SessionLogTimeline,
     SteelApi,
     SteelSession,
 } from '../../src/core/steel/types.js';
@@ -24,7 +24,7 @@ export interface FakeSteelApiOptions {
     scrape?: Partial<ScrapeResponse> | (() => Promise<ScrapeResponse>);
     details?: AccountDetails;
     traces?: AgentTraceTimeline;
-    logs?: SessionLogEntry[];
+    logs?: SessionLogTimeline;
     failCreateWith?: Error;
     /** Overrides the live-player URL; `null` models a deployment that returns none at all. */
     debugUrl?: string | null;
@@ -97,7 +97,14 @@ export class FakeSteelApi implements SteelApi {
                         timestamp: '2026-07-27T10:00:01.000Z',
                         type: 'click',
                         page: { url: 'https://example.com/login' },
-                        target: { role: 'button', accessibleName: 'Sign in', selector: { css: 'button.signin' } },
+                        target: {
+                            tagName: 'BUTTON',
+                            role: 'button',
+                            accessibleName: 'Sign in',
+                            attributes: { id: 'signin', name: 'signin', type: 'submit' },
+                            selector: { css: 'button.signin', id: 'signin', name: 'signin' },
+                            boundingBox: { x: 100, y: 200, width: 80, height: 40 },
+                        },
                         pointer: { x: 520, y: 410 },
                     },
                     {
@@ -112,9 +119,54 @@ export class FakeSteelApi implements SteelApi {
         );
     }
 
-    async getSessionLogs(): Promise<SessionLogEntry[]> {
+    /**
+     * Answers with the same envelope, entries that name themselves with `type`, and `log` as the
+     * JSON-encoded string it really is. The routine Request and Response pair is here on purpose:
+     * a real page load buries the two useful entries under dozens of them.
+     */
+    async getSessionLogs(): Promise<SessionLogTimeline> {
         return (
-            this.options.logs ?? [{ timestamp: '2026-07-27T10:00:03.000Z', level: 'error', text: 'net::ERR_ABORTED' }]
+            this.options.logs ?? {
+                events: [
+                    {
+                        id: 'fake-0-1',
+                        type: 'Navigation',
+                        timestamp: '2026-07-27T10:00:00.500Z',
+                        log: JSON.stringify({
+                            pageId: 'ED45',
+                            navigation: { url: 'https://example.com/login' },
+                            createdAt: 1_785_428_340_864,
+                        }),
+                    },
+                    {
+                        id: 'fake-0-2',
+                        type: 'Request',
+                        timestamp: '2026-07-27T10:00:00.700Z',
+                        log: JSON.stringify({ pageId: 'ED45', request: { url: 'https://example.com/app.js' } }),
+                    },
+                    {
+                        id: 'fake-0-3',
+                        type: 'Response',
+                        timestamp: '2026-07-27T10:00:00.800Z',
+                        log: JSON.stringify({
+                            pageId: 'ED45',
+                            response: { url: 'https://example.com/app.js', status: 200 },
+                        }),
+                    },
+                    {
+                        id: 'fake-0-4',
+                        type: 'RequestFailed',
+                        timestamp: '2026-07-27T10:00:03.000Z',
+                        log: JSON.stringify({
+                            pageId: '15F9',
+                            error: { message: 'net::ERR_ABORTED', url: 'https://ads.test/adsbygoogle.js' },
+                            createdAt: 1_785_496_290_115,
+                        }),
+                    },
+                ],
+                total: 4,
+                hasMore: false,
+            }
         );
     }
 }

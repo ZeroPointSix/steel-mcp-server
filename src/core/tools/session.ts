@@ -6,8 +6,17 @@ import { mintSteelSessionId, type ServerDeps, type ToolHost } from '../context.j
 import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
-import { agentTraceErrorText, agentTraceUrl } from '../steel/traces.js';
-import type { AccountDetails, AgentTraceTimeline, SteelSession } from '../steel/types.js';
+import {
+    agentTraceErrorText,
+    agentTraceUrl,
+    agentTraceValueSummary,
+    isDiagnosticLog,
+    parseSessionLogPayload,
+    sessionLogErrorText,
+    sessionLogUrl,
+} from '../steel/diagnostics.js';
+import type { AccountDetails, AgentTraceTimeline, SessionLogTimeline, SteelSession } from '../steel/types.js';
+import { fenceUntrusted } from '../untrusted.js';
 import { cursorSchema, guard, maxTokensSchema, sessionIdSchema, successResult } from './shared.js';
 
 /** Session-creation options the self-hosted image cannot honour, mapped to their named errors. */
@@ -277,17 +286,25 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                     deps.api
                         .getAgentTraces(record.steelSessionId, ctx.mcpReq.signal)
                         .catch(() => ({ events: [] }) as AgentTraceTimeline),
-                    deps.api.getSessionLogs(record.steelSessionId, ctx.mcpReq.signal).catch(() => []),
+                    deps.api
+                        .getSessionLogs(record.steelSessionId, ctx.mcpReq.signal)
+                        .catch(() => ({ events: [] }) as SessionLogTimeline),
                 ]);
 
                 const since = args.since ? Date.parse(args.since) : Number.NEGATIVE_INFINITY;
                 const atOrAfter = (timestamp: string | undefined) =>
                     !timestamp || Number.isNaN(since) || Date.parse(timestamp) >= since;
 
+                const shownLogs = logs.events.filter(entry => atOrAfter(entry.timestamp) && isDiagnosticLog(entry));
+                const hiddenLogCount = logs.events.filter(
+                    entry => atOrAfter(entry.timestamp) && !isDiagnosticLog(entry)
+                ).length;
+
                 const events = [
-                    // Only the fields below are echoed. Activity-specific extras are deliberately
-                    // left out: a typing activity's `value` is whatever was entered on the page,
-                    // including into a password box, so it never reaches the transcript.
+                    // Every string below other than the activity type is page-derived, which is why
+                    // the whole timeline is fenced before it goes out. Activity-specific extras stay
+                    // out except `value`, and that one only through the reader that refuses
+                    // anything but Steel's `{inputType, valueLength}` metadata.
                     ...timeline.events
                         .filter(trace => atOrAfter(trace.timestamp))
                         .map(trace => {
@@ -300,40 +317,75 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                                     trace.target?.role ? `(${trace.target.role})` : '',
                                     trace.target?.selector?.css ?? '',
                                     agentTraceUrl(trace) ?? '',
+                                    agentTraceValueSummary(trace) ?? '',
                                     error ? `ERROR ${error}` : '',
                                 ]
                                     .filter(Boolean)
                                     .join(' '),
                             };
                         }),
-                    ...logs
-                        .filter(entry => atOrAfter(entry.timestamp))
-                        .map(entry => ({
+                    ...shownLogs.map(entry => {
+                        const payload = parseSessionLogPayload(entry);
+                        const error = sessionLogErrorText(payload);
+                        return {
                             timestamp: entry.timestamp ?? '',
-                            line: `log ${entry.level ?? 'info'} ${entry.text ?? entry.message ?? ''}`.trim(),
-                        })),
+                            line: [
+                                `log ${entry.type ?? 'entry'}`,
+                                sessionLogUrl(payload) ?? '',
+                                error ? `ERROR ${error}` : '',
+                            ]
+                                .filter(Boolean)
+                                .join(' '),
+                        };
+                    }),
                 ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-                const body = events.length
-                    ? events.map(event => `${event.timestamp} ${event.line}`).join('\n')
-                    : 'No traces or logs recorded for this session yet.';
-                const page = paginate(body, { maxTokens: args.max_tokens ?? DEFAULT_MAX_TOKENS, cursor: args.cursor });
+                const notes: string[] = [];
+                if (timeline.hasMore || logs.hasMore) {
+                    // Distinct from the cursor below: this is Steel holding activity back, not this
+                    // response running out of token budget.
+                    notes.push(
+                        'Steel holds more activity for this session than it returned. Narrow the window with ' +
+                            'since to see the rest.'
+                    );
+                }
+                if (hiddenLogCount > 0) {
+                    notes.push(
+                        `Hid ${hiddenLogCount} routine request and response log entries. Failures and ` +
+                            'navigations are kept.'
+                    );
+                }
+
+                const page = paginate(
+                    events.length
+                        ? events.map(event => `${event.timestamp} ${event.line}`).join('\n')
+                        : 'No traces or logs recorded for this session yet.',
+                    { maxTokens: args.max_tokens ?? DEFAULT_MAX_TOKENS, cursor: args.cursor }
+                );
 
                 return successResult(
                     {
                         result: `${events.length} events in this session.`,
-                        snapshot: page.text,
-                        // Distinct from the cursor below: this is Steel holding back activity, not
-                        // this response running out of token budget.
-                        notes: timeline.hasMore
-                            ? [
-                                  'Steel holds more activity for this session than it returned. Narrow the window ' +
-                                      'with since to see the rest.',
-                              ]
-                            : undefined,
+                        // Rows carry accessible names, selectors and URLs the page controls, so the
+                        // timeline is fenced like any other page-derived text. No single page
+                        // produced it, so the provenance names the session rather than a URL that
+                        // would only be true of some rows. The empty-timeline sentence is this
+                        // server's own prose and is left outside the fence.
+                        snapshot: events.length
+                            ? fenceUntrusted(page.text, {
+                                  source: `steel-session:${args.session_id}`,
+                                  fetchedAt: deps.now().toISOString(),
+                              })
+                            : page.text,
+                        notes: notes.length ? notes : undefined,
                         pagination: page.truncated ? `Continue with cursor="${page.nextCursor}".` : undefined,
                     },
-                    { session_id: args.session_id, event_count: events.length, has_more: timeline.hasMore ?? false }
+                    {
+                        session_id: args.session_id,
+                        event_count: events.length,
+                        has_more: (timeline.hasMore ?? false) || (logs.hasMore ?? false),
+                        hidden_log_count: hiddenLogCount,
+                    }
                 );
             })
     );

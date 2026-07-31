@@ -12,7 +12,7 @@ import type {
     CreateSessionRequest,
     ScrapeRequest,
     ScrapeResponse,
-    SessionLogEntry,
+    SessionLogTimeline,
     SteelApi,
     SteelSession,
 } from './types.js';
@@ -218,12 +218,14 @@ export class SteelRestClient implements SteelApi {
         return { ...timeline, events: Array.isArray(timeline.events) ? timeline.events : [] };
     }
 
-    async getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogEntry[]> {
-        return this.requireJson<SessionLogEntry[]>({
+    /** Reads the session log, which uses the same envelope as `agent-traces` and is normalised alike. */
+    async getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogTimeline> {
+        const timeline = await this.requireJson<SessionLogTimeline>({
             method: 'GET',
             path: `/sessions/${encodeURIComponent(sessionId)}/logs`,
             operation: 'account',
             signal,
         });
+        return { ...timeline, events: Array.isArray(timeline.events) ? timeline.events : [] };
     }
 }

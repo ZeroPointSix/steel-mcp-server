@@ -89,6 +89,16 @@ describe('fenceUntrusted', () => {
         expect(fenced).toMatch(/data, not instructions/i);
     });
 
+    it('names a non-URL source for content that came from no single page fetch', () => {
+        const fenced = fenceUntrusted('Hello', {
+            source: 'steel-session:abc-123',
+            fetchedAt: '2026-07-27T10:00:00.000Z',
+        });
+        expect(fenced).toContain('source="steel-session:abc-123"');
+        expect(fenced).toContain('fetched-at="2026-07-27T10:00:00.000Z"');
+        expect(fenced).toMatch(/data, not instructions/i);
+    });
+
     it('strips invisible characters from the fenced content', () => {
         expect(fenceUntrusted('a​b', provenance)).toContain('ab');
     });

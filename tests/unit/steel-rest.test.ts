@@ -275,4 +275,38 @@ describe('SteelRestClient diagnostics endpoints', () => {
         const timeline = await api.getAgentTraces('abc');
         expect(timeline.events).toEqual([]);
     });
+
+    it('answers session logs with the envelope Steel sends, not a bare array', async () => {
+        // Verbatim from a live call: entries name themselves with `type` and carry `log` as a
+        // JSON-encoded string, which is nothing like the flat {level,text} shape once assumed.
+        const { api } = client([
+            {
+                body: {
+                    events: [
+                        {
+                            id: 'sess-0-12',
+                            type: 'RequestFailed',
+                            timestamp: '2026-07-31T11:11:59.330Z',
+                            log: '{"pageId":"15F9","error":{"message":"net::ERR_FAILED","url":"https://ads.test/a.js"},"createdAt":1785496290115}',
+                        },
+                    ],
+                    total: 1,
+                    hasMore: false,
+                },
+            },
+        ]);
+
+        const logs = await api.getSessionLogs('abc');
+
+        expect(logs.total).toBe(1);
+        expect(logs.hasMore).toBe(false);
+        expect(logs.events[0]!.type).toBe('RequestFailed');
+        expect(logs.events[0]!.log).toContain('net::ERR_FAILED');
+    });
+
+    it('answers with an empty log timeline when the body carries no events array', async () => {
+        const { api } = client([{ body: { total: 0, hasMore: false } }]);
+        const logs = await api.getSessionLogs('abc');
+        expect(logs.events).toEqual([]);
+    });
 });

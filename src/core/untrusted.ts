@@ -50,6 +50,17 @@ export interface Provenance {
     fetchedAt: string;
 }
 
+/**
+ * Provenance for fenced text that no single page fetch produced, so there is no final URL that
+ * would be true of all of it — a whole-session diagnostics timeline being the case in hand.
+ */
+export interface SourceProvenance {
+    /** What the text came from, in a form a reader can place, such as `steel-session:<id>`. */
+    source: string;
+    /** ISO-8601 timestamp of the fetch. */
+    fetchedAt: string;
+}
+
 /** Removes characters that occupy no visual space, so hidden instructions cannot ride along. */
 export function stripInvisible(text: string): string {
     return text.replace(INVISIBLE_CHARACTERS, '');
@@ -93,10 +104,11 @@ function escapeAttribute(value: string): string {
  * The content is stripped of invisible characters and any literal closing delimiter is broken
  * up, so a page cannot terminate the fence early and have the rest read as server instructions.
  */
-export function fenceUntrusted(content: string, provenance: Provenance): string {
+export function fenceUntrusted(content: string, provenance: Provenance | SourceProvenance): string {
     // HTML tag names are case-insensitive, so a page writing </UNTRUSTED-PAGE-CONTENT> would
     // otherwise close the fence and have everything after it read as server output.
     const safeContent = stripInvisible(content).replace(FENCE_CLOSE_ANY_CASE, '&lt;/untrusted-page-content&gt;');
-    const attrs = `source="${escapeAttribute(provenance.finalUrl)}" fetched-at="${escapeAttribute(provenance.fetchedAt)}"`;
+    const source = 'finalUrl' in provenance ? provenance.finalUrl : provenance.source;
+    const attrs = `source="${escapeAttribute(source)}" fetched-at="${escapeAttribute(provenance.fetchedAt)}"`;
     return `${UNTRUSTED_FENCE_OPEN_TAG} ${attrs}>\n${UNTRUSTED_CONTENT_NOTICE}\n\n${safeContent}\n${UNTRUSTED_FENCE_CLOSE}`;
 }

@@ -99,11 +99,14 @@ export interface AgentTraceUrlContext {
 
 /** Element context, present when Steel could identify what an activity acted on. */
 export interface AgentTraceTarget {
+    tagName?: string;
     role?: string;
     accessibleName?: string;
     text?: string;
     attributes?: Record<string, string>;
-    selector?: { css?: string };
+    /** `css` alongside the `id` and `name` Steel resolved for the element. */
+    selector?: { css?: string; id?: string; name?: string };
+    boundingBox?: { x?: number; y?: number; width?: number; height?: number };
 }
 
 /**
@@ -114,7 +117,11 @@ export interface AgentTraceTarget {
  * renders are declared; nothing is declared that has not been seen on the wire or documented.
  */
 export interface AgentTrace {
-    /** Activity type, such as `click`, `input`, `navigate`, `scroll`, `drag` or `error`. */
+    /**
+     * Activity type. The documented set is `click`, `input`, `navigate`, `scroll`, `drag` and
+     * `error`, but `change` and `submit` also arrive live, so treat this as open and never switch
+     * on it exhaustively.
+     */
     type?: string;
     timestamp?: string;
     /** Present when the activity spans a range of time rather than an instant. */
@@ -138,12 +145,38 @@ export interface AgentTraceTimeline {
     hasMore?: boolean;
 }
 
+/**
+ * One entry of `GET /v1/sessions/{id}/logs`.
+ *
+ * There is no severity and no message text here: the detail sits in `log`, JSON-encoded as a
+ * string, and has to be parsed before anything can be read off it.
+ */
 export interface SessionLogEntry {
+    id?: string;
     timestamp?: string;
-    level?: string;
-    text?: string;
-    message?: string;
+    /** `Navigation`, `Request`, `RequestFailed` or `Response`, capitalised as written. */
+    type?: string;
+    /** The entry's detail as a JSON-encoded string. Read it with `parseSessionLogPayload`. */
+    log?: string;
     [key: string]: unknown;
+}
+
+/** A parsed `log` payload. Which fields are present follows the entry's `type`. */
+export interface SessionLogPayload {
+    pageId?: string;
+    /** Destination of a `Navigation` entry. */
+    navigation?: AgentTraceUrlContext;
+    /** Failure detail of a `RequestFailed` entry, carrying the URL that failed. */
+    error?: { message?: string; url?: string; [key: string]: unknown };
+    createdAt?: number;
+    [key: string]: unknown;
+}
+
+/** The envelope `logs` answers with — the same shape `agent-traces` uses. */
+export interface SessionLogTimeline {
+    events: SessionLogEntry[];
+    total?: number;
+    hasMore?: boolean;
 }
 
 /**
@@ -159,5 +192,5 @@ export interface SteelApi {
     getSession(sessionId: string, signal?: AbortSignal): Promise<SteelSession>;
     getDetails(signal?: AbortSignal): Promise<AccountDetails>;
     getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTraceTimeline>;
-    getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogEntry[]>;
+    getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogTimeline>;
 }
