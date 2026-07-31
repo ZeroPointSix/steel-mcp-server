@@ -1,6 +1,7 @@
 // ABOUTME: Session lifecycle tools: explicit create with both Steel timeouts set, a release that
-// ABOUTME: captures context before tearing down, and the agent-trace diagnostics timeline.
+// ABOUTME: captures context first, the diagnostics timeline, and the app-only live-view endpoint.
 import { z } from 'zod';
+import { SESSION_VIEWER_URI } from '../apps/session-viewer.js';
 import { resolveInactivityTimeout } from '../config.js';
 import { mintSteelSessionId, type ServerDeps, type ToolHost } from '../context.js';
 import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
@@ -75,6 +76,9 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     .optional()
                     .describe('Hard session lifetime. Clamped to your plan maximum.'),
             }),
+            // A host that supports MCP Apps renders the live viewer beside this result. A host that
+            // does not ignores the key and shows the text below, which is unchanged either way.
+            _meta: { ui: { resourceUri: SESSION_VIEWER_URI } },
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_create', ctx.mcpReq, async () => {
@@ -257,6 +261,83 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
                         notes: record.viewerUrl ? [`Recording and replay: ${record.viewerUrl}`] : undefined,
                     },
                     { session_id: args.session_id, released: true, final_url: finalUrl, title }
+                );
+            })
+    );
+}
+
+/** Reads Steel's reported viewport, or nothing when it did not report a usable one. */
+function readViewport(dimensions: SteelSession['dimensions']): { width: number; height: number } | undefined {
+    const width = dimensions?.width;
+    const height = dimensions?.height;
+    if (typeof width !== 'number' || typeof height !== 'number') return undefined;
+    return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+/**
+ * The app-only tool the inline session viewer calls to learn where to connect.
+ *
+ * `visibility: ['app']` keeps this out of the list a host shows the model. It is presentation, not
+ * protection: nothing on the wire distinguishes an app-proxied call from a model-issued one, so the
+ * handle is re-authorised against this request's own principal exactly as it is for every other
+ * stateful tool, and a leaked handle is worth no more here than anywhere else.
+ */
+export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void {
+    host.registerTool(
+        'steel_session_live_view',
+        {
+            title: 'Live view connection',
+            description:
+                'Connection details the inline session viewer needs to stream this browser session. ' +
+                'Returns no page content.',
+            annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+            inputSchema: z.object({ session_id: sessionIdSchema }),
+            _meta: { ui: { visibility: ['app'] } },
+        },
+        async (args, ctx) =>
+            guard(deps, 'steel_session_live_view', ctx.mcpReq, async () => {
+                const record = await deps.registry.resolve(args.session_id, deps.principal);
+                // A rendered viewer is a session in use, and a person watching it is exactly who the
+                // idle sweep must not reclaim the slot from underneath.
+                await deps.registry.touch(args.session_id);
+
+                let session: SteelSession;
+                try {
+                    // Read fresh every time: Steel re-mints the token on each read, and an expiring
+                    // credential stored on the handle record would be a liability with no upside.
+                    session = await deps.api.getSession(record.steelSessionId, ctx.mcpReq.signal);
+                } catch (error) {
+                    // Steel's own prose is relayed everywhere else in this server. Not here: a
+                    // failure reading a session can quote the URL it was reading, and that URL
+                    // drives the browser. Only the classification survives.
+                    throw new SteelToolError(
+                        'Could not read the live-view connection details for this session from Steel. ' +
+                            'The session may have just been released; take a snapshot to check it is still live.',
+                        { code: error instanceof SteelToolError ? error.code : 'steel_error' }
+                    );
+                }
+
+                const cdpUrl = session.websocketUrl;
+                if (!cdpUrl) {
+                    // Never fall back to the configured connect URL: that one carries STEEL_API_KEY,
+                    // which is an org-wide credential and must not leave this process.
+                    throw new SteelToolError(
+                        'Steel returned no live-view connection for this session, so it cannot be streamed ' +
+                            'inline. Open the session viewer link from steel_session_create instead.',
+                        { code: 'steel_error' }
+                    );
+                }
+
+                const viewport = readViewport(session.dimensions);
+                return successResult(
+                    // Deliberately says nothing else. The URL below is a drive-capable credential and
+                    // belongs only in structured data, which the app reads and the model does not.
+                    { result: 'Live view connection details for this session.' },
+                    {
+                        cdp_url: cdpUrl,
+                        ...(viewport ? { viewport } : {}),
+                        expires_at: new Date(record.expiresAt).toISOString(),
+                    }
                 );
             })
     );

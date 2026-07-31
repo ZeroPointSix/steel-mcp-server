@@ -34,6 +34,9 @@ export interface RateLimiter {
  *   already open and add no new load of their own.
  * - `steel_scrape`, `steel_screenshot` and `steel_pdf` are single Browser Tools calls that start no
  *   session, so they are the cheapest thing a rate-limited agent can be steered towards.
+ * - `steel_session_live_view` is one session read for the inline viewer. It touches no browser and
+ *   spends no Browser Tools call, and the app re-asks for it whenever its stream reconnects, so
+ *   pricing it like a navigation would let a flapping viewer eat an agent's whole budget.
  * - `steel_session_release` is free: charging for handing a slot back would protect nothing and
  *   would keep a browser billing while its owner waited out a budget.
  */
@@ -49,6 +52,7 @@ export const TOOL_COSTS: Readonly<Record<string, number>> = {
     steel_scrape: 1,
     steel_screenshot: 1,
     steel_pdf: 1,
+    steel_session_live_view: 1,
     steel_session_release: 0,
 };
 

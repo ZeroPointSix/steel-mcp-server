@@ -28,7 +28,19 @@ export interface FakeSteelApiOptions {
     failCreateWith?: Error;
     /** Overrides the live-player URL; `null` models a deployment that returns none at all. */
     debugUrl?: string | null;
+    /**
+     * Overrides the scoped CDP URL a session read answers with; `null` models a deployment that
+     * returns none. Steel re-mints the token on every read, so the fake stamps the call count into
+     * it and a test can tell one fetch from the next.
+     */
+    websocketUrl?: string | null;
+    /** Overrides the session's viewport; `null` models a session Steel reports no dimensions for. */
+    dimensions?: { width: number; height: number } | null;
+    failGetSessionWith?: Error;
 }
+
+/** The viewport a session read reports unless a test asks for another one. */
+export const FAKE_VIEWPORT = { width: 1280, height: 720 };
 
 /** Records every call so tests can assert on the wire shape without a network. */
 export class FakeSteelApi implements SteelApi {
@@ -36,6 +48,8 @@ export class FakeSteelApi implements SteelApi {
     readonly released: string[] = [];
     readonly scrapes: ScrapeRequest[] = [];
     readonly artifacts: ArtifactRequest[] = [];
+    /** Every `GET /v1/sessions/{id}`, in order, so a test can prove a URL was fetched afresh. */
+    readonly sessionReads: string[] = [];
 
     constructor(private readonly options: FakeSteelApiOptions = {}) {}
 
@@ -80,8 +94,24 @@ export class FakeSteelApi implements SteelApi {
         this.released.push(sessionId);
     }
 
+    /**
+     * Answers a session read the way Steel does: with a `websocketUrl` carrying a freshly minted
+     * session-scoped token, and the dimensions the session was created with.
+     */
     async getSession(sessionId: string): Promise<SteelSession> {
-        return { id: sessionId, status: 'live' };
+        if (this.options.failGetSessionWith) throw this.options.failGetSessionWith;
+        this.sessionReads.push(sessionId);
+        const websocketUrl =
+            this.options.websocketUrl === null
+                ? undefined
+                : (this.options.websocketUrl ??
+                  `wss://connect.steel.dev/?sessionId=${sessionId}&token=jwt-${this.sessionReads.length}`);
+        return {
+            id: sessionId,
+            status: 'live',
+            websocketUrl,
+            dimensions: this.options.dimensions === null ? undefined : (this.options.dimensions ?? FAKE_VIEWPORT),
+        };
     }
 
     async getDetails(): Promise<AccountDetails> {

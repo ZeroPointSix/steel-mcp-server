@@ -14,7 +14,7 @@ describe('toolsForProfile', () => {
     });
 
     it('gives browse the full default surface', () => {
-        expect(toolsForProfile('browse')).toHaveLength(12);
+        expect(toolsForProfile('browse')).toHaveLength(13);
     });
 
     it('resolves every declared profile name, including the ones that add nothing yet', () => {
