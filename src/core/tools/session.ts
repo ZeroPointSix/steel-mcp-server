@@ -6,7 +6,8 @@ import { mintSteelSessionId, type ServerDeps, type ToolHost } from '../context.j
 import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
-import type { AccountDetails, SteelSession } from '../steel/types.js';
+import { agentTraceErrorText, agentTraceUrl } from '../steel/traces.js';
+import type { AccountDetails, AgentTraceTimeline, SteelSession } from '../steel/types.js';
 import { cursorSchema, guard, maxTokensSchema, sessionIdSchema, successResult } from './shared.js';
 
 /** Session-creation options the self-hosted image cannot honour, mapped to their named errors. */
@@ -272,8 +273,10 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
         async (args, ctx) =>
             guard(deps, 'steel_session_diagnostics', ctx.mcpReq, async () => {
                 const record = await deps.registry.resolve(args.session_id, deps.principal);
-                const [traces, logs] = await Promise.all([
-                    deps.api.getAgentTraces(record.steelSessionId, ctx.mcpReq.signal).catch(() => []),
+                const [timeline, logs] = await Promise.all([
+                    deps.api
+                        .getAgentTraces(record.steelSessionId, ctx.mcpReq.signal)
+                        .catch(() => ({ events: [] }) as AgentTraceTimeline),
                     deps.api.getSessionLogs(record.steelSessionId, ctx.mcpReq.signal).catch(() => []),
                 ]);
 
@@ -282,21 +285,27 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                     !timestamp || Number.isNaN(since) || Date.parse(timestamp) >= since;
 
                 const events = [
-                    ...traces
+                    // Only the fields below are echoed. Activity-specific extras are deliberately
+                    // left out: a typing activity's `value` is whatever was entered on the page,
+                    // including into a password box, so it never reaches the transcript.
+                    ...timeline.events
                         .filter(trace => atOrAfter(trace.timestamp))
-                        .map(trace => ({
-                            timestamp: trace.timestamp ?? '',
-                            line: [
-                                trace.action ?? 'event',
-                                trace.target?.accessibleName ? `"${trace.target.accessibleName}"` : '',
-                                trace.target?.role ? `(${trace.target.role})` : '',
-                                trace.target?.selector?.css ?? '',
-                                trace.url ?? '',
-                                trace.error ? `ERROR ${trace.error}` : '',
-                            ]
-                                .filter(Boolean)
-                                .join(' '),
-                        })),
+                        .map(trace => {
+                            const error = agentTraceErrorText(trace);
+                            return {
+                                timestamp: trace.timestamp ?? '',
+                                line: [
+                                    trace.type ?? 'event',
+                                    trace.target?.accessibleName ? `"${trace.target.accessibleName}"` : '',
+                                    trace.target?.role ? `(${trace.target.role})` : '',
+                                    trace.target?.selector?.css ?? '',
+                                    agentTraceUrl(trace) ?? '',
+                                    error ? `ERROR ${error}` : '',
+                                ]
+                                    .filter(Boolean)
+                                    .join(' '),
+                            };
+                        }),
                     ...logs
                         .filter(entry => atOrAfter(entry.timestamp))
                         .map(entry => ({
@@ -314,9 +323,17 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                     {
                         result: `${events.length} events in this session.`,
                         snapshot: page.text,
+                        // Distinct from the cursor below: this is Steel holding back activity, not
+                        // this response running out of token budget.
+                        notes: timeline.hasMore
+                            ? [
+                                  'Steel holds more activity for this session than it returned. Narrow the window ' +
+                                      'with since to see the rest.',
+                              ]
+                            : undefined,
                         pagination: page.truncated ? `Continue with cursor="${page.nextCursor}".` : undefined,
                     },
-                    { session_id: args.session_id, event_count: events.length }
+                    { session_id: args.session_id, event_count: events.length, has_more: timeline.hasMore ?? false }
                 );
             })
     );

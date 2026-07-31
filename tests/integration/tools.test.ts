@@ -644,9 +644,88 @@ describe('steel_session_diagnostics', () => {
             arguments: { session_id: handle },
         });
         const text = textOf(result);
+        expect(isError(result)).toBe(false);
         expect(text).toContain('click');
         expect(text).toContain('Sign in');
         expect(text).toContain('ERR_ABORTED');
+    });
+
+    it('names the real activity type and the page each one happened on', async () => {
+        const handle = await newSession();
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: { session_id: handle },
+        });
+        const text = textOf(result);
+        // The activity field is `type`; no row may fall back to the "event" placeholder, which is
+        // what an unreadable activity field renders as. Rows are "<timestamp> <activity> ...".
+        expect(text).toContain('navigate');
+        expect(text).not.toMatch(/^\S+ event\b/m);
+        // Page context on a click, navigation context on a navigate.
+        expect(text).toContain('https://example.com/login');
+        expect(text).toContain('https://example.com/challenge');
+        expect((result as { structuredContent?: { event_count?: number } }).structuredContent?.event_count).toBe(3);
+    });
+
+    it('says so when Steel holds more activity than it returned', async () => {
+        const withMore = await connect(
+            testDeps({
+                api: new FakeSteelApi({
+                    traces: {
+                        events: [
+                            { timestamp: '2026-07-27T10:00:01.000Z', type: 'scroll', page: { url: 'https://a.test/' } },
+                        ],
+                        total: 1,
+                        hasMore: true,
+                    },
+                }),
+            })
+        );
+        try {
+            const handle = await newSession(withMore);
+            const result = await withMore.client.callTool({
+                name: 'steel_session_diagnostics',
+                arguments: { session_id: handle },
+            });
+            expect(textOf(result)).toMatch(/more activity/i);
+            expect((result as { structuredContent?: { has_more?: boolean } }).structuredContent?.has_more).toBe(true);
+        } finally {
+            await withMore.close();
+        }
+    });
+
+    it('never echoes the text a typing activity recorded', async () => {
+        const typed = await connect(
+            testDeps({
+                api: new FakeSteelApi({
+                    traces: {
+                        events: [
+                            {
+                                timestamp: '2026-07-27T10:00:01.000Z',
+                                type: 'input',
+                                page: { url: 'https://app.test/login' },
+                                target: { role: 'textbox', accessibleName: 'Password' },
+                                value: 'hunter2-not-for-the-transcript',
+                            },
+                        ],
+                        total: 1,
+                        hasMore: false,
+                    },
+                }),
+            })
+        );
+        try {
+            const handle = await newSession(typed);
+            const result = await typed.client.callTool({
+                name: 'steel_session_diagnostics',
+                arguments: { session_id: handle },
+            });
+            const text = textOf(result);
+            expect(text).toContain('input');
+            expect(text).not.toContain('hunter2-not-for-the-transcript');
+        } finally {
+            await typed.close();
+        }
     });
 });
 

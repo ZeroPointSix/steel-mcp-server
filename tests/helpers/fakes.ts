@@ -8,7 +8,7 @@ import { BrowserPage } from '../../src/core/page.js';
 import { type HandleRegistry, InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
 import type {
     AccountDetails,
-    AgentTrace,
+    AgentTraceTimeline,
     ArtifactRequest,
     ArtifactResponse,
     CreateSessionRequest,
@@ -23,7 +23,7 @@ import { type FixturePage, fixtureSession } from './cdp-fixture.js';
 export interface FakeSteelApiOptions {
     scrape?: Partial<ScrapeResponse> | (() => Promise<ScrapeResponse>);
     details?: AccountDetails;
-    traces?: AgentTrace[];
+    traces?: AgentTraceTimeline;
     logs?: SessionLogEntry[];
     failCreateWith?: Error;
     /** Overrides the live-player URL; `null` models a deployment that returns none at all. */
@@ -88,16 +88,27 @@ export class FakeSteelApi implements SteelApi {
         return this.options.details ?? { maxSessionDuration: 900_000, concurrencyLimit: 10, plan: 'launch' };
     }
 
-    async getAgentTraces(): Promise<AgentTrace[]> {
+    /** Answers with the `{events,total,hasMore}` envelope and the field names Steel really sends. */
+    async getAgentTraces(): Promise<AgentTraceTimeline> {
         return (
-            this.options.traces ?? [
-                {
-                    timestamp: '2026-07-27T10:00:01.000Z',
-                    action: 'click',
-                    target: { role: 'button', accessibleName: 'Sign in', selector: { css: 'button.signin' } },
-                },
-                { timestamp: '2026-07-27T10:00:02.000Z', action: 'navigate', url: 'https://example.com/challenge' },
-            ]
+            this.options.traces ?? {
+                events: [
+                    {
+                        timestamp: '2026-07-27T10:00:01.000Z',
+                        type: 'click',
+                        page: { url: 'https://example.com/login' },
+                        target: { role: 'button', accessibleName: 'Sign in', selector: { css: 'button.signin' } },
+                        pointer: { x: 520, y: 410 },
+                    },
+                    {
+                        timestamp: '2026-07-27T10:00:02.000Z',
+                        type: 'navigate',
+                        navigation: { url: 'https://example.com/challenge' },
+                    },
+                ],
+                total: 2,
+                hasMore: false,
+            }
         );
     }
 

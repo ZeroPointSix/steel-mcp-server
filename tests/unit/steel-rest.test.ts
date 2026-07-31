@@ -234,12 +234,45 @@ describe('SteelRestClient trace propagation', () => {
 describe('SteelRestClient diagnostics endpoints', () => {
     it('reads agent traces and session logs', async () => {
         const { api, calls } = client([
-            { body: [{ timestamp: '2026-07-27T00:00:00Z', action: 'click' }] },
+            { body: { events: [{ timestamp: '2026-07-27T00:00:00Z', type: 'click' }], total: 1, hasMore: false } },
             { body: [{ timestamp: '2026-07-27T00:00:01Z', text: 'nav' }] },
         ]);
         await api.getAgentTraces('abc');
         await api.getSessionLogs('abc');
         expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions/abc/agent-traces');
         expect(calls[1]!.url).toBe('https://api.steel.dev/v1/sessions/abc/logs');
+    });
+
+    it('answers agent traces with the envelope Steel sends, not a bare array', async () => {
+        // Verbatim from a live call against a finished session, which is what the shape must match.
+        const { api } = client([
+            {
+                body: {
+                    events: [
+                        {
+                            timestamp: '2026-07-30T16:19:02.165Z',
+                            type: 'navigate',
+                            navigation: { url: 'about:blank' },
+                        },
+                    ],
+                    total: 1,
+                    hasMore: false,
+                },
+            },
+        ]);
+
+        const timeline = await api.getAgentTraces('abc');
+
+        expect(timeline.total).toBe(1);
+        expect(timeline.hasMore).toBe(false);
+        expect(timeline.events).toEqual([
+            { timestamp: '2026-07-30T16:19:02.165Z', type: 'navigate', navigation: { url: 'about:blank' } },
+        ]);
+    });
+
+    it('answers with an empty timeline when the body carries no events array', async () => {
+        const { api } = client([{ body: { total: 0, hasMore: false } }]);
+        const timeline = await api.getAgentTraces('abc');
+        expect(timeline.events).toEqual([]);
     });
 });

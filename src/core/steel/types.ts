@@ -91,18 +91,51 @@ export interface AccountDetails {
     [key: string]: unknown;
 }
 
-/** One entry of the semantic timeline from `GET /v1/sessions/{id}/agent-traces`. */
-export interface AgentTrace {
-    timestamp?: string;
-    action?: string;
+/** A URL-bearing context on an activity: `page` for where it happened, `navigation` for a move. */
+export interface AgentTraceUrlContext {
     url?: string;
-    target?: {
-        role?: string;
-        accessibleName?: string;
-        selector?: { css?: string };
-    };
-    error?: string;
     [key: string]: unknown;
+}
+
+/** Element context, present when Steel could identify what an activity acted on. */
+export interface AgentTraceTarget {
+    role?: string;
+    accessibleName?: string;
+    text?: string;
+    attributes?: Record<string, string>;
+    selector?: { css?: string };
+}
+
+/**
+ * One activity of the timeline from `GET /v1/sessions/{id}/agent-traces`.
+ *
+ * The index signature carries the extras that depend on the activity type — `pointer` on a click,
+ * `keyboard` and `value` on typing — which the docs describe but do not pin. Fields this server
+ * renders are declared; nothing is declared that has not been seen on the wire or documented.
+ */
+export interface AgentTrace {
+    /** Activity type, such as `click`, `input`, `navigate`, `scroll`, `drag` or `error`. */
+    type?: string;
+    timestamp?: string;
+    /** Present when the activity spans a range of time rather than an instant. */
+    endTimestamp?: string;
+    /** Page context, usually including `url`. */
+    page?: AgentTraceUrlContext;
+    /** Destination context on a navigation activity. */
+    navigation?: AgentTraceUrlContext;
+    target?: AgentTraceTarget;
+    /** Documented on error activities without a pinned shape, so read it through a helper. */
+    error?: unknown;
+    [key: string]: unknown;
+}
+
+/** The envelope `agent-traces` answers with. `events` is chronological. */
+export interface AgentTraceTimeline {
+    events: AgentTrace[];
+    /** Number of activities returned, which is not the number Steel holds — see `hasMore`. */
+    total?: number;
+    /** True when Steel has more activity for the session than this response carried. */
+    hasMore?: boolean;
 }
 
 export interface SessionLogEntry {
@@ -125,6 +158,6 @@ export interface SteelApi {
     releaseSession(sessionId: string, signal?: AbortSignal): Promise<void>;
     getSession(sessionId: string, signal?: AbortSignal): Promise<SteelSession>;
     getDetails(signal?: AbortSignal): Promise<AccountDetails>;
-    getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTrace[]>;
+    getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTraceTimeline>;
     getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogEntry[]>;
 }

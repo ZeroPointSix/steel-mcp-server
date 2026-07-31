@@ -6,7 +6,7 @@ import { mapSteelHttpError, type SteelErrorBody, type SteelOperation, SteelToolE
 import { activeTraceparent, resolveTracer, withSteelCallSpan } from '../telemetry.js';
 import type {
     AccountDetails,
-    AgentTrace,
+    AgentTraceTimeline,
     ArtifactRequest,
     ArtifactResponse,
     CreateSessionRequest,
@@ -202,13 +202,20 @@ export class SteelRestClient implements SteelApi {
         });
     }
 
-    async getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTrace[]> {
-        return this.requireJson<AgentTrace[]>({
+    /**
+     * Reads the trace timeline, which arrives as an `{events,total,hasMore}` envelope rather than a
+     * bare array. The envelope is passed through so a caller can see that Steel holds more activity
+     * than it sent; only a missing `events` is normalised, so a shape surprise cannot become a
+     * TypeError in a renderer.
+     */
+    async getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTraceTimeline> {
+        const timeline = await this.requireJson<AgentTraceTimeline>({
             method: 'GET',
             path: `/sessions/${encodeURIComponent(sessionId)}/agent-traces`,
             operation: 'account',
             signal,
         });
+        return { ...timeline, events: Array.isArray(timeline.events) ? timeline.events : [] };
     }
 
     async getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogEntry[]> {
