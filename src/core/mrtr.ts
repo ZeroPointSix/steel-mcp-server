@@ -1,5 +1,5 @@
-// ABOUTME: The human-in-the-loop handoff: a login wall or CAPTCHA becomes a URL-mode elicitation
-// ABOUTME: pointing at the session's live player, and the retried call re-checks the page itself.
+// ABOUTME: The human-in-the-loop handoff for a login wall or CAPTCHA. When the client renders the
+// ABOUTME: inline session viewer it points a person there; otherwise it hands out the live-player URL.
 import {
     CLIENT_CAPABILITIES_META_KEY,
     type ClientCapabilities,
@@ -20,6 +20,7 @@ import {
 } from './errors.js';
 import type { BrowserPage } from './page.js';
 import type { HandleRecord } from './registry.js';
+import { UI_EXTENSION_NAME } from './server.js';
 import { stripInvisible } from './untrusted.js';
 
 /** The key the elicitation is filed under, and the key the retry's response comes back on. */
@@ -164,6 +165,21 @@ export function supportsUrlElicitation(
     return declared?.elicitation?.url !== undefined;
 }
 
+/**
+ * Whether this request is being served to a client that has the inline session viewer rendered.
+ *
+ * The MCP-Apps UI extension is declared per request under `capabilities.extensions` on the
+ * 2026-07-28 wire, and the inline viewer is a modern-wire feature, so — unlike elicitation — there
+ * is no initialize-era fallback: a 2025-era connection carries no per-request capability envelope
+ * and always degrades to the external player URL. The extension is the gate the whole inline path
+ * keys off, because a client that renders the app is the one already on the same `session_id` the
+ * viewer is showing.
+ */
+export function supportsInlineViewer(ctx: ServerContext): boolean {
+    const envelope = ctx.mcpReq.envelope as Record<string, ClientCapabilities | undefined> | undefined;
+    return envelope?.[CLIENT_CAPABILITIES_META_KEY]?.extensions?.[UI_EXTENSION_NAME] !== undefined;
+}
+
 /** Fixed prose per block kind. Page text is never quoted here — it would be an injection channel. */
 function describeBlock(block: InteractiveBlock): string {
     return block.kind === 'login_wall'
@@ -251,6 +267,36 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     // never seen this handle before — gets no extra prompts out of the server for it.
     const now = deps.now().getTime();
     if (record.handoffRounds >= MAX_HANDOFF_ROUNDS) fail();
+
+    // When the client has the inline session viewer rendered (the MCP-Apps UI extension, declared
+    // per request on the modern wire), point the person at that viewer instead of handing out the
+    // external player URL. The viewer reaches the same browser through the scoped CDP token the app
+    // already holds, so the unauthenticated player URL — a drive-capable bearer capability — never
+    // leaves the server on this path. The retried call re-reads the page itself, exactly as the
+    // external path does, so the round counter and signed state keep working unchanged.
+    if (supportsInlineViewer(ctx)) {
+        const round = await deps.registry.recordHandoff(handle);
+        const origin = handoffOrigin(evidence.finalUrl);
+        const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
+        const requestState = await deps.handoffState.mint(state, ctx);
+        // Pinned as late as the handler can: the inline path has no further gate, so a call that
+        // reaches here does ask the person, and the slot survives the sweep while they work.
+        await deps.registry.awaitInput(handle, Math.min(now + HANDOFF_GRACE_MS, record.expiresAt));
+        return inputRequired({
+            requestState,
+            inputRequests: {
+                [HANDOFF_KEY]: inputRequired.elicit({
+                    message:
+                        `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Take control ` +
+                        'in the live browser viewer above and finish this step by hand, then tell me to continue — ' +
+                        'I will re-read the page and carry on only if the way is actually clear.',
+                    // No fields: the person signals "done" with the elicitation's accept action, and
+                    // the retried call re-reads the page itself, so no structured input is needed.
+                    requestedSchema: { type: 'object', properties: {} },
+                }),
+            },
+        });
+    }
 
     if (!supportsUrlElicitation(ctx, request.declaredAtConnect)) fail();
 
