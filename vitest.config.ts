@@ -29,6 +29,19 @@ export default defineConfig({
             },
             {
                 test: {
+                    name: 'browser',
+                    include: ['tests/browser/**/*.test.ts'],
+                    environment: 'node',
+                    testTimeout: 60_000,
+                    hookTimeout: 60_000,
+                    // These drive one real headless Chrome per file, and two of them wait out the
+                    // app's own 15s timeouts, so they never share a browser with another file.
+                    fileParallelism: false,
+                    sequence: { concurrent: false },
+                },
+            },
+            {
+                test: {
                     name: 'smoke',
                     include: ['tests/smoke/**/*.test.ts'],
                     environment: 'node',

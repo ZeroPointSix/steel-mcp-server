@@ -223,12 +223,12 @@ describe('readCdpReply', () => {
 describe('readScreencastFrame', () => {
     const frame = {
         method: 'Page.screencastFrame',
-        params: { data: 'AAAA', sessionId: 'A1B2C3', metadata },
+        params: { data: 'AAAA', sessionId: 1, metadata },
     };
 
     it('reads the frame, the ack session and a data URL built from the base64 payload', () => {
         expect(readScreencastFrame(frame)).toEqual({
-            ackSessionId: 'A1B2C3',
+            ackSessionId: 1,
             dataUrl: 'data:image/jpeg;base64,AAAA',
             metadata,
         });
@@ -240,9 +240,13 @@ describe('readScreencastFrame', () => {
         }
     });
 
-    it('refuses a frame with no usable ack session', () => {
-        expect(readScreencastFrame({ ...frame, params: { ...frame.params, sessionId: '' } })).toBe(null);
-        expect(readScreencastFrame({ ...frame, params: { ...frame.params, sessionId: 42 } })).toBe(null);
+    it('refuses a frame whose ack session is not the int32 the ack command takes', () => {
+        // Chrome types this as an integer both on the event and on Page.screencastFrameAck, and
+        // refuses the ack outright when it is anything else, which stalls the stream after one frame.
+        for (const sessionId of ['A1B2C3', '1', '', 1.5, -1, 2 ** 31, Number.NaN, null, undefined]) {
+            expect(readScreencastFrame({ ...frame, params: { ...frame.params, sessionId } })).toBe(null);
+        }
+        expect(readScreencastFrame({ ...frame, params: { ...frame.params, sessionId: 0 } })?.ackSessionId).toBe(0);
     });
 
     it('refuses metadata that would break the coordinate mapping', () => {
@@ -640,9 +644,9 @@ describe('SESSION_VIEWER_HTML', () => {
         expect(
             isolate(readScreencastFrame)({
                 method: 'Page.screencastFrame',
-                params: { data: 'AAAA', sessionId: 'A1', metadata },
+                params: { data: 'AAAA', sessionId: 7, metadata },
             })?.ackSessionId
-        ).toBe('A1');
+        ).toBe(7);
         expect(isolate(pickPageTargetId)({ targetInfos: [{ type: 'page', targetId: 'P1' }] })).toBe('P1');
         expect(isolate(readAttachedSessionId)({ sessionId: 'A1' })).toBe('A1');
         expect(isolate(readBridgeResponse)({ jsonrpc: '2.0', id: 1, result: {} })?.id).toBe(1);
