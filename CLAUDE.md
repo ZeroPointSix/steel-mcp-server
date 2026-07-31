@@ -15,10 +15,13 @@ npm run lint
 npm test
 npm run budget
 npm run conformance
+npm run test:browser
 npm run test:e2e
 ```
 
-Run the checks that cover the change. Browser behavior requires the E2E suite.
+Run the checks that cover the change. Browser behavior requires the E2E suite. The MCP-App session
+viewer's own runtime requires `test:browser`, which needs a local Chrome and `openssl` and skips
+loudly without them.
 
 ## Rules
 

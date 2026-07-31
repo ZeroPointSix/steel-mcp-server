@@ -37,6 +37,7 @@
         "test": "vitest run --project unit --project integration",
         "test:unit": "vitest run --project unit",
         "test:integration": "vitest run --project integration",
+        "test:browser": "vitest run --project browser",
         "test:e2e": "./scripts/run-e2e.sh",
         "test:e2e:direct": "vitest run --project e2e",
         "test:watch": "vitest",

@@ -231,8 +231,13 @@ export interface ScreencastMetadata {
 
 /** One decoded screencast frame: what to draw, what to ack with, and where the page was. */
 export interface ScreencastFrame {
-    /** The frame's own session id, which `Page.screencastFrameAck` must echo or the stream stalls. */
-    readonly ackSessionId: string;
+    /**
+     * The frame's own session id, which `Page.screencastFrameAck` must echo or the stream stalls.
+     *
+     * Chrome types this as an `int32` on both the event and the ack command, and refuses an ack
+     * carrying anything else, so it stays a number all the way back out.
+     */
+    readonly ackSessionId: number;
     readonly dataUrl: string;
     readonly metadata: ScreencastMetadata;
 }
@@ -254,7 +259,8 @@ export function readScreencastFrame(message: unknown): ScreencastFrame | null {
     const params = event.params as { data?: unknown; sessionId?: unknown; metadata?: unknown };
     if (typeof params.data !== 'string' || params.data.length % 4 !== 0) return null;
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(params.data)) return null;
-    if (typeof params.sessionId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(params.sessionId)) return null;
+    if (typeof params.sessionId !== 'number' || !Number.isInteger(params.sessionId)) return null;
+    if (params.sessionId < 0 || params.sessionId > 2147483647) return null;
     if (typeof params.metadata !== 'object' || params.metadata === null) return null;
     const raw = params.metadata as Partial<ScreencastMetadata>;
     const finite = (value: unknown): number | null =>
@@ -740,9 +746,17 @@ function connect(url){
     return;
   }
   socket = opened;
-  opened.onopen = function(){ attach(); };
+  var everOpen = false;
+  opened.onopen = function(){ everOpen = true; attach(); };
   opened.onmessage = function(event){ receive(event.data); };
-  opened.onclose = function(){ if (!stopped && opened === socket) setPhase('closed'); };
+  // A socket the host's sandbox refuses is closed before it ever reaches the network, and fires only
+  // an error: no close event follows, so without this the app would sit on the spinner for good.
+  opened.onerror = function(){
+    if (stopped || opened !== socket || everOpen) return;
+    setPhase('live-view-failed', 'The browser connection could not be opened. The chat host may not permit it.');
+  };
+  // Only a connection that was up can have dropped; one that never opened is reported above.
+  opened.onclose = function(){ if (!stopped && opened === socket && everOpen) setPhase('closed'); };
 }
 
 var nextCdpId = 1;
