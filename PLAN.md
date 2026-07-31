@@ -279,9 +279,17 @@ protocol machinery.
 
 **Work items, in order:**
 
-1. ~~Embeddability probe~~ **Done 2026-07-30** (resolved question 12): the player is embed-ready —
-   no framing blocks on any Steel origin, `steel:*` postMessage lifecycle events, `hideOverlay`/
-   `hideInteractionDialog` params. The CDP-screencast fallback is dead; do not build it.
+1. ~~Embeddability probe~~ **Done 2026-07-30, then overtaken 2026-07-31.** The probe answered the
+   *Steel* side (question 12): the player is embed-ready — no framing blocks on any Steel origin,
+   `steel:*` postMessage lifecycle events, `hideOverlay`/`hideInteractionDialog` params. It said
+   nothing about the *host* side, and that is where this design dies: **Claude does not honour
+   `frameDomains`.** Anthropic's MCP Apps design guidelines state third-party iframe embedding "is
+   currently restricted in Claude pending security review"; Claude enforces a hardcoded
+   `frame-src 'self' blob: data:` (anthropics/claude-ai-mcp #40 open, #54 *closed as not planned*).
+   A shell nesting `api.steel.dev` renders as an empty box in Claude Desktop and claude.ai.
+   **An earlier revision of this item said "the CDP-screencast fallback is dead; do not build it" —
+   that was wrong.** Painting screencast frames to a canvas is now the only viable inline path, and
+   it is gated on two unknowns (see questions 15 and 16).
 2. Declare `capabilities.extensions["io.modelcontextprotocol/ui"]` and add the `resources`
    capability (currently tools-only). The shell is org-independent and static: serve it with
    `ttlMs` = 1h, `cacheScope: 'public'` — no per-session data may ever be baked into it.
