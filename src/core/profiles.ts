@@ -4,7 +4,12 @@ import type { ProfileName } from './config.js';
 import type { ServerDeps, ToolHost } from './context.js';
 import { registerBatch } from './tools/batch.js';
 import { registerAct, registerFind, registerNavigate, registerSnapshot, registerWaitFor } from './tools/browse.js';
-import { registerSessionCreate, registerSessionDiagnostics, registerSessionRelease } from './tools/session.js';
+import {
+    registerSessionCreate,
+    registerSessionDiagnostics,
+    registerSessionLiveView,
+    registerSessionRelease,
+} from './tools/session.js';
 import { registerPdf, registerScrape, registerScreenshot } from './tools/stateless.js';
 
 export interface ToolDefinition {
@@ -36,6 +41,9 @@ export const TOOL_TABLE: ToolDefinition[] = [
     { name: 'steel_wait_for', profiles: BROWSE_AND_UP, register: registerWaitFor },
     { name: 'steel_session_diagnostics', profiles: BROWSE_AND_UP, register: registerSessionDiagnostics },
     { name: 'steel_batch', profiles: BROWSE_AND_UP, register: registerBatch },
+    // Last on purpose. A host filters this one out of the list it shows the model, and appending
+    // rather than inserting keeps the prefix every other tool sits in byte-identical.
+    { name: 'steel_session_live_view', profiles: BROWSE_AND_UP, register: registerSessionLiveView },
 ];
 
 /** The tools a profile exposes, in `tools/list` order. */

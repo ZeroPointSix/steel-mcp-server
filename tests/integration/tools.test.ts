@@ -79,6 +79,9 @@ describe('tools/list', () => {
             'steel_wait_for',
             'steel_session_diagnostics',
             'steel_batch',
+            // Listed, and last: the spec has the host filter an app-only tool out of what the model
+            // sees, which means the server does list it.
+            'steel_session_live_view',
         ]);
     });
 

@@ -78,7 +78,16 @@ export interface SteelSession {
     duration?: number;
     sessionViewerUrl?: string;
     debugUrl?: string;
+    /**
+     * CDP endpoint for this session, carrying a session-scoped token rather than the API key.
+     *
+     * `GET /v1/sessions/{id}` re-mints the token on every read, with an expiry equal to the
+     * session's remaining lifetime, so this is a short-lived credential to fetch per use and never
+     * to store. Whoever holds it can drive the browser.
+     */
     websocketUrl?: string;
+    /** Viewport the session runs at, in CSS pixels. Absent on deployments that do not report it. */
+    dimensions?: { width?: number; height?: number };
     [key: string]: unknown;
 }
 

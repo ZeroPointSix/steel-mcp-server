@@ -6,6 +6,6 @@ server:
   - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
   - server-stateless:sep-2575-server-no-log-without-loglevel
   - server-stateless:sep-2575-server-sends-tools-list-changed-on-subscription
+  # The only cacheable operation this server has no feature behind: it registers no prompts, so
+  # prompts/list answers "method not found" and carries no hints to check.
   - caching:sep-2549-prompts-list-caching-hints
-  - caching:sep-2549-resources-list-caching-hints
-  - caching:sep-2549-resources-templates-list-caching-hints
