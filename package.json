@@ -1,16 +1,16 @@
 {
     "name": "steel-mcp",
     "mcpName": "dev.steel/mcp-server",
-    "version": "2.0.0-beta.1",
+    "version": "2.0.0",
     "description": "MCP server for Steel cloud browsers: read, screenshot and act on any website, including ones that block plain fetch",
     "license": "MIT",
     "author": "Steel (https://steel.dev)",
     "homepage": "https://steel.dev",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/steel-dev/mcp-server.git"
+        "url": "git+https://github.com/steel-dev/steel-mcp-server.git"
     },
-    "bugs": "https://github.com/steel-dev/mcp-server/issues",
+    "bugs": "https://github.com/steel-dev/steel-mcp-server/issues",
     "type": "module",
     "engines": {
         "node": ">=20"
@@ -21,6 +21,7 @@
     "main": "./dist/core/index.js",
     "exports": {
         ".": "./dist/core/index.js",
+        "./hosted": "./dist/hosted.js",
         "./hosted-runtime": "./dist/hosted-runtime.js",
         "./http": "./dist/http.js",
         "./stdio": "./dist/stdio.js",
@@ -44,6 +45,7 @@
         "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
         "start": "node dist/stdio.js",
+        "start:hosted": "node dist/hosted.js",
         "prepare": "npm run build",
         "test:smoke": "vitest run --project smoke"
     },
@@ -52,11 +54,11 @@
         "@modelcontextprotocol/server": "2.0.0",
         "@opentelemetry/api": "^1.9.1",
         "ioredis": "^5.11.1",
-        "ws": "^8.21.1",
+        "ws": "^8.21.2",
         "zod": "^4.2.0"
     },
     "devDependencies": {
-        "@biomejs/biome": "^2.5.5",
+        "@biomejs/biome": "^2.5.6",
         "@modelcontextprotocol/client": "2.0.0",
         "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
         "@opentelemetry/context-async-hooks": "^2.10.0",
