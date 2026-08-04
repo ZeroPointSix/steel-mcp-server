@@ -1,5 +1,7 @@
 // ABOUTME: Integration tests driving the whole tool surface through a real MCP client over the
 // ABOUTME: in-memory transport, with fakes only at the Steel REST and browser-pool boundaries.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -83,6 +85,16 @@ describe('tools/list', () => {
             // sees, which means the server does list it.
             'steel_session_live_view',
         ]);
+    });
+
+    it('matches the tool list the MCPB manifest advertises before install', async () => {
+        // Compatibility review compares what the bundle promised against what the server serves. This
+        // is that comparison, run against a live client rather than against TOOL_TABLE.
+        const bundle = JSON.parse(
+            readFileSync(fileURLToPath(new URL('../../manifest.json', import.meta.url)), 'utf8')
+        ) as { tools: Array<{ name: string }> };
+        const { tools } = await harness.client.listTools();
+        expect(bundle.tools.map(tool => tool.name)).toEqual(tools.map(tool => tool.name));
     });
 
     it('gives every tool a title and an explicit read-only or destructive hint', async () => {

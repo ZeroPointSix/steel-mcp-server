@@ -7,15 +7,18 @@ through interactive sites by clicking, typing, and filling forms.
 Unlike v1's screenshot-and-numbered-box loop, v2 reads pages as markdown or accessibility trees,
 keeps screenshots out of the context by default, and makes browser sessions explicit.
 
-For example:
-
-- "Read this page and summarize the pricing table." No browser session needed.
-- "Find and compare prices for this product across these three shops"
-- "Sign in and check the total on last month's invoice"
-- "Fill out this application form with the details from my CV"
-
 > **Status:** `2.0.0`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
+
+## Example prompts
+
+| Ask | What happens |
+|---|---|
+| "Read this page and summarize the pricing table." | One `steel_scrape`. No browser session, nothing to release |
+| "Find and compare prices for this product across these three shops." | Three stateless reads, or a session where a shop needs JavaScript to render |
+| "Sign in to my account and check the total on last month's invoice." | A session, a snapshot, and a handoff to you at the login wall — the server never guesses at a password |
+| "Fill out this application form with the details from my CV." | A snapshot to find the fields, then `steel_act` per field, or one `steel_batch` for the lot |
+| "Screenshot the top of this article for a slide." | One `steel_screenshot`, returned as a link rather than base64 |
 
 ## What it exposes
 
@@ -52,6 +55,20 @@ agent carries on. On a host without MCP Apps, nothing is lost — the same tools
 `viewer_url` opens the same browser in a tab.
 
 ## Quick start
+
+### Claude for macOS or Windows
+
+Build the desktop extension and open it — Claude installs it and prompts for your
+[Steel API key](https://app.steel.dev/settings/api-keys). Nothing else to configure, and no Node
+install of your own is needed at runtime.
+
+```bash
+git clone https://github.com/steel-dev/steel-mcp-server.git
+cd steel-mcp-server
+npm install
+npm run pack:mcpb
+open build/steel-mcp-*.mcpb    # on Windows, double-click it
+```
 
 ### Steel Cloud
 
@@ -134,6 +151,18 @@ Logs are structured JSON on stderr; stdout carries nothing but JSON-RPC.
 
 ## Running the hosted endpoint
 
+The hosted entrypoint needs two packages a default install deliberately leaves out, so that a desktop
+or `npx` user never carries the hosted stack:
+
+```bash
+npm install ioredis @modelcontextprotocol/node
+# and, only if you want OTLP tracing:
+npm install @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http
+```
+
+They are declared as optional `peerDependencies`. A source checkout already has all four, and the
+Docker image installs them itself.
+
 `node dist/hosted.js` (or `npm run start:hosted`) serves the same tools over Streamable HTTP at
 `POST /mcp`. Every caller brings their own Steel key, as a `Authorization: Bearer` header or an
 `?apiKey=` query parameter for hosts that cannot set headers; a handle minted by one request is
@@ -191,6 +220,8 @@ npm run test:e2e       # starts, waits for and tears down the real-browser stack
 
 See [CLAUDE.md](CLAUDE.md) for the working rules. [PLAN.md](PLAN.md) tracks the implementation, and
 [RESEARCH.md](RESEARCH.md) records the evidence behind the design.
+[RELEASING.md](RELEASING.md) explains what ships from this one package — the desktop bundle, the npm
+package, the container image and the hosted service — and how a release is cut.
 
 ## Troubleshooting
 
@@ -210,6 +241,38 @@ and at the plan's hard time limit. Create a new one.
 **A click reports that nothing changed.** It probably landed on something else. If an overlay is
 covering the target the error names it; run `steel_act` with `dismiss_overlays`, then retry.
 
+**The extension fails to start with a message about `STEEL_API_KEY`.** The key never reached the
+server. Open the extension's settings in Claude and re-enter it; the field is write-only, so a blank
+one looks the same as a filled one.
+
+**"Concurrency limit reached" on `steel_session_create`.** Your Steel plan allows fewer simultaneous
+browsers than are open. Sessions you forgot to release count — `steel_session_release` frees one
+immediately, and Steel reclaims idle sessions after two minutes.
+
+**Tracing was requested but could not start.** The desktop bundle deliberately ships without the
+OpenTelemetry exporter stack. The server logs this once and serves normally; install
+`@opentelemetry/sdk-node` and `@opentelemetry/exporter-trace-otlp-http` in a source checkout if you
+want traces.
+
+## Support
+
+Open an issue at
+[steel-dev/steel-mcp-server/issues](https://github.com/steel-dev/steel-mcp-server/issues) — include
+the tool you called and the error text. For anything security-related, follow
+[SECURITY.md](SECURITY.md) instead of filing a public issue.
+
+## Privacy
+
+The server holds no data of its own. It sends the URLs and page interactions a tool call names to
+[Steel](https://steel.dev), which runs the browser, and returns what the page said. Page content
+passes through to your MCP client and is not stored, logged, or forwarded anywhere else; passwords
+and credentials are redacted before anything reaches a log. Nothing about your conversation is
+collected, and no telemetry exporter is loaded unless you configure one with a standard `OTEL_*`
+variable.
+
+Steel's handling of the browser sessions it runs is covered by the
+[Steel privacy policy](https://steel.dev/privacy).
+
 ## Contributing
 
 Contributions are welcome. This project practises TDD: write the failing test first. See
@@ -221,6 +284,6 @@ Contributions are welcome. This project practises TDD: write the failing test fi
 
 ## Disclaimer
 
-This is beta software. Web pages can contain prompt injections, and filtering cannot remove every
-one. Review browser actions that can submit data, make purchases, or change an account. The threat
-model and current mitigations are documented in [RESEARCH.md §7](RESEARCH.md#7-security).
+Web pages can contain prompt injections, and filtering cannot remove every one. Review browser
+actions that can submit data, make purchases, or change an account. The threat model and current
+mitigations are documented in [RESEARCH.md §7](RESEARCH.md#7-security).

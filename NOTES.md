@@ -221,6 +221,32 @@ Measured 2026-08-04 against `@anthropic-ai/mcpb@2.1.2`, manifest schema **v0.4**
 - **`mcpb validate` passes and the icon is accepted at 512×512.** The CLI reports "Icon validation
   passed" as a *warning* line, which reads like a problem and is not one.
 
+### The bundle work exposed the same waste in the npm package
+
+Measured by installing the real `package.json` with `--omit=dev` into an empty directory, before and
+after the split. Same stdio server both times.
+
+| | Packages | Size |
+|---|---|---|
+| Before | 85 | **68M** |
+| After | 5 | **17M** |
+
+- **`optionalDependencies` are installed by default.** That is the whole finding. The 35M
+  OpenTelemetry exporter stack was in `optionalDependencies` *specifically* to keep it out of ordinary
+  installs, and npm installed it for everyone anyway. Only
+  `peerDependenciesMeta.<name>.optional: true` actually keeps a package out — `npm install --omit=dev`
+  skipped nothing until the four hosted packages moved there.
+- **The 60M was all hosted-only**: the exporter stack (35M), `hono` via
+  `@modelcontextprotocol/node` (2.7M), and `ioredis` plus its six transitive packages (1.1M). None is
+  reachable from `stdio.ts`.
+- **An optional peer must also be a devDependency**, or the repository stops typechecking its own
+  hosted sources and the Redis registry suite has nothing to run against.
+- **`npm prune --omit=dev` removes optional peers**, so the container image — which serves either
+  entrypoint — has to reinstall them by name. It reads the ranges out of `peerDependencies` so the
+  two cannot drift.
+- The MCPB bundle's staged `node_modules` is also 17M; `mcpb pack` reports 8.0M unpacked because its
+  own ignore rules strip a further 817 files.
+
 ## 8. Process notes
 
 - **Never judge a check by piping it to `tail`/`head`.** A pipeline's exit status is the pager's, so

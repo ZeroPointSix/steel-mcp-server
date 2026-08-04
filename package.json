@@ -44,27 +44,52 @@
         "test:watch": "vitest",
         "conformance": "npm run build && ./scripts/run-conformance.sh",
         "budget": "vitest run --project budget",
+        "pack:mcpb": "./scripts/pack-mcpb.sh",
+        "sync:version": "node scripts/sync-version.mjs",
+        "version": "node scripts/sync-version.mjs && git add src/core/version.ts manifest.json README.md",
         "start": "node dist/stdio.js",
         "start:hosted": "node dist/hosted.js",
         "prepare": "npm run build",
         "test:smoke": "vitest run --project smoke"
     },
     "dependencies": {
-        "@modelcontextprotocol/node": "2.0.0",
         "@modelcontextprotocol/server": "2.0.0",
         "@opentelemetry/api": "^1.9.1",
-        "ioredis": "^5.11.1",
         "ws": "^8.21.2",
         "zod": "^4.2.0"
+    },
+    "peerDependencies": {
+        "@modelcontextprotocol/node": "2.0.0",
+        "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+        "@opentelemetry/sdk-node": "^0.221.0",
+        "ioredis": "^5.11.1"
+    },
+    "peerDependenciesMeta": {
+        "@modelcontextprotocol/node": {
+            "optional": true
+        },
+        "@opentelemetry/exporter-trace-otlp-http": {
+            "optional": true
+        },
+        "@opentelemetry/sdk-node": {
+            "optional": true
+        },
+        "ioredis": {
+            "optional": true
+        }
     },
     "devDependencies": {
         "@biomejs/biome": "^2.5.6",
         "@modelcontextprotocol/client": "2.0.0",
         "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
+        "@modelcontextprotocol/node": "2.0.0",
         "@opentelemetry/context-async-hooks": "^2.10.0",
+        "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+        "@opentelemetry/sdk-node": "^0.221.0",
         "@opentelemetry/sdk-trace-base": "^2.10.0",
         "@types/node": "^26.1.2",
         "@types/ws": "^8.18.1",
+        "ioredis": "^5.11.1",
         "typescript": "^7.0.2",
         "vitest": "^4.1.10"
     },
@@ -76,9 +101,5 @@
         "automation",
         "scraping",
         "headless-chrome"
-    ],
-    "optionalDependencies": {
-        "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
-        "@opentelemetry/sdk-node": "^0.221.0"
-    }
+    ]
 }

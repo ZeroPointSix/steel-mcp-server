@@ -1,4 +1,4 @@
-// ABOUTME: The server version reported over the wire, kept in step with package.json by a test.
-// ABOUTME: Declared as a constant rather than read from disk so the bundle has no filesystem reads.
+// ABOUTME: The server version reported over the wire. Written by scripts/sync-version.mjs from
+// ABOUTME: package.json — a constant, not a disk read, so the bundle reads no files at startup.
 
 export const SERVER_VERSION = '2.0.0';

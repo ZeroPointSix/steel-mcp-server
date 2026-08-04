@@ -92,6 +92,14 @@ describe('loadConfig', () => {
         expect(() => loadConfig({ STEEL_API_KEY: 'k', STEEL_PROFILE: 'turbo' })).toThrow(/turbo/);
     });
 
+    it('treats a blank profile as unset, because an MCPB host substitutes one for optional config', () => {
+        // manifest.json maps STEEL_PROFILE to an optional user_config value. A host that substitutes
+        // the empty string for one the user left alone would otherwise fail startup with
+        // `Unknown STEEL_PROFILE ""` — a message naming a variable the user never set.
+        expect(loadConfig({ STEEL_API_KEY: 'k', STEEL_PROFILE: '' }).profile).toBe('browse');
+        expect(loadConfig({ STEEL_API_KEY: 'k', STEEL_PROFILE: '  ' }).profile).toBe('browse');
+    });
+
     it('refuses a designed-but-unbuilt profile instead of silently serving browse', () => {
         // vision and full are named in PLAN §7 and have no tools of their own yet. Accepting either
         // would start a session-capable server that quietly lacks what the name was chosen for.

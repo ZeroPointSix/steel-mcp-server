@@ -136,7 +136,9 @@ export function loadConfig(env: Record<string, string | undefined>): SteelConfig
         );
     }
 
-    const profileName = env.STEEL_PROFILE ?? 'browse';
+    // Blank counts as unset: an MCPB host substitutes the empty string for an optional user_config
+    // value the user left alone, and refusing that would name a variable they never set.
+    const profileName = env.STEEL_PROFILE?.trim() || 'browse';
     if (!(PROFILE_NAMES as readonly string[]).includes(profileName)) {
         throw new Error(`Unknown STEEL_PROFILE "${profileName}". Expected one of: ${PROFILE_NAMES.join(', ')}.`);
     }

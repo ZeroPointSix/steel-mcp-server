@@ -15,9 +15,15 @@ COPY src ./src
 RUN npm install --ignore-scripts
 RUN npm run build
 
-# Drops the compiler and the test stack from what the runtime stage copies. The OpenTelemetry
-# exporters are optionalDependencies rather than devDependencies, so they survive this.
+# Drops the compiler and the test stack from what the runtime stage copies.
 RUN npm prune --omit=dev
+
+# This image serves either entrypoint, and `node dist/hosted.js` needs ioredis and
+# @modelcontextprotocol/node. Both are optional peers — deliberately absent from a default install,
+# so a desktop or npx user does not carry the hosted stack — which means the prune above removes
+# them and this image has to ask for them by name. Installed at the versions package.json declares.
+RUN npm install --no-save --ignore-scripts \
+      $(node -p "Object.entries(require('./package.json').peerDependencies).map(([name, range]) => name + '@' + range).join(' ')")
 
 FROM node:22-alpine
 

@@ -18,7 +18,9 @@ const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.js
     engines: { node: string };
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
-    optionalDependencies: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>;
 };
 
 describe('package metadata', () => {
@@ -28,6 +30,18 @@ describe('package metadata', () => {
 
     it('carries mcpName, which npm ownership verification in the registry requires', () => {
         expect(manifest.mcpName).toBe('dev.steel/mcp-server');
+    });
+
+    it('has one place to change the version, wired to npm version', () => {
+        // Four files state the version. The tests below assert they agree; this asserts there is a
+        // mechanism that makes them agree, so a release is one edit rather than four and a diff.
+        expect(manifest.scripts['sync:version']).toBe('node scripts/sync-version.mjs');
+        expect(manifest.scripts.version, 'npm version would not update the other three files').toContain(
+            'sync-version.mjs'
+        );
+        expect(manifest.scripts.version, 'the updated files would be left out of the version commit').toContain(
+            'git add'
+        );
     });
 
     it('announces the version it actually ships, so the README cannot advertise a stale release', () => {
@@ -136,13 +150,66 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
     });
 });
 
+describe('what a default install pays for', () => {
+    /** The packages every consumer of this package gets, whether or not they run the hosted server. */
+    const HOSTED_ONLY = [
+        '@modelcontextprotocol/node',
+        '@opentelemetry/exporter-trace-otlp-http',
+        '@opentelemetry/sdk-node',
+        'ioredis',
+    ];
+
+    it('declares only what the stdio entrypoint imports as a real dependency', () => {
+        // Measured 2026-08-04: with the hosted packages in `dependencies` and `optionalDependencies`,
+        // `npm install --omit=dev` pulled 68M across 85 packages — for a server whose own MCPB bundle
+        // is 8M across 5. npm installs optionalDependencies by default, so that 35M exporter stack
+        // reached every `npx steel-mcp` user.
+        expect(Object.keys(manifest.dependencies).sort()).toEqual([
+            '@modelcontextprotocol/server',
+            '@opentelemetry/api',
+            'ws',
+            'zod',
+        ]);
+    });
+
+    it('has no optionalDependencies at all, because npm installs those by default', () => {
+        expect(manifest.optionalDependencies).toBeUndefined();
+    });
+
+    it.each(HOSTED_ONLY)('offers %s as a peer a consumer may skip', name => {
+        expect(manifest.peerDependencies?.[name], `${name} is not declared as a peer`).toBeDefined();
+        expect(
+            manifest.peerDependenciesMeta?.[name]?.optional,
+            `${name} would be auto-installed unless it is marked optional`
+        ).toBe(true);
+    });
+
+    it.each(HOSTED_ONLY)('keeps %s installed for this repository, which builds and tests it', name => {
+        // An optional peer is not installed by npm, so without this the hosted sources would not
+        // typecheck and the Redis registry suite would have nothing to run against.
+        expect(manifest.devDependencies[name], `${name} is unavailable to the build`).toBeDefined();
+    });
+
+    it('installs the optional peers in the image that serves the hosted entrypoint', () => {
+        // `npm prune --omit=dev` drops an optional peer, so the image has to ask for it by name or
+        // `node dist/hosted.js` fails to resolve ioredis at startup.
+        const dockerfile = readFileSync(fileURLToPath(new URL('../../Dockerfile', import.meta.url)), 'utf8');
+        expect(dockerfile).toContain('peerDependencies');
+    });
+});
+
 describe('dependency pins', () => {
-    it.each(['@modelcontextprotocol/server', '@modelcontextprotocol/node'])(
-        'pins %s exactly, because the latest dist-tag points at a beta',
-        name => {
-            expect(manifest.dependencies[name]).toMatch(/^\d+\.\d+\.\d+(-\w+\.\d+)?$/);
-        }
-    );
+    it('pins @modelcontextprotocol/server exactly, because the latest dist-tag points at a beta', () => {
+        expect(manifest.dependencies['@modelcontextprotocol/server']).toMatch(/^\d+\.\d+\.\d+(-\w+\.\d+)?$/);
+    });
+
+    it('pins the hosted SDK peer exactly too, and to the same line as the server', () => {
+        const peer = manifest.peerDependencies?.['@modelcontextprotocol/node'];
+        expect(peer).toMatch(/^\d+\.\d+\.\d+(-\w+\.\d+)?$/);
+        expect(peer, 'the two SDK packages would resolve to different lines').toBe(
+            manifest.dependencies['@modelcontextprotocol/server']
+        );
+    });
 
     it('pins the client and conformance dev dependencies exactly too', () => {
         expect(manifest.devDependencies['@modelcontextprotocol/client']).toMatch(/^\d+\.\d+\.\d+(-\w+\.\d+)?$/);
@@ -175,10 +242,13 @@ describe('telemetry packaging', () => {
         expect(manifest.dependencies['@opentelemetry/api']).toMatch(/^\^1\./);
     });
 
-    it('keeps the exporter stack optional, so an unconfigured install never needs it', () => {
-        expect(manifest.optionalDependencies['@opentelemetry/sdk-node']).toBeDefined();
-        expect(manifest.optionalDependencies['@opentelemetry/exporter-trace-otlp-http']).toBeDefined();
-        expect(manifest.dependencies['@opentelemetry/sdk-node']).toBeUndefined();
+    it('leaves the exporter stack out of every install a consumer does not ask for', () => {
+        // startTracing loads it through a dynamic import in a try/catch that names both packages in
+        // its warning, so absent is a supported state rather than a broken one — and it is 35M.
+        for (const name of ['@opentelemetry/sdk-node', '@opentelemetry/exporter-trace-otlp-http']) {
+            expect(manifest.dependencies[name]).toBeUndefined();
+            expect(manifest.peerDependenciesMeta?.[name]?.optional).toBe(true);
+        }
     });
 
     it('never lets the core reach for anything beyond the OpenTelemetry API', () => {
@@ -277,6 +347,45 @@ describe('the desktop bundle dependency surface', () => {
         for (const name of required) {
             expect(manifest.dependencies[name], `${name} is imported but not a dependency`).toBeDefined();
         }
+    });
+});
+
+describe('the release workflow', () => {
+    const root = new URL('../../', import.meta.url);
+    const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
+    const release = read('.github/workflows/release.yml');
+
+    it('runs on a version tag rather than on a branch', () => {
+        expect(release).toContain("tags: ['v*']");
+    });
+
+    it('refuses a tag that disagrees with the version being released', () => {
+        // The one mistake a release cannot walk back: a published tag naming a version nobody shipped.
+        expect(release).toContain('GITHUB_REF_NAME#v');
+        expect(release).toContain('exit 1');
+    });
+
+    it('runs every gate CI runs, so a tag cannot take a shortcut', () => {
+        // The drift this catches: a check added to ci.yml and forgotten in release.yml, which would
+        // make the released artifact the only one nobody checked.
+        const ci = read('.github/workflows/ci.yml');
+        const gates = [...ci.matchAll(/run: (npm run [\w:]+|\.\/scripts\/[\w-]+\.sh)/g)].map(match => match[1]);
+        expect(gates.length, 'no gates were found in ci.yml, so this test proves nothing').toBeGreaterThan(5);
+        for (const gate of gates) {
+            expect(release, `release.yml never runs ${gate}`).toContain(gate);
+        }
+    });
+
+    it('attaches the bundle to the release', () => {
+        // Without this the only way to get the .mcpb is to clone the repository and build it, which
+        // is not something a Claude Desktop user will do.
+        expect(release).toContain('gh release create');
+        expect(release).toMatch(/build\/steel-mcp-\*\.mcpb/);
+    });
+
+    it('leaves npm and container publishing switched off until someone turns them on', () => {
+        expect(release).toContain("vars.PUBLISH_NPM == 'true'");
+        expect(release).toContain("vars.PUBLISH_DOCKER == 'true'");
     });
 });
 

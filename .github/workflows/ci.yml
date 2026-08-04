@@ -31,3 +31,5 @@ jobs:
         run: npm run budget
       - name: MCP conformance
         run: ./scripts/run-conformance.sh
+      - name: MCPB bundle
+        run: npm run pack:mcpb

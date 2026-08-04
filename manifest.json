@@ -1,0 +1,113 @@
+{
+    "manifest_version": "0.4",
+    "name": "steel-mcp",
+    "display_name": "Steel Browser",
+    "version": "2.0.0",
+    "description": "Give Claude a real Chrome browser in the cloud: read pages that block a plain fetch, capture screenshots and PDFs, and work through interactive sites.",
+    "long_description": "Steel runs a real Chromium in the cloud and hands it to Claude.\n\nMost questions about a web page end with one stateless read that starts no browser at all. When a task needs interaction — signing in, filling a form, stepping through checkout — Claude opens an explicit browser session and drives it by clicking, typing and selecting against accessibility-tree references rather than guessing at pixel coordinates.\n\nPages that need JavaScript to render, sites that refuse scripted requests, content behind a login, and multi-step flows are all reachable. Screenshots and PDFs come back as links rather than megabytes of base64, and page reads stay inside a response budget, so a browsing task does not consume the whole context.\n\nEverything read from a web page is fenced as untrusted data, and passwords and credentials are redacted before they reach a log.",
+    "author": {
+        "name": "Nikola Balić",
+        "email": "niko@steelbrowser.com",
+        "url": "https://github.com/nibzard"
+    },
+    "homepage": "https://steel.dev",
+    "documentation": "https://github.com/steel-dev/steel-mcp-server#readme",
+    "support": "https://github.com/steel-dev/steel-mcp-server/issues",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/steel-dev/steel-mcp-server"
+    },
+    "privacy_policies": ["https://steel.dev/privacy"],
+    "license": "MIT",
+    "icon": "assets/icon.png",
+    "keywords": ["browser", "chrome", "automation", "scraping", "screenshot", "steel"],
+    "server": {
+        "type": "node",
+        "entry_point": "dist/stdio.js",
+        "mcp_config": {
+            "command": "node",
+            "args": ["${__dirname}/dist/stdio.js"],
+            "env": {
+                "STEEL_API_KEY": "${user_config.steel_api_key}",
+                "STEEL_PROFILE": "${user_config.steel_profile}"
+            }
+        }
+    },
+    "user_config": {
+        "steel_api_key": {
+            "type": "string",
+            "title": "Steel API key",
+            "description": "Your key from https://app.steel.dev/settings/api-keys. It is sent only to Steel, and never to a self-hosted deployment.",
+            "required": true,
+            "sensitive": true
+        },
+        "steel_profile": {
+            "type": "string",
+            "title": "Tool profile",
+            "description": "\"browse\" exposes all thirteen tools. \"scrape\" exposes only the three stateless read tools, which never start a billed browser session.",
+            "required": false,
+            "default": "browse"
+        }
+    },
+    "tools_generated": false,
+    "tools": [
+        {
+            "name": "steel_scrape",
+            "description": "Read a web page as markdown or HTML. Starts no browser session."
+        },
+        {
+            "name": "steel_screenshot",
+            "description": "Capture a screenshot of a page and return a link to it."
+        },
+        {
+            "name": "steel_pdf",
+            "description": "Render a page to PDF and return a link to it."
+        },
+        {
+            "name": "steel_session_create",
+            "description": "Start a browser session that can be interacted with, and show it inline where the host supports it."
+        },
+        {
+            "name": "steel_session_release",
+            "description": "Shut a browser session down and stop the meter."
+        },
+        {
+            "name": "steel_navigate",
+            "description": "Point an open browser session at a URL."
+        },
+        {
+            "name": "steel_snapshot",
+            "description": "Read the current page as an accessibility tree with references that can be acted on."
+        },
+        {
+            "name": "steel_find",
+            "description": "Locate one element on the current page without reading the whole page."
+        },
+        {
+            "name": "steel_act",
+            "description": "Click, type, fill a form, select, hover, scroll, press a key, go back, or dismiss an overlay."
+        },
+        {
+            "name": "steel_wait_for",
+            "description": "Wait for named text, a selector, or a URL before continuing."
+        },
+        {
+            "name": "steel_session_diagnostics",
+            "description": "Return a timestamped timeline of what the browser actually did, for when a site appears to block it."
+        },
+        {
+            "name": "steel_batch",
+            "description": "Run several browser steps in one call, with one page read at the end."
+        },
+        {
+            "name": "steel_session_live_view",
+            "description": "Return the connection details the inline session viewer needs. Returns no page content, and hosts hide it from the model."
+        }
+    ],
+    "compatibility": {
+        "platforms": ["darwin", "win32"],
+        "runtimes": {
+            "node": ">=20"
+        }
+    }
+}
