@@ -38,6 +38,13 @@ export interface FakeHostOptions {
      */
     appCsp?: string;
     liveView?: LiveViewAnswer;
+    /**
+     * Whether `ui/request-display-mode` is honoured.
+     *
+     * A host answers with the mode it actually set, so `false` here models the host that keeps the
+     * view inline whatever it is asked for — which an app must not present as a working control.
+     */
+    grantsDisplayMode?: boolean;
 }
 
 /** One JSON-RPC request or notification the app posted to its parent. */
@@ -91,6 +98,7 @@ function hostDocument(options: FakeHostOptions): string {
         acceptedProtocolVersions: options.acceptedProtocolVersions ?? DEFAULT_VERSIONS,
         initializeDelayMs: options.initializeDelayMs ?? 0,
         liveView: options.liveView ?? { kind: 'silent' },
+        grantsDisplayMode: options.grantsDisplayMode ?? true,
     };
     // Kept to plain ES5 and one listener so the sequence it enforces is readable at a glance.
     return `<!doctype html>
@@ -161,6 +169,18 @@ window.addEventListener('message', function (event) {
   if (message.method === 'ui/notifications/initialized') {
     if (log.initialized) log.violations.push('a second ui/notifications/initialized');
     log.initialized = true;
+    return;
+  }
+
+  // Nothing but the handshake itself may precede the initialized notification.
+  if (message.method.indexOf('ui/') === 0 && message.method !== 'ui/initialize' && !log.initialized) {
+    log.violations.push(message.method + ' before ui/notifications/initialized');
+  }
+
+  if (message.method === 'ui/request-display-mode') {
+    var wanted = message.params && message.params.mode;
+    // A host answers with the mode it actually set, which need not be the one asked for.
+    reply(message.id, { mode: CONFIG.grantsDisplayMode ? wanted : 'inline' });
     return;
   }
 
@@ -303,6 +323,19 @@ export class HostedViewer {
     mapPoint(clientX: number, clientY: number): Promise<unknown> {
         return this.page.evalInApp<unknown>(
             `window.steelSessionViewer.pointFromCanvasEvent({ clientX: ${clientX}, clientY: ${clientY} })`
+        );
+    }
+
+    /** Clicks the real full-screen control, the path a human takes. */
+    clickExpand(): Promise<void> {
+        return this.page.evalInApp("document.getElementById('expand').click()");
+    }
+
+    /** What the full-screen control is showing: its label, and whether it is offered at all. */
+    expandControl(): Promise<{ label: string; hidden: boolean }> {
+        return this.page.evalInApp(
+            `(function(){var b=document.getElementById('expand');` +
+                `return { label: b.textContent, hidden: b.hidden };})()`
         );
     }
 

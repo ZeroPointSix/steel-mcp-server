@@ -118,6 +118,9 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
                 'ui/initialize',
                 'ui/notifications/initialized',
                 'tools/call',
+                // Sent once the live view names the page's shape: the host sizes an inline view for
+                // a card, and a browser needs the height its aspect ratio implies.
+                'ui/notifications/size-changed',
             ]);
             expect(log.messages[0]!.params).toMatchObject({
                 protocolVersion: '2026-01-26',
@@ -149,6 +152,9 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
                 'ui/initialize',
                 'ui/notifications/initialized',
                 'tools/call',
+                // Sent once the live view names the page's shape: the host sizes an inline view for
+                // a card, and a browser needs the height its aspect ratio implies.
+                'ui/notifications/size-changed',
             ]);
         });
 
@@ -168,9 +174,83 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
                 'ui/initialize',
                 'ui/notifications/initialized',
                 'tools/call',
+                // Sent once the live view names the page's shape: the host sizes an inline view for
+                // a card, and a browser needs the height its aspect ratio implies.
+                'ui/notifications/size-changed',
             ]);
             // No session to name, so it names none and lets the server pick the caller's own.
             expect(log.messages[2]!.params!.arguments).toEqual({});
+        });
+
+        it('asks the host for the height its aspect ratio needs, not the strip it is given', async () => {
+            // Claude gives an inline view a short box. The app fits itself into it, so a 1280x720
+            // page renders as a narrow letterboxed strip — measured at roughly 305x150 in a 780px
+            // wide panel. Telling the host what the content needs is the only lever an app has.
+            const { viewer } = await connected();
+
+            const sizes = (await viewer.log()).messages.filter(
+                message => message.method === 'ui/notifications/size-changed'
+            );
+            expect(sizes.length).toBeGreaterThan(0);
+            const last = sizes[sizes.length - 1]!.params as { width: number; height: number };
+            // 1600x1000 viewport from `connected`, so the height asked for tracks the width over 1.6.
+            expect(last.height).toBeGreaterThan(last.width / 1.7);
+            expect(last.height).toBeLessThan(last.width / 1.5);
+        });
+
+        it('offers full screen, and asks the host for it when a person clicks', async () => {
+            const { viewer } = await painting();
+
+            expect(await viewer.expandControl()).toMatchObject({ label: 'Full screen', hidden: false });
+            await viewer.clickExpand();
+
+            await until(
+                'the app to show it is full screen',
+                () => viewer.expandControl(),
+                control => control.label !== 'Full screen'
+            );
+            const requests = (await viewer.log()).messages.filter(
+                message => message.method === 'ui/request-display-mode'
+            );
+            expect(requests.map(request => request.params!.mode)).toEqual(['fullscreen']);
+            expect((await viewer.expandControl()).label).toBe('Exit full screen');
+        });
+
+        it('asks to go back inline once it is full screen', async () => {
+            const { viewer } = await painting();
+            await viewer.clickExpand();
+            await until(
+                'the app to show it is full screen',
+                () => viewer.expandControl(),
+                control => control.label === 'Exit full screen'
+            );
+
+            await viewer.clickExpand();
+
+            await until(
+                'the app to show it is inline again',
+                () => viewer.expandControl(),
+                control => control.label === 'Full screen'
+            );
+            const modes = (await viewer.log()).messages
+                .filter(message => message.method === 'ui/request-display-mode')
+                .map(message => message.params!.mode);
+            expect(modes).toEqual(['fullscreen', 'inline']);
+        });
+
+        it('stops offering full screen when the host keeps it inline anyway', async () => {
+            // The host answers with the mode it actually set. A control that does nothing twice is
+            // worse than no control, so the app takes it away rather than leave it there.
+            const { viewer } = await painting({ host: { grantsDisplayMode: false } });
+
+            await viewer.clickExpand();
+
+            const control = await until(
+                'the app to withdraw the control',
+                () => viewer.expandControl(),
+                shown => shown.hidden
+            );
+            expect(control.hidden).toBe(true);
         });
 
         it('prefers the session the host pushed over asking for one', async () => {
@@ -199,6 +279,9 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
                 'ui/initialize',
                 'ui/notifications/initialized',
                 'tools/call',
+                // Sent once the live view names the page's shape: the host sizes an inline view for
+                // a card, and a browser needs the height its aspect ratio implies.
+                'ui/notifications/size-changed',
             ]);
             expect(
                 log.messages.filter(message => message.method === 'ui/initialize').map(m => m.params!.protocolVersion)
@@ -257,7 +340,8 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             const { cdp, viewer } = await connected();
             const log = await viewer.log();
 
-            expect(log.messages.at(-1)!.params).toEqual({
+            const call = log.messages.find(message => message.method === 'tools/call');
+            expect(call!.params).toEqual({
                 name: SESSION_VIEWER_LIVE_VIEW_TOOL,
                 arguments: { session_id: SESSION_ID },
             });

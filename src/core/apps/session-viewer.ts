@@ -836,7 +836,8 @@ p:empty{display:none}
 .badge{position:absolute;left:8px;bottom:8px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
 .ctl{position:absolute;right:8px;top:8px;display:flex;align-items:center;gap:6px}
 .mode{padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
-#control{padding:4px 10px;border-radius:999px;border:0;background:var(--fg);color:var(--bg);font:600 11px/1.4 system-ui,sans-serif;cursor:pointer}
+#control,#expand{padding:4px 10px;border-radius:999px;border:0;background:var(--fg);color:var(--bg);font:600 11px/1.4 system-ui,sans-serif;cursor:pointer}
+#expand{background:rgba(0,0,0,.62);color:#fafafa}
 #control[aria-pressed="true"]{background:#2563eb;color:#fff}
 .stage.driving{box-shadow:inset 0 0 0 2px #2563eb}
 .stage.driving canvas{cursor:crosshair}
@@ -845,7 +846,7 @@ p:empty{display:none}
 <body>
 <div class="stage" id="stage">
 <canvas id="screen" tabindex="0" aria-label="Live view of the browser session"></canvas>
-<div class="ctl" id="ctl" hidden><span class="mode" id="mode">Watching (read-only)</span><button id="control" type="button" aria-pressed="false">Take control</button></div>
+<div class="ctl" id="ctl" hidden><span class="mode" id="mode">Watching (read-only)</span><button id="expand" type="button">Full screen</button><button id="control" type="button" aria-pressed="false">Take control</button></div>
 <div class="badge" id="badge" hidden></div>
 <div class="veil" id="veil" role="status" aria-live="polite">
 <div class="spin" id="spin"></div>
@@ -904,6 +905,7 @@ var note = document.getElementById('note');
 var ctl = document.getElementById('ctl');
 var modeLabel = document.getElementById('mode');
 var control = document.getElementById('control');
+var expand = document.getElementById('expand');
 
 var phase = 'awaiting-session';
 var detail = '';
@@ -1048,6 +1050,8 @@ function start(id){
     cdpHost = target.host;
     expiresAt = live.expiresAt;
     if (live.width > 0 && live.height > 0) stage.style.setProperty('--ar', String(live.width / live.height));
+    // Now that the page's shape is known, ask the host for a box that shape fits in.
+    askForRoom();
     connect(target.url);
   }, function(error){
     setPhase('live-view-failed', error.message);
@@ -1183,6 +1187,39 @@ function setDriving(on){
 }
 
 control.addEventListener('click', function(){ setDriving(!driving); });
+
+// A host sizes an inline view for a card, not for a browser: a 16:9 page arrives as a letterboxed
+// strip a few pixels tall. These are the two levers the apps protocol gives a view — ask for the
+// height the content needs, and offer the person the host's own full-screen mode.
+var displayMode = 'inline';
+
+function askForRoom(){
+  var width = Math.round(document.documentElement.clientWidth || stage.clientWidth || 0);
+  if (width < 1) return;
+  var ratio = parseFloat(stage.style.getPropertyValue('--ar')) || 1.6;
+  bridgeNotify('ui/notifications/size-changed', { width: width, height: Math.round(width / ratio) });
+}
+
+function setDisplayMode(mode){
+  displayMode = mode;
+  expand.textContent = mode === 'fullscreen' ? 'Exit full screen' : 'Full screen';
+  askForRoom();
+}
+
+expand.addEventListener('click', function(){
+  var wanted = displayMode === 'fullscreen' ? 'inline' : 'fullscreen';
+  expand.disabled = true;
+  bridgeSend('ui/request-display-mode', { mode: wanted }).then(function(result){
+    expand.disabled = false;
+    var got = result && result.mode;
+    // The host answers with the mode it actually set. One that ignores the ask has no full-screen
+    // to offer, so the control goes away rather than sit there doing nothing a second time.
+    if (got !== wanted) { expand.hidden = true; return; }
+    setDisplayMode(got);
+  }, function(){ expand.disabled = false; expand.hidden = true; });
+});
+
+window.addEventListener('resize', askForRoom);
 
 function sendCdpCommand(cmd){
   if (!cmd) return;

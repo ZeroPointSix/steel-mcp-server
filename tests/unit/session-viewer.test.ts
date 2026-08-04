@@ -982,12 +982,14 @@ describe('SESSION_VIEWER_HTML', () => {
     });
 
     it('stays small enough to ship on every resources/read', () => {
-        // ~28.5KB as this test runner emits the helper sources, ~30.7KB (10.2KB gzipped) as `tsc`
-        // emits them into dist, which is what actually ships. The growth over the read-only viewer is
-        // the take-control feature: the mouse/keyboard/wheel serializers and the virtual-key-code
-        // table that a page needs to react to real keys, each unit-tested and embedded by source. The
-        // resource is static and publicly cacheable, so a host pays it once rather than per call. This
-        // is still a ceiling: a doubling means something was inlined that should not have been.
-        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(30_720);
+        // ~32.1KB as this test runner emits the helper sources; 34,341 bytes as `tsc` emits them
+        // into dist, which is what actually ships, and 9,958 gzipped — measured 2026-08-04. The
+        // growth over the read-only viewer is the take-control feature (mouse/keyboard/wheel
+        // serializers and the virtual-key-code table a page needs to react to real keys) and the
+        // display controls: a host sizes an inline view for a card, so the app asks for the height
+        // its aspect ratio needs and offers the host's full-screen mode. The resource is static and
+        // publicly cacheable, so a host pays it once rather than per call. This is still a ceiling:
+        // a doubling means something was inlined that should not have been.
+        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(33_280);
     });
 });
