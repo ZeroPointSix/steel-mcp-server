@@ -301,3 +301,29 @@ Dockerfile. Every one of these produced a successful `docker build`.
   npm scripts are the only gate. That is how an unformatted merge landed.
 - **No lockfile is committed** (`package-lock.json` is gitignored), and it has already caused
   observable drift: `biome.json` pins schema 2.5.5 while `^2.5.5` installs 2.5.6.
+
+## 9. Connecting a client to the hosted endpoint
+
+Measured 2026-08-04 against Claude Desktop **1.24012.11** and `mcp-remote@0.1.38`, over a real
+deployment sitting behind a Traefik reverse proxy.
+
+- **Claude Desktop cannot dial an MCP URL from `claude_desktop_config.json`.** The app bundles
+  `StreamableHTTPClientTransport` and `SSEClientTransport`, so the capability is present, but it
+  serves the Connectors feature rather than the config file. An entry of
+  `{"type": "http", "url": ..., "headers": {...}}` produced no server and no error — silently
+  ignored, with nothing in `main.log`. A remote endpoint therefore needs a local stdio bridge.
+  Claude Code needs none: `--transport http` with `--header` is native.
+- **Desktop hot-reloads `claude_desktop_config.json` for a key it already knows.** Rewriting the
+  `steel` entry restarted that server within seconds, with no relaunch and no prompt. Whether a
+  brand-new key registers without a restart was *not* established, which is the standing caveat on
+  the finding above.
+- **`tools/list` is not evidence that a credential works.** It never calls Steel, so a bridge that
+  failed to substitute `${STEEL_AUTH_HEADER}` still lists all thirteen tools and looks healthy. Only
+  a tool that reaches Steel — `steel_scrape` is the cheapest, since it starts no session —
+  distinguishes a live credential from a literal `${...}` sent as a bearer token.
+- **A proxy's port field is not the public port.** Coolify's domain field takes `https://host:8080`
+  to name the *container* port and then serves it on 443, so `https://host:8080` from outside times
+  out while `https://host` works. The pairing to recognise: `/healthz` answering `200` while `/mcp`
+  returns `403 Invalid Host` means `STEEL_ALLOWED_HOSTS` disagrees with the Host the proxy forwards.
+  `/healthz` is answered ahead of the allowlist precisely so a probe on an IP still passes, which is
+  what lets the two diverge.

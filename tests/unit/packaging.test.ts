@@ -125,6 +125,17 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
         expect(compose, 'the exposed port is not the one the server binds').toMatch(/expose:\n\s+- ['"]8080['"]/);
     });
 
+    it('documents the hosted bridge header in the form a host will not mangle', () => {
+        // Claude Desktop cannot dial an MCP URL from its config, so a remote endpoint is reached
+        // through a stdio bridge. The space a reviewer would add after the colon is the whole bug:
+        // some hosts do not escape a space inside args, and the credential arrives mangled.
+        const readme = read('README.md');
+        expect(readme, 'the README no longer documents the bridge a remote endpoint needs').toContain('mcp-remote');
+        expect(readme, 'the documented bridge header would be mangled by a host that does not escape args').not.toMatch(
+            /Authorization: \$\{/
+        );
+    });
+
     it('smithery launches the built stdio entrypoint', () => {
         expect(read('smithery.yaml')).toContain('dist/stdio.js');
     });

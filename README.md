@@ -200,6 +200,42 @@ would deploy a container that never turns healthy. Point the proxy at port 8080 
 it defaults to, and set `STEEL_ALLOWED_HOSTS` to the public hostname the proxy forwards: any other
 `Host` is refused, while `/healthz` answers regardless so a probe on an IP still passes.
 
+### Connecting a client to it
+
+Claude Code speaks Streamable HTTP itself:
+
+```bash
+claude mcp add steel --transport http https://mcp.example.com/mcp \
+  --header "Authorization: Bearer $STEEL_API_KEY"
+```
+
+Claude Desktop does not. Its `claude_desktop_config.json` launches a program and speaks JSON-RPC over
+that program's stdin and stdout, so a remote endpoint needs a local bridge:
+
+```json
+{
+  "mcpServers": {
+    "steel": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.38",
+        "https://mcp.example.com/mcp",
+        "--header",
+        "Authorization:${STEEL_AUTH_HEADER}"
+      ],
+      "env": { "STEEL_AUTH_HEADER": "Bearer <your-steel-api-key>" }
+    }
+  }
+}
+```
+
+Two details in that snippet look like mistakes and are not. The header has **no space** after the
+colon, and the credential sits in `env` rather than inline, because some hosts do not escape a space
+inside `args` and mangle the value. Prefer a header over the `?apiKey=` query parameter wherever the
+client can set one: the query form is there for clients that cannot, and any proxy in front of this
+server logs a query string before the server is reached.
+
 ## How to get good results
 
 Reach for `steel_scrape` first — most questions about a page end there, and it starts no billed
