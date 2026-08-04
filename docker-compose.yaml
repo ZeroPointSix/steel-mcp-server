@@ -1,0 +1,34 @@
+# ABOUTME: Compose deployment of the hosted HTTP endpoint, for Coolify and any other compose host.
+# ABOUTME: Names dist/hosted.js explicitly, because the image's own default command is stdio.
+services:
+    steel-mcp:
+        build: .
+        # The image defaults to dist/stdio.js, which reads stdin and binds no port. A host that cannot
+        # override the image command would deploy that instead, and it would look like a server that
+        # never becomes healthy, so this file states the entrypoint it wants.
+        command: dist/hosted.js
+        environment:
+            # The hostnames this endpoint answers on. Anything arriving under another Host is rejected,
+            # so this is the public domain the proxy forwards — not the container's own address.
+            STEEL_ALLOWED_HOSTS: ${STEEL_ALLOWED_HOSTS}
+            # Empty rejects every request that carries an Origin, which only constrains browsers.
+            STEEL_ALLOWED_ORIGINS: ${STEEL_ALLOWED_ORIGINS:-}
+            # Stated rather than defaulted, because it is also the port the proxy has to target.
+            PORT: "8080"
+        expose:
+            - "8080"
+        healthcheck:
+            # /healthz is answered ahead of the Host allowlist, so a probe on the loopback address
+            # passes without the container needing to list itself in STEEL_ALLOWED_HOSTS.
+            test:
+                [
+                    'CMD',
+                    'node',
+                    '-e',
+                    "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+                ]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+        restart: unless-stopped

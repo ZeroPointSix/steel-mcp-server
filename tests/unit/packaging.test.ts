@@ -102,7 +102,7 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
     const root = new URL('../../', import.meta.url);
     const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
 
-    it.each(['README.md', 'smithery.yaml', 'Dockerfile'])(
+    it.each(['README.md', 'smithery.yaml', 'Dockerfile', 'docker-compose.yaml'])(
         '%s does not launch the entrypoint the build stopped emitting',
         name => {
             expect(read(name), `${name} still launches dist/index.js`).not.toContain('dist/index.js');
@@ -111,6 +111,18 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
 
     it('the Dockerfile entrypoint is the file the build produces', () => {
         expect(read('Dockerfile')).toContain('dist/stdio.js');
+    });
+
+    it('the compose deployment serves the hosted endpoint on the port it advertises', () => {
+        // The image's own CMD is the stdio server, which reads stdin and binds nothing. A compose host
+        // that cannot override the image command — Coolify's Dockerfile build pack is one — would start
+        // that instead, and the symptom is a container that never turns healthy rather than an error.
+        const compose = read('docker-compose.yaml');
+        expect(compose, 'the compose service does not name the hosted entrypoint').toMatch(/command: dist\/hosted\.js/);
+        // The port is stated twice on purpose: once for the server to bind, once for the proxy to
+        // target. Disagreement routes traffic to a port nothing is listening on.
+        expect(compose).toMatch(/PORT: ['"]8080['"]/);
+        expect(compose, 'the exposed port is not the one the server binds').toMatch(/expose:\n\s+- ['"]8080['"]/);
     });
 
     it('smithery launches the built stdio entrypoint', () => {

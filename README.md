@@ -188,6 +188,18 @@ The server never holds a Steel key of its own, so it is a self-hosted deployment
 TLS in front of it. Hosted logs are structured JSON on stdout, and credentials are redacted before
 anything reaches them.
 
+`docker-compose.yaml` deploys that endpoint on any compose host, Coolify included:
+
+```bash
+STEEL_ALLOWED_HOSTS=mcp.example.com docker compose up -d --wait
+```
+
+It builds the image from this repository and names `dist/hosted.js`, because the image's own default
+command is the stdio server — which binds no port, so a platform that cannot override the command
+would deploy a container that never turns healthy. Point the proxy at port 8080 rather than whatever
+it defaults to, and set `STEEL_ALLOWED_HOSTS` to the public hostname the proxy forwards: any other
+`Host` is refused, while `/healthz` answers regardless so a probe on an IP still passes.
+
 ## How to get good results
 
 Reach for `steel_scrape` first — most questions about a page end there, and it starts no billed
