@@ -47,6 +47,31 @@ written server-side, so **app-only tools are a working data channel**, not just 
 Not measured: whether `resourceDomains` reaches `img-src`/`media-src` the same way; what `dev=true`
 does; whether Claude enforces `visibility: ['app']` list filtering.
 
+### The tool-result push is not something a view can rely on
+
+Measured 2026-08-04 in Claude Desktop, from `~/Library/Logs/Claude/mcp-server-steel.log`. Asking for
+a session and a preview rendered the viewer, and it sat on "waiting for a browser session" for the
+whole session:
+
+```
+09:59:14.268  client → tools/call        id=4   (steel_session_create)
+09:59:15.268  client → resources/read    id=5   (the viewer shell — 1s in, mid-call)
+09:59:15.449  server → result            id=4
+```
+
+**Claude renders the view while the creating call is still running**, and the view's own `tools/call`
+never appeared in the log at all — so it never learned its session id. The spec says the host "MUST
+send this notification when tool execution completes (if the View is displayed during tool
+execution)", but it defines **no replay, no re-send for a view that initialised late, and no way for
+a view to ask for the result**. A handshake that finishes after that single push is stuck for ever.
+
+Whether Claude sent the push and our view missed it, or never sent it, is not distinguishable from
+the log — and does not matter: either way a view whose only path to its session is that one
+notification is built on something unguaranteed. `steel_session_live_view` now resolves the caller's
+newest live session when the app names none.
+
+Our own fake host had asserted the working case back at us — the same test-double pattern as §6.
+
 ## 2. MCP Apps protocol contract
 
 From the spec and the installed SDK, confirmed against a working implementation.
@@ -164,7 +189,39 @@ unit test asserted that a *numeric* `sessionId` must be rejected. Each made a br
 tested. Two defences now exist: a registry conformance suite that runs identical cases against both
 backends, and a browser suite that executes the app's runtime instead of asserting its source order.
 
-## 7. Process notes
+## 7. The MCPB desktop bundle
+
+Measured 2026-08-04 against `@anthropic-ai/mcpb@2.1.2`, manifest schema **v0.4**.
+
+- **The bundle is 2.0MB packed, 8.0MB unpacked, 938 files.** It carries four dependency trees —
+  `@modelcontextprotocol/server` (with `core` beneath it), `@opentelemetry/api`, `ws`, `zod` — and
+  nothing else. `npm install` in the staging tree resolves **5 packages**.
+- **Narrowing the staged `package.json` beats deleting installed directories.** Deleting
+  `node_modules/ioredis` left its six dependencies behind (`redis-parser`, `redis-errors`, `denque`,
+  `cluster-key-slot`, `standard-as-callback`, `debug`), and `@modelcontextprotocol/node` dragged in
+  `hono` and `@hono/*` for a hosted path the desktop bundle can never take. Dropping both from the
+  manifest's `dependencies` before installing took the bundle from 17 packages and 1411 files to 5
+  and 938.
+- **`assets/` must not be staged wholesale.** It holds two demo recordings; copying the directory
+  produced a **77.3MB** bundle, 75MB of it video. The pack script now reads `manifest.json`'s `icon`
+  and copies only that file.
+- **A blank env var is a real MCPB failure mode.** `manifest.json` maps `STEEL_PROFILE` to an
+  optional `user_config` value, and a host substitutes the empty string for one the user left alone.
+  `env.STEEL_PROFILE ?? 'browse'` accepted it and then refused it — `Unknown STEEL_PROFILE ""`,
+  naming a variable the user never set. Now `?.trim() || 'browse'`. `STEEL_API_KEY` already handled
+  blank correctly.
+- **Omitting the OpenTelemetry SDK from the bundle is safe, and by design.** `startTracing` reaches
+  it through a dynamic `import()` inside a `try`/`catch` that warns and carries on, so the pruned
+  bundle serves normally; a static import would have made the same pruning a startup crash. A test
+  now walks the import graph from `stdio.ts` and distinguishes static from dynamic edges, because
+  only the static ones have to ship.
+- **The staged server is verified before packing, and the check is not vacuous.** Removing `ws` from
+  a staged tree makes `scripts/verify-mcpb-stage.mjs` exit 1 with `MODULE_NOT_FOUND` rather than
+  producing a bundle that fails on a user's machine.
+- **`mcpb validate` passes and the icon is accepted at 512×512.** The CLI reports "Icon validation
+  passed" as a *warning* line, which reads like a problem and is not one.
+
+## 8. Process notes
 
 - **Never judge a check by piping it to `tail`/`head`.** A pipeline's exit status is the pager's, so
   `npm run lint | tail -2` reports success on a failure — and `&&` gives no protection for the same

@@ -70,15 +70,16 @@ async function newSession(harness: Harness): Promise<string> {
 }
 
 interface LiveView {
+    session_id?: string;
     cdp_url?: string;
     viewport?: { width: number; height: number };
     expires_at?: string;
 }
 
-async function liveView(harness: Harness, sessionId: string) {
+async function liveView(harness: Harness, sessionId?: string) {
     const result = await harness.client.callTool({
         name: 'steel_session_live_view',
-        arguments: { session_id: sessionId },
+        arguments: sessionId === undefined ? {} : { session_id: sessionId },
     });
     return { result, structured: (result as { structuredContent?: LiveView }).structuredContent };
 }
@@ -251,6 +252,59 @@ describe('steel_session_live_view', () => {
         expect(textOf(result)).not.toContain('token=');
         expect(textOf(result)).not.toContain('wss://');
         expect(textOf(result)).toContain('Live view connection details for this session.');
+    });
+
+    // The host pushes the tool result to the app once, when the call completes, and the spec has no
+    // replay and no way to ask for it again. An app that finished initialising after that instant
+    // never learns its session id — measured in Claude Desktop, where the viewer rendered while the
+    // create call was still running and then sat on "waiting for a browser session" for ever.
+    it('resolves the caller’s own live session when the host never pushed one', async () => {
+        const harness = await connect();
+        const sessionId = await newSession(harness);
+
+        const { result, structured } = await liveView(harness);
+
+        expect(isError(result)).toBe(false);
+        expect(structured?.cdp_url).toContain(sessionId ? 'sessionId=' : '');
+        expect(structured?.session_id).toBe(sessionId);
+    });
+
+    it('picks the newest live session when the caller has more than one', async () => {
+        const harness = await connect();
+        await newSession(harness);
+        // Both handles are stamped from the real clock, so they need distinct milliseconds: which of
+        // two sessions created in the same millisecond is "newest" is not a question with an answer.
+        await new Promise(resolve => setTimeout(resolve, 2));
+        const newest = await newSession(harness);
+
+        const { structured } = await liveView(harness);
+
+        expect(structured?.session_id).toBe(newest);
+    });
+
+    it('never resolves to a session belonging to another credential', async () => {
+        const registry = new InMemoryHandleRegistry({ releaseSteelSession: async () => undefined });
+        const owner = await connect(testDeps({ registry }));
+        const stranger = await connect({
+            ...testDeps({ registry }),
+            principal: principalFromCredential('ste-someone-else'),
+        });
+        await newSession(owner);
+
+        const { result, structured } = await liveView(stranger);
+
+        expect(isError(result)).toBe(true);
+        expect(structured).not.toHaveProperty('cdp_url');
+        expect(stranger.deps.api.sessionReads).toHaveLength(0);
+    });
+
+    it('says plainly that there is nothing to show when the caller has no live session', async () => {
+        const harness = await connect();
+
+        const { result } = await liveView(harness);
+
+        expect(isError(result)).toBe(true);
+        expect(textOf(result)).toContain('no live browser session');
     });
 
     it('omits the viewport rather than inventing one when Steel reports no dimensions', async () => {

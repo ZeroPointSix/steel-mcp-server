@@ -152,6 +152,36 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             ]);
         });
 
+        it('asks for the session itself when the host never pushes a tool result', async () => {
+            // Claude renders the app while the creating call is still running and pushes the result
+            // once, when that call completes. The spec has no replay and no way to ask again, so an
+            // app whose handshake finishes after that instant is stuck for ever unless it asks.
+            const cdp = await startCdp();
+            const host = await startHost({ liveView: { kind: 'ok', cdpUrl: cdp.url } });
+            const viewer = await openViewer(host);
+
+            await cdp.waitForConnection();
+
+            const log = await viewer.log();
+            expect(log.violations).toEqual([]);
+            expect(log.messages.map(message => message.method)).toEqual([
+                'ui/initialize',
+                'ui/notifications/initialized',
+                'tools/call',
+            ]);
+            // No session to name, so it names none and lets the server pick the caller's own.
+            expect(log.messages[2]!.params!.arguments).toEqual({});
+        });
+
+        it('prefers the session the host pushed over asking for one', async () => {
+            const { viewer } = await connected();
+            const log = await viewer.log();
+
+            const calls = log.messages.filter(message => message.method === 'tools/call');
+            expect(calls).toHaveLength(1);
+            expect(calls[0]!.params!.arguments).toEqual({ session_id: SESSION_ID });
+        });
+
         it('falls back through its protocol versions until the host accepts one', async () => {
             const cdp = await startCdp();
             const host = await startHost({
@@ -602,23 +632,22 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             });
         });
 
-        it('says out loud when the host never sends it a session', async () => {
+        it('says out loud when the host neither sends a session nor answers the ask', async () => {
             const host = await startHost({ liveView: { kind: 'silent' } });
             const viewer = await openViewer(host);
 
             expect((await viewer.screen()).note).toBe('');
 
-            // The app gives the host 15s before it says anything, so this waits that out.
+            // With nothing pushed, the app asks the server which session it is showing. This host
+            // never answers, so what is left to report is the host's own silence — and it takes the
+            // app's 15s call timeout to know that.
             const waiting = await until(
-                'the app to say no session arrived',
+                'the app to say the ask went unanswered',
                 () => viewer.screen(),
                 shown => shown.note !== '',
                 25_000
             );
-            expect(waiting).toMatchObject({
-                headline: 'Waiting for a browser session',
-                note: 'The host has not sent a browser session to this view.',
-            });
+            expect(waiting.note).toContain('got no answer from the host');
         });
     });
 

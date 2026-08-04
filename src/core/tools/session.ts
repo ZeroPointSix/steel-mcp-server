@@ -282,6 +282,27 @@ function readViewport(dimensions: SteelSession['dimensions']): { width: number; 
  * handle is re-authorised against this request's own principal exactly as it is for every other
  * stateful tool, and a leaked handle is worth no more here than anywhere else.
  */
+/**
+ * The newest live session this credential owns.
+ *
+ * Only ever called for a caller who named no session, and only over that caller's own handles — the
+ * registry is asked for one principal's records, so this can no more reach another tenant's browser
+ * than `resolve` can. Newest wins because the viewer is rendered by the call that just created one.
+ */
+async function newestLiveSession(deps: ServerDeps): Promise<HandleRecord> {
+    const now = deps.now().getTime();
+    const live = (await deps.registry.list(deps.principal))
+        .filter(record => record.expiresAt > now)
+        .sort((left, right) => right.createdAt - left.createdAt);
+    const newest = live[0];
+    if (!newest) {
+        throw new SteelToolError('There is no live browser session to show. Call steel_session_create to start one.', {
+            code: 'session_expired',
+        });
+    }
+    return newest;
+}
+
 export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void {
     host.registerTool(
         'steel_session_live_view',
@@ -291,15 +312,30 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
                 'Connection details the inline session viewer needs to stream this browser session. ' +
                 'Returns no page content.',
             annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({ session_id: sessionIdSchema }),
+            inputSchema: z.object({
+                session_id: sessionIdSchema
+                    .optional()
+                    .describe(
+                        'Omit to stream the newest live session this credential owns, which is what a ' +
+                            'viewer that never received the session does.'
+                    ),
+            }),
             _meta: { ui: { visibility: ['app'] } },
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_live_view', ctx.mcpReq, async () => {
-                const record = await deps.registry.resolve(args.session_id, deps.principal);
+                // The host pushes the tool result to a rendered app exactly once, when the call
+                // completes, and the MCP Apps spec has neither a replay nor a way to ask for it
+                // again. A viewer rendered while the create call is still running can therefore
+                // finish its handshake after that instant and never learn which session it shows.
+                // Resolving from the caller's own handles is what makes the viewer recoverable; it
+                // is the same principal, so it widens nothing.
+                const record = args.session_id
+                    ? await deps.registry.resolve(args.session_id, deps.principal)
+                    : await newestLiveSession(deps);
                 // A rendered viewer is a session in use, and a person watching it is exactly who the
                 // idle sweep must not reclaim the slot from underneath.
-                await deps.registry.touch(args.session_id);
+                await deps.registry.touch(record.handle);
 
                 let session: SteelSession;
                 try {
@@ -334,6 +370,9 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
                     // belongs only in structured data, which the app reads and the model does not.
                     { result: 'Live view connection details for this session.' },
                     {
+                        // Named so a viewer that resolved its own session knows which one it got,
+                        // and can say so rather than stream an unidentified browser.
+                        session_id: record.handle,
                         cdp_url: cdpUrl,
                         ...(viewport ? { viewport } : {}),
                         expires_at: new Date(record.expiresAt).toISOString(),

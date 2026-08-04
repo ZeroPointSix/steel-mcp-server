@@ -862,6 +862,9 @@ var IDLE_AFTER_MS = ${SESSION_VIEWER_IDLE_AFTER_MS};
 var APP_INFO = { name: 'steel-session-viewer', version: ${JSON.stringify(SERVER_VERSION)} };
 var UI_PROTOCOL_VERSIONS = ['2026-01-26', '2025-11-25', '2025-06-18'];
 var CALL_TIMEOUT_MS = 15000;
+// How long a pushed session is waited for, then when to ask again while the server has none yet.
+var PUSH_GRACE_MS = 400;
+var ASK_RETRY_MS = [800, 2000, 5000];
 
 var validateCdpUrl = ${validateCdpUrl};
 var scrubCredentials = ${scrubCredentials};
@@ -996,10 +999,9 @@ var ready = initialize(0).then(function(){
   throw error;
 });
 
+// The one tool-result push is never replayed, so a handshake that finished after it must ask.
 ready.then(function(){
-  setTimeout(function(){
-    if (!sessionId) setPhase('awaiting-session', 'The host has not sent a browser session to this view.');
-  }, CALL_TIMEOUT_MS);
+  setTimeout(function(){ if (!sessionId && !asking) start(null); }, PUSH_GRACE_MS);
 }, function(){});
 
 // --- the session: ask for a live view, then paint it ---
@@ -1009,16 +1011,37 @@ function onToolResult(params){
   var id = readSessionIdFromToolResult(params);
   if (!id) return;
   sessionId = id;
+  if (asking) return;
   ready.then(function(){ start(id); }, function(){});
 }
 
+// A call in flight, so the push and the grace timer cannot both start one; and how many asks so far.
+var asking = false;
+var asks = 0;
+
 function start(id){
+  asking = true;
   setPhase('connecting');
-  return bridgeSend('tools/call', { name: LIVE_VIEW_TOOL, arguments: { session_id: id } }).then(function(result){
+  var args = id ? { session_id: id } : {};
+  return bridgeSend('tools/call', { name: LIVE_VIEW_TOOL, arguments: args }).then(function(result){
     var failure = readToolErrorText(result);
-    if (failure) { setPhase('live-view-failed', failure); return; }
+    if (failure) {
+      // No session named and none live yet: the creating call may still be running. Ask again.
+      var retryIn = id ? null : ASK_RETRY_MS[asks++];
+      if (retryIn === undefined || retryIn === null) {
+        setPhase(id ? 'live-view-failed' : 'awaiting-session', failure);
+        asking = false;
+        return;
+      }
+      asking = false;
+      setPhase('awaiting-session', failure);
+      setTimeout(function(){ if (!sessionId && !asking) start(null); }, retryIn);
+      return;
+    }
     var live = readLiveView(result);
     if (!live) { setPhase('live-view-failed', 'The live view tool returned no connection details.'); return; }
+    // Known either way now, so a late push cannot open a second connection over this one.
+    if (!sessionId) sessionId = id || 'resolved-by-server';
     // The URL can drive the browser. It is validated here and never shown, logged or stored in the DOM.
     var target = validateCdpUrl(live.cdpUrl, cdpHost);
     if (!target) { setPhase('live-view-failed', 'The live view address was refused before anything was opened.'); return; }
