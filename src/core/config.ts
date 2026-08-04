@@ -2,8 +2,15 @@
 // ABOUTME: CDP connect URL, which must always carry a sessionId or Steel starts an untracked session.
 import { randomBytes } from 'node:crypto';
 
-/** The named tool presets a connection can select. */
-export const PROFILE_NAMES = ['scrape', 'browse', 'vision', 'full'] as const;
+/**
+ * The named tool presets a connection can select.
+ *
+ * PLAN §7 also designs `vision` (coordinate tools over Steel's `/computer` endpoint) and `full`
+ * (`steel_execute_js`, self-host and stdio only). Neither has tools of its own yet, so neither is
+ * offered: a preset a caller can name has to differ from the one next to it, or the name promises a
+ * capability the server does not have.
+ */
+export const PROFILE_NAMES = ['scrape', 'browse'] as const;
 
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 

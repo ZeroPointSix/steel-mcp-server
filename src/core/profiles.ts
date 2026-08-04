@@ -19,8 +19,8 @@ export interface ToolDefinition {
     register(host: ToolHost, deps: ServerDeps): void;
 }
 
-const SCRAPE_AND_UP: ProfileName[] = ['scrape', 'browse', 'vision', 'full'];
-const BROWSE_AND_UP: ProfileName[] = ['browse', 'vision', 'full'];
+const SCRAPE_AND_UP: ProfileName[] = ['scrape', 'browse'];
+const BROWSE_AND_UP: ProfileName[] = ['browse'];
 
 /**
  * The tool table, in the order `tools/list` returns them.

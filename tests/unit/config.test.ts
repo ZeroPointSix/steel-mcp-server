@@ -92,6 +92,14 @@ describe('loadConfig', () => {
         expect(() => loadConfig({ STEEL_API_KEY: 'k', STEEL_PROFILE: 'turbo' })).toThrow(/turbo/);
     });
 
+    it('refuses a designed-but-unbuilt profile instead of silently serving browse', () => {
+        // vision and full are named in PLAN §7 and have no tools of their own yet. Accepting either
+        // would start a session-capable server that quietly lacks what the name was chosen for.
+        for (const profile of ['vision', 'full']) {
+            expect(() => loadConfig({ STEEL_API_KEY: 'k', STEEL_PROFILE: profile })).toThrow(/scrape, browse/);
+        }
+    });
+
     it('refuses a cloud deployment with no API key', () => {
         expect(() => loadConfig({})).toThrow(/STEEL_API_KEY/);
     });

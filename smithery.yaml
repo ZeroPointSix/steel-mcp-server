@@ -18,8 +18,9 @@ startCommand:
           http://localhost:3000 when steelLocal is true.
       steelProfile:
         type: string
-        enum: [scrape, browse, vision, full]
-        description: Which tool preset to expose. Defaults to browse.
+        enum: [scrape, browse]
+        description: Which tool preset to expose. Defaults to browse; scrape exposes only the
+          three stateless read tools, which start no billed browser session.
   commandFunction:
     # A function that produces the CLI command to start the MCP on stdio.
     |-
