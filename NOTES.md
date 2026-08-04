@@ -72,6 +72,22 @@ newest live session when the app names none.
 
 Our own fake host had asserted the working case back at us — the same test-double pattern as §6.
 
+### An inline view is sized for a card, not for a browser
+
+Measured from a screen recording, 2026-08-04. Claude gives the inline view a box roughly 780 px wide
+and 150 px tall. The app fits itself to it correctly, which for a 1280×720 page means a letterboxed
+strip about 305×150 — legible as a shape, useless as a browser.
+
+The apps protocol gives a view exactly two levers, and the app now uses both:
+`ui/notifications/size-changed` to ask for the height its aspect ratio needs, and
+`ui/request-display-mode` (`inline` | `fullscreen` | `pip`) for the host's own full-screen mode. The
+host answers the latter with the mode it actually set, which need not be the one asked for.
+
+**Not measured: whether Claude honours either.** Nothing in `hostCapabilities` advertises display-mode
+support, so there is nothing to check before asking. The app is built for refusal — it withdraws the
+full-screen control when the host answers with a mode it did not ask for, and an ignored size request
+leaves it exactly where it was.
+
 ## 2. MCP Apps protocol contract
 
 From the spec and the installed SDK, confirmed against a working implementation.

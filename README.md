@@ -48,6 +48,9 @@ session. The default `browse` profile adds the ten session tools above.
 On a host that supports MCP Apps — Claude among them — `steel_session_create` renders the running
 browser inline in the conversation. Frames are painted to a canvas from the session's own CDP
 screencast, and clicks, typing and scrolling in that canvas go back to the page as real input.
+Chat hosts size an inline view for a card rather than a browser, so the view asks for the height its
+page needs and offers **Full screen** — on a host that grants it; the control removes itself on one
+that does not.
 
 That is also what happens when the agent meets a login wall or a CAPTCHA: instead of guessing at a
 password, the tool answers `input_required` and points at the viewer, so a person signs in and the
