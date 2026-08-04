@@ -7,6 +7,7 @@ Steel MCP Server v2 has one transport-independent core with stdio and HTTP entry
 - [NOTES.md](NOTES.md) records facts established by direct measurement — Steel's real API shapes, the
   CSP Claude enforces on an MCP app, and the bugs that passing tests hid. Read it before trusting a
   documented shape.
+- [SUBMISSION.md](SUBMISSION.md) tracks the MCPB Desktop Extensions directory submission.
 - Read [RESEARCH.md §2.2](RESEARCH.md#22-steels-own-api--planmd-has-factual-errors) before changing
   `src/core/steel/`.
 

@@ -14,13 +14,12 @@ For example:
 - "Sign in and check the total on last month's invoice"
 - "Fill out this application form with the details from my CV"
 
-> **Status:** `2.0.0-beta.1`. Run the server locally over stdio for now. The package includes the
-> HTTP boundary used to build the hosted service, but `mcp.steel.dev` is not live and that path is
-> not production-ready yet.
+> **Status:** `2.0.0`. Run the server locally over stdio, or run the hosted endpoint
+> yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
 
 ## What it exposes
 
-The default `browse` profile is twelve tools:
+The default `browse` profile is thirteen tools:
 
 | Tool | What it does |
 |---|---|
@@ -36,20 +35,29 @@ The default `browse` profile is twelve tools:
 | `steel_wait_for` | Wait for named text, a selector, or a URL |
 | `steel_session_diagnostics` | A timestamped timeline of what the browser actually did |
 | `steel_batch` | Run several steps in one call, with one page read at the end |
+| `steel_session_live_view` | Feeds the inline viewer its connection details. Hosts hide it from the model |
 
 Set `STEEL_PROFILE=scrape` to expose only the three stateless read tools. They never start a browser
-session. The default `browse` profile adds the nine session tools above.
+session. The default `browse` profile adds the ten session tools above.
 
-The `vision` and `full` profile names are reserved for future coordinate and JavaScript tools. They
-currently expose the same tools as `browse`.
+## Watching, and taking over
+
+On a host that supports MCP Apps — Claude among them — `steel_session_create` renders the running
+browser inline in the conversation. Frames are painted to a canvas from the session's own CDP
+screencast, and clicks, typing and scrolling in that canvas go back to the page as real input.
+
+That is also what happens when the agent meets a login wall or a CAPTCHA: instead of guessing at a
+password, the tool answers `input_required` and points at the viewer, so a person signs in and the
+agent carries on. On a host without MCP Apps, nothing is lost — the same tools return text, and
+`viewer_url` opens the same browser in a tab.
 
 ## Quick start
 
 ### Steel Cloud
 
 You need Node.js 20 or newer and a
-[Steel API key](https://app.steel.dev/settings/api-keys). The beta is not published to npm yet, so
-install it from source:
+[Steel API key](https://app.steel.dev/settings/api-keys). It is not published to npm yet, so install
+it from source:
 
 ```bash
 git clone https://github.com/steel-dev/steel-mcp-server.git
@@ -116,13 +124,37 @@ requests one of those cloud-only features.
 | `STEEL_API_KEY` | — | Required for Steel Cloud. Never sent to a self-hosted deployment |
 | `STEEL_LOCAL` | `false` | `true` drives a local steel-browser and waives the API key |
 | `STEEL_BASE_URL` | `https://api.steel.dev` | Steel REST base URL. A trailing `/v1` is fine either way |
-| `STEEL_PROFILE` | `browse` | `scrape` or `browse`; `vision` and `full` are currently aliases of `browse` |
+| `STEEL_PROFILE` | `browse` | `scrape` or `browse` |
 | `STEEL_SESSION_TIMEOUT_MS` | `300000` | Hard session lifetime, clamped to your plan maximum |
 | `STEEL_INACTIVITY_TIMEOUT_MS` | `120000` | Idle release. This is what frees a browser if this process dies |
 | `STEEL_MAX_SESSIONS` | `10` | Concurrent sessions this server will hold |
 | `STEEL_CONNECT_URL` | `wss://connect.steel.dev` | CDP endpoint, derived from the base URL when self-hosted |
 
 Logs are structured JSON on stderr; stdout carries nothing but JSON-RPC.
+
+## Running the hosted endpoint
+
+`node dist/hosted.js` (or `npm run start:hosted`) serves the same tools over Streamable HTTP at
+`POST /mcp`. Every caller brings their own Steel key, as a `Authorization: Bearer` header or an
+`?apiKey=` query parameter for hosts that cannot set headers; a handle minted by one request is
+usable only by the credential that minted it. `GET /healthz` answers a load-balancer probe without
+consulting the Host allowlist. `GET` and `DELETE` on `/mcp` answer `405`, as the 2026-07-28 spec
+requires.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STEEL_ALLOWED_HOSTS` | — | **Required.** Comma-separated hostnames this endpoint answers on. Without it, DNS rebinding has nothing to stop it, so the server refuses to start |
+| `STEEL_ALLOWED_ORIGINS` | — | Comma-separated browser origins allowed to call it. Empty rejects every request that carries an `Origin`; requests without one still pass |
+| `PORT` | `8080` | Port to bind. `0` asks the OS for a free one |
+| `HOST` | `0.0.0.0` | Address to bind |
+| `REDIS_URL` | — | Shares handle records between replicas, so any replica can serve a handle another minted. Without it, records stay in the process — correct for exactly one replica |
+| `REDIS_KEY_PREFIX` | `steel-mcp` | Key namespace, so one store can hold more than one deployment |
+| `STEEL_REQUEST_STATE_SECRET` | per-process | HMAC key for human-in-the-loop handoff state. **Required with `REDIS_URL`**, and identical on every replica: without it a retried handoff lands on a replica that cannot verify state another one minted, after the person has already signed in. Generate with `openssl rand -base64 32` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Any standard `OTEL_*` variable turns on OTLP tracing; `OTEL_SERVICE_NAME` defaults to `steel-mcp`. Unset means no exporter is loaded at all |
+
+The server never holds a Steel key of its own, so it is a self-hosted deployment's job to terminate
+TLS in front of it. Hosted logs are structured JSON on stdout, and credentials are redacted before
+anything reaches them.
 
 ## How to get good results
 
@@ -153,6 +185,7 @@ npm run lint
 npm test               # unit + integration
 npm run budget         # tools/list byte budget per profile
 npm run conformance    # MCP conformance suite
+npm run test:browser   # runs the inline viewer in a real Chrome
 npm run test:e2e       # starts, waits for and tears down the real-browser stack
 ```
 

@@ -1,20 +1,27 @@
 # Steel MCP Server v2 — Implementation Plan
 
-**Status:** P0–P1 complete; P2 in progress
+**Status:** P0–P2 and P4.5 complete; P3 in progress
 **Branch:** `niko/steel-mcp-server-v2`
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
-**Implementation checkpoint (2026-07-30):** stdio, the twelve-tool core, real-browser E2E and
-legacy/2026-07-28 conformance gates are passing. P2 now has a web-standard `/mcp` boundary with
+**Implementation checkpoint (2026-08-04):** stdio, the thirteen-tool core, real-browser E2E and
+legacy/2026-07-28 conformance gates are passing. P2 has a web-standard `/mcp` boundary with
 request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
-validation. Its in-process hosted runtime shares handles across requests, isolates REST/CDP clients
-by credential, and reclaims a session whose create request disconnects. The four P2 leftovers have
-landed: a Redis-backed handle registry (`REDIS_URL`), per-principal cost-weighted rate limiting,
-OpenTelemetry with `_meta` trace propagation (`steel-mcp/tracing`), and the MRTR human-in-the-loop
-handoff on login walls and CAPTCHAs. What remains is P3: a hosted production entrypoint (nothing
-constructs `HostedRuntime` in production yet), operator docs for the new env vars
-(`REDIS_URL`, `STEEL_REQUEST_STATE_SECRET`, `OTEL_*`), leak-path metrics, and deployment.
+validation, over a hosted runtime that shares handles across requests, isolates REST/CDP clients by
+credential, and reclaims a session whose create request disconnects — with a Redis-backed handle
+registry (`REDIS_URL`), per-principal cost-weighted rate limiting, OpenTelemetry with `_meta` trace
+propagation (`steel-mcp/tracing`), and the MRTR human-in-the-loop handoff.
+
+P4.5 landed ahead of P3 and past its original scope: the inline session viewer is served as an MCP
+app, paints the live browser onto a canvas from the CDP screencast, forwards canvas input back to
+the page, and is where MRTR now sends a person on a login wall or CAPTCHA (§14.A).
+
+P3 now has its entrypoint: `src/hosted.ts` (`npm run start:hosted`) builds the runtime, picks the
+handle store from the environment, serves `/mcp` over Node's HTTP server with a `/healthz` probe
+ahead of the Host allowlist, and releases every session it holds on shutdown. What remains in P3 is
+operational rather than structural: leak-path metrics and alerting on the Steel-backstop release
+count (§5), a soak test, staging, and `mcp.steel.dev` itself.
 
 ---
 
@@ -77,7 +84,10 @@ src/
     registry.ts      # handle registry + reaper
     steel/           # typed REST layer over /v1 + CDP client
     errors.ts        # Steel failure -> actionable tool-execution error
-  http.ts            # Streamable HTTP entrypoint
+    apps/            # the MCP-App session viewer shell (§14.A)
+  http.ts            # Streamable HTTP boundary: routing, DNS-rebinding guards, credentials
+  hosted-runtime.ts  # shared per-credential clients, handle store selection
+  hosted.ts          # hosted entrypoint: binds a port, serves /mcp and /healthz
   stdio.ts           # stdio entrypoint (bin: steel-mcp)
 ```
 
@@ -146,6 +156,7 @@ All tools `openWorldHint: true`, all carry `title` and `readOnlyHint`/`destructi
 | `steel_wait_for` | outcome | Explicit waits only. **No `networkidle`** |
 | `steel_session_diagnostics` | timeline from `/agent-traces` + `/logs` | **P1, not polish.** Nobody else can build this |
 | `steel_batch` | one snapshot at the end, stops at first failure | Where the round-trip win lives |
+| `steel_session_live_view` | scoped CDP connection details, no page content | Shipped with §14.A. `_meta.ui.visibility: ['app']`, so a supporting host keeps it out of the model's list; last in the tool table so every other tool's bytes stay identical |
 
 Plus a **server `instructions` string** (≤2KB) as a reviewed deliverable. Claude Code enables MCP tool search by default, which makes this the primary discovery surface. Write it in the user's language — JS-rendered pages, sites that block plain fetch, login-gated content, CAPTCHAs, multi-step forms — not Steel's architecture.
 
@@ -153,9 +164,15 @@ Plus a **server `instructions` string** (≤2KB) as a reviewed deliverable. Clau
 
 Named presets, selected by credential or URL (`tools/list` must not vary per-connection, though it may vary by authorization):
 
-`scrape` (3 stateless tools, zero billing) · **`browse`** (default, the 12 above) · `vision` (+ coordinate tools) · `full` (+ `steel_execute_js`, self-host/stdio only)
+`scrape` (3 stateless tools, zero billing) · **`browse`** (default, the 13 above) · `vision` (+ coordinate tools) · `full` (+ `steel_execute_js`, self-host/stdio only)
 
 Design profiles at P0 when it's free, not later when it's breaking.
+
+**Only `scrape` and `browse` are selectable.** The mechanism carries a profile list per tool, so
+adding either of the other two is a data change — but neither has a tool of its own yet, and a name
+a caller can select has to differ from the one next to it. `STEEL_PROFILE=vision` was accepted and
+served the `browse` surface until 2026-08-04; it is now refused, and `PROFILE_NAMES` will grow again
+when the tools do.
 
 ### Deliberately not shipping
 
@@ -216,9 +233,11 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 - **P1 — Core over stdio** (week 1). The §7 surface against local steel-browser. Snapshot pipeline measured against a hostile-site corpus — this is the highest technical risk in the plan.
   - **In parallel (⏱ external lead time):** claim the registry namespace and npm name (registry names are immutable, no unpublish); add `mcpName` to package.json; file the DNS verification ticket; provision `mcp.steel.dev` (currently NXDOMAIN); start the Claude Team org and OpenAI identity verification; publish a privacy policy; build the MFA-free demo account; **fix the live PulseMCP listing that advertises a v1 install path for a package never published to npm.**
 - **P2 — Streamable HTTP** (week 2). Transport, handle registry, reaper, bearer + query-param auth, Origin/Host validation, cost-weighted rate limiting, OpenTelemetry with `_meta` trace propagation. MRTR human-in-the-loop.
-- **P3 — Hosted** (week 3). Staging, leak-path metrics and alerting, soak test, then `mcp.steel.dev`.
+- **P3 — Hosted** (week 3). The entrypoint has landed (`src/hosted.ts`: `STEEL_ALLOWED_HOSTS`,
+  `STEEL_ALLOWED_ORIGINS`, `PORT`, `HOST`, `/healthz`, shutdown release). Remaining: staging,
+  leak-path metrics and alerting, soak test, then `mcp.steel.dev`.
 - **P4 — Distribution.** Official Registry record (both `remotes[]` and `packages[]`; no OAuth needed, and it transitively feeds the GitHub registry → VS Code gallery), `mcp-publisher` wired into release CI, README to the Playwright MCP bar with one-click badges, **the published token-economics table**, self-hosted Claude plugin marketplace, MCPB bundle → Smithery + Claude Desktop, Cursor Marketplace.
-- **P4.5 — MCP Apps live-session viewer.** Scoped in §14.A. No OAuth dependency, so it rides alongside P4 distribution rather than behind it — and it is the distribution asset ("watch your agent browse, inline in the chat").
+- **P4.5 — MCP Apps live-session viewer. Shipped.** Scoped in §14.A, built ahead of P3 because it had no dependency on either. It is the distribution asset ("watch your agent browse, inline in the chat"), and it is where MRTR hands over on a login wall.
 - **P5 — Gated on OAuth.** Anthropic Connectors Directory, OpenAI Plugins Directory. Then the Tasks extension when the SDK ships server-side support (§14.B), and masking-based injection defense.
 
 **Worth doing early, cheaply:** document "Playwright MCP / chrome-devtools-mcp pointed at a Steel CDP URL" as a supported path. It costs a README section, covers the power-user surface we're deliberately not building, and hedges the snapshot-quality risk. And consider a **keyless, per-IP-rate-limited `scrape` profile** — those tools consume no session-minutes by construction, Firecrawl proved the funnel, and no browser-infra competitor offers it.
@@ -241,7 +260,7 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 | 9 | Should `/v1/search` be promoted from the OSS image to Cloud? | Steel platform. Agents constantly want search; until then we can't offer it |
 | 10 | What is `steel-computer` (private repo, "persistent computers for AI agents")? | Steel product. An adjacent surface this may need to accommodate |
 | 13 | When does server-side support for the redesigned `io.modelcontextprotocol/tasks` extension ship in an official SDK? | Watch the SDK releases and the ext-tasks repo. Gates §14.B — SDK 2.0.0 carries only the legacy experimental task shim |
-| 14 | **Can a session be created with a read-only or expiring player URL?** The `debugUrl` player is an unauthenticated bearer capability that is *interactive by default* (`debugConfig.interactive: true`), and `CreateSessionRequest` (src/core/steel/types.ts) exposes no field to turn that off — so a read-only viewer is not currently expressible through this repo's client | Steel platform. Gates handing `debugUrl` to anything beyond the MRTR elicitation flow; a leaked player URL is a drivable, possibly logged-in browser |
+| 14 | **Can a session be created with a read-only or expiring player URL?** The `debugUrl` player is an unauthenticated bearer capability that is *interactive by default* (`debugConfig.interactive: true`), and `CreateSessionRequest` (src/core/steel/types.ts) exposes no field to turn that off — so a read-only viewer is not currently expressible through this repo's client | Steel platform. Still open, but no longer gating: the inline viewer uses a scoped CDP token instead, so `debugUrl` now only reaches a person MRTR is already handing the browser to (§14.A) |
 
 ### Resolved
 
@@ -261,15 +280,16 @@ against the extension specs and the installed SDK.
 
 ### 14.A MCP Apps (`io.modelcontextprotocol/ui`) — inline live session viewer
 
-**What ships:** `steel_session_create` declares `_meta.ui.resourceUri: "ui://steel/session-viewer"`.
+**What shipped:** `steel_session_create` declares `_meta.ui.resourceUri: "ui://steel/session-viewer"`.
 The server registers that `ui://` resource: one static HTML shell (`text/html;profile=mcp-app`,
-self-contained, no external scripts) that the host renders in a sandboxed iframe. The shell reads
-the session's **player URL (`debugUrl`, `api.steel.dev/v1/sessions/{id}/player`)** from the tool
-result the host pushes to it over the postMessage bridge and embeds the live player — **not**
-`sessionViewerUrl`, which is the login-walled dashboard SPA and renders a blank login page in an
-iframe. The human watches — and on a login wall or CAPTCHA, *acts in* — the agent's browser without
-leaving the conversation. This is the §9 human-in-the-loop feature with the last mile built in:
-MRTR `input_required` points at a viewer that is already rendered inline.
+self-contained, no external scripts) that the host renders in a sandboxed iframe. The shell asks
+`steel_session_live_view` for the session's scoped CDP token over the postMessage bridge, opens the
+CDP socket itself, and paints `Page.screencastFrame` onto a canvas; input on that canvas is
+forwarded back to the page over the same socket. It does **not** embed Steel's player: Claude allows
+no third-party iframe at all (measured below), which is what killed the original embedding design.
+The human watches — and on a login wall or CAPTCHA, *acts in* — the agent's browser without leaving
+the conversation. This is the §9 human-in-the-loop feature with the last mile built in: MRTR
+`input_required` points at a viewer that is already rendered inline.
 
 **The host's actual policy, measured 2026-07-31.** A throwaway probe app rendered in Claude Desktop
 (1.24012.9, Electron 42) reported the literal CSP Claude enforces on an MCP app, recovered from a
@@ -308,47 +328,44 @@ adoption is the broadest of any extension (Claude web/Desktop, ChatGPT, VS Code 
 Copilot, Cursor, Goose, Postman, MCPJam — RESEARCH.md client matrix). No OAuth, no SDK gap, no new
 protocol machinery.
 
-**Work items, in order:**
+**What shipped, and how it differs from the original design:**
 
-1. ~~Embeddability probe~~ **Done 2026-07-30, then overtaken 2026-07-31.** The probe answered the
+1. **The iframe design died, and the CDP screencast replaced it.** The 2026-07-30 probe answered the
    *Steel* side (question 12): the player is embed-ready — no framing blocks on any Steel origin,
-   `steel:*` postMessage lifecycle events, `hideOverlay`/`hideInteractionDialog` params. It said
-   nothing about the *host* side, and that is where this design dies: **Claude does not honour
-   `frameDomains`.** Anthropic's MCP Apps design guidelines state third-party iframe embedding "is
-   currently restricted in Claude pending security review"; Claude enforces a hardcoded
-   `frame-src 'self' blob: data:` (anthropics/claude-ai-mcp #40 open, #54 *closed as not planned*).
-   A shell nesting `api.steel.dev` renders as an empty box in Claude Desktop and claude.ai.
-   **An earlier revision of this item said "the CDP-screencast fallback is dead; do not build it" —
-   that was wrong.** Painting screencast frames to a canvas is now the only viable inline path, and
-   it is gated on two unknowns (see questions 15 and 16).
-2. Declare `capabilities.extensions["io.modelcontextprotocol/ui"]` and add the `resources`
-   capability (currently tools-only). The shell is org-independent and static: serve it with
-   `ttlMs` = 1h, `cacheScope: 'public'` — no per-session data may ever be baked into it.
-   Session-specific state (the player URL) arrives only via the tool-result push.
-3. Author the shell: vanilla JS + `App` class, `_meta.ui.csp` of **`frame-src
-   https://api.steel.dev` only** (the player's WebSocket/ICE/Sentry traffic runs inside the
-   cross-origin child and is not governed by our shell's CSP), no tool-call permissions in v1
-   (pure display), viewport-responsive. Wire the player's `steel:ready` and
-   `steel:autoplay-blocked` events into the shell's loading/error states — hosts with strict
-   autoplay policies otherwise show a frozen frame with no diagnosable cause. Nested-sandbox
-   flags are the other host-side risk: test that the host's iframe permits nested framing +
-   scripts before blaming Steel.
-4. Add `_meta.ui.resourceUri` to `steel_session_create`. Text content unchanged — fallback for
-   non-supporting hosts is automatic. Later candidates once the pattern is proven:
-   `steel_session_diagnostics` (timeline dashboard), `steel_screenshot` (zoomable image).
-5. Security review against §9: page-derived text never flows into the template; the untrusted-fence
-   discipline is unchanged (the app renders the *browser*, not page text); handle authorization is
-   untouched because the app calls no tools. **Gate on question 14 before shipping:** the player
-   URL is an unauthenticated bearer capability, interactive by default, and our Steel client
-   cannot currently request a read-only session — decide deliberately who gets handed a drivable
-   browser URL.
-6. Tests per §10: unit (resource registration, `_meta` present, shell contains no dynamic
-   interpolation), integration (`server/discover` advertises the extension; `resources/read` serves
-   the right MIME and cache hints), budget (**`_meta.ui` adds bytes to every `tools/list` — the
-   budget gate must price it**), manual E2E on MCPJam then Claude Desktop. Conformance has no apps
-   scenarios yet; baseline unaffected.
-
-**Estimate:** 3–5 days after the probe, most of it in the shell and host-quirk testing.
+   `steel:*` postMessage lifecycle events, `hideOverlay`/`hideInteractionDialog` params. The
+   2026-07-31 probe answered the *host* side, and that is where the design died: **Claude does not
+   honour `frameDomains`.** It enforces a hardcoded `frame-src 'self' blob: data:`
+   (anthropics/claude-ai-mcp #40 open, #54 *closed as not planned*), so a shell nesting
+   `api.steel.dev` renders as an empty box. **An earlier revision of this item said "the
+   CDP-screencast fallback is dead; do not build it" — that was wrong**, and painting screencast
+   frames to a canvas is what the shipped viewer does.
+2. `capabilities.extensions["io.modelcontextprotocol/ui"]` and `resources: {listChanged: false}` are
+   declared; the shell is served at `ui://steel/session-viewer` with a per-resource
+   `ttlMs` = 1h / `cacheScope: 'public'` hint that deliberately overrides the private
+   `resources/read` hint next to it. No per-session data is baked in — the shell is byte-identical
+   for every caller, and everything session-specific arrives over the bridge.
+3. The shell is vanilla JS with no external script, and its `_meta.ui.csp` declares
+   `connectDomains: [origin of config.connectUrl]` rather than a hardcoded Steel Cloud host, so a
+   self-hosted deployment's shell can reach its own CDP endpoint. It opens CDP with the
+   session-scoped token, paints `Page.screencastFrame` to a canvas, and — the one scope increase
+   over "pure display in v1" — forwards mouse, keyboard and scroll input back through
+   `Input.dispatchMouseEvent` / `dispatchKeyEvent` / `insertText`, which is what makes the handoff
+   in §9 finish inside the conversation.
+4. `_meta.ui.resourceUri` is on `steel_session_create`; the text content is unchanged, so a host
+   without the extension sees exactly what it saw before. The app gets its connection details from
+   `steel_session_live_view`, an app-only tool (`visibility: ['app']`) that authorizes its handle
+   like every other tool, because visibility is host-side list filtering and not a security
+   boundary (NOTES §2).
+5. Security: page-derived text never flows into the template, the app renders the *browser* rather
+   than page text, and question 14 was answered by construction — **nothing hands out the player
+   URL to the inline path**. The viewer reaches the browser over a session-scoped, self-expiring CDP
+   token instead, and MRTR falls back to the player URL only for a client with no viewer rendered.
+6. Tests: unit (resource registration, `_meta`, no dynamic interpolation), integration
+   (`server/discover` advertises the extension, `resources/read` MIME and cache hints), budget (the
+   `_meta.ui` bytes are priced — 13 tools, 15.5KB of the 16KB budget), and `npm run test:browser`,
+   which runs the shell in a real Chrome against a fake CDP server. That last suite exists because
+   unit tests asserting the shell's *source* passed while two runtime bugs made it unusable
+   (NOTES §6).
 
 ### 14.B Tasks (`io.modelcontextprotocol/tasks`) — durable handles for long operations
 
