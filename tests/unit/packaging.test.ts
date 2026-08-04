@@ -196,6 +196,27 @@ describe('what a default install pays for', () => {
         const dockerfile = readFileSync(fileURLToPath(new URL('../../Dockerfile', import.meta.url)), 'utf8');
         expect(dockerfile).toContain('peerDependencies');
     });
+
+    it('selects the hosted entrypoint through CMD, so overriding it works', () => {
+        // With the script inside ENTRYPOINT, run arguments append rather than replace, so the
+        // documented `docker run <image> node dist/hosted.js` ran `node dist/stdio.js node
+        // dist/hosted.js` — the stdio server, for an operator who asked for the hosted one, with
+        // nothing to indicate they had not got it.
+        const dockerfile = readFileSync(fileURLToPath(new URL('../../Dockerfile', import.meta.url)), 'utf8');
+        expect(dockerfile).toContain('ENTRYPOINT ["node"]');
+        expect(dockerfile).toContain('CMD ["dist/stdio.js"]');
+    });
+
+    it('runs both entrypoints in CI rather than only building the image', () => {
+        // The E2E stack runs upstream images, not this Dockerfile, so nothing else executes it. Three
+        // faults reached a green build: reinstalled devDependencies, an unresolvable ioredis, and an
+        // override that selected the wrong server. A build on its own catches none of them.
+        const ci = readFileSync(fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)), 'utf8');
+        expect(ci).toContain('docker build');
+        expect(ci, 'nothing exercises the stdio entrypoint').toContain('tools/list');
+        expect(ci, 'nothing exercises the hosted entrypoint').toContain('dist/hosted.js');
+        expect(ci, 'the hosted server is never asked whether it is serving').toContain('/healthz');
+    });
 });
 
 describe('dependency pins', () => {

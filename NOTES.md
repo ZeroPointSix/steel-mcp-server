@@ -263,6 +263,29 @@ after the split. Same stdio server both times.
 - The MCPB bundle's staged `node_modules` is also 17M; `mcpb pack` reports 8.0M unpacked because its
   own ignore rules strip a further 817 files.
 
+### Three faults in the container image, none of which a green build showed
+
+Found 2026-08-04 by building the image and running it, which nothing had done: the E2E stack runs
+upstream images (`ghcr.io/steel-dev/steel-browser-api`, `node:22-alpine`) and never touches this
+Dockerfile. Every one of these produced a successful `docker build`.
+
+| Fault | Symptom |
+|---|---|
+| `npm install --no-save <names>` after `npm prune --omit=dev` | Also reinstalls everything else `package.json` declares. The compiler and the linter came back: **455MB image, 113MB of it Biome** |
+| `npm install --omit=dev <names>` | Installs **nothing** — "up to date, audited 6 packages". `ioredis` absent, so `dist/hosted.js` cannot start |
+| `ENTRYPOINT ["node", "dist/stdio.js"]` | Run arguments *append* to an exec-form entrypoint, so the documented `docker run <image> node dist/hosted.js` executed `node dist/stdio.js node dist/hosted.js` — the stdio server, silently, for an operator who asked for the hosted one |
+
+- **`npm prune` keeps a declared peer even when it is marked optional.** The exporter stack survived
+  the prune until `npm pkg delete peerDependencies peerDependenciesMeta` ran first. Read the version
+  ranges out before deleting the block.
+- The working order is: capture ranges → `npm pkg delete devDependencies peerDependencies
+  peerDependenciesMeta` → `npm prune --omit=dev` → `npm install --no-save <the two peers>`. Result:
+  **178MB image, 22M `node_modules`**, holding exactly the four production dependencies and the two
+  peers `hosted.ts` statically imports.
+- Verified in the image: stdio lists 13 tools over real JSON-RPC; `dist/hosted.js` answers `/healthz`
+  200; and with `OTEL_EXPORTER_OTLP_ENDPOINT` set but no exporter installed it logs
+  "Tracing was requested but could not start" exactly once and serves anyway. CI now runs all three.
+
 ## 8. Process notes
 
 - **Never judge a check by piping it to `tail`/`head`.** A pipeline's exit status is the pager's, so

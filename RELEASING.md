@@ -14,7 +14,7 @@ between packages in exchange for nothing.
 |---|---|---|---|
 | **MCPB bundle** `steel-mcp-<version>.mcpb` | `dist/stdio.js` | Claude for macOS and Windows | `release.yml`, attached to the GitHub release |
 | **npm package** `steel-mcp` | `bin` → `dist/stdio.js`, plus `exports` for embedding | `npx`, CLI hosts, anyone importing the core | `release.yml`, when `PUBLISH_NPM` is on |
-| **Container image** | `dist/stdio.js` by default, `dist/hosted.js` on override | Self-hosters | `release.yml`, when `PUBLISH_DOCKER` is on |
+| **Container image** | `dist/stdio.js` by default, `docker run <image> dist/hosted.js` for the HTTP endpoint | Self-hosters | `release.yml`, when `PUBLISH_DOCKER` is on |
 | **`mcp.steel.dev`** | `dist/hosted.js` | Steel's own hosted service | Not wired up here; deployed from the image |
 
 The entrypoints, since three of them have similar names:
@@ -91,7 +91,30 @@ The tag starts `release.yml`, which:
 4. Publishes to npm and ghcr **only if** the repository variable `PUBLISH_NPM` or `PUBLISH_DOCKER` is
    `true`. Both are off; `NPM_TOKEN` has to exist as a secret before the npm one will work.
 
-Never tag by hand — `npm version` is what keeps the four files together.
+Prefer `npm version` over tagging by hand: it is what keeps the four files together. The exception is
+below, and the tag check in step 1 is what makes it safe.
+
+### When package.json already states the version you want to release
+
+`npm version 2.0.0` fails with `Version not changed` when `package.json` is already at 2.0.0, so the
+flow above cannot produce that tag. This is the situation for **2.0.0 itself**, which was set by
+editing the files rather than by bumping.
+
+Tag it directly, once:
+
+```bash
+npm run sync:version -- --check   # the four files agree
+git tag -a v2.0.0 -m 'v2.0.0'
+git push --follow-tags
+```
+
+`release.yml` still refuses the tag if it disagrees with `package.json`, so the guarantee that matters
+holds either way — what you lose by tagging by hand is only the automatic bump, and here there is
+nothing to bump. Every release after this one goes through `npm version`.
+
+Worth knowing before the first one: **`release.yml` has never run.** Tagging a throwaway prerelease
+(`npm version 2.0.1-rc.1`) exercises the whole workflow — including the publish steps' `if` guards —
+without putting a wrong release in front of anyone.
 
 ## Before the first release
 
