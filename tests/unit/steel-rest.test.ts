@@ -122,6 +122,16 @@ describe('SteelRestClient.createSession', () => {
         });
     });
 
+    it('passes mobile device configuration through unchanged', async () => {
+        const { api, calls } = client([{ body: { id: 'mobile-1', status: 'live' } }]);
+        await api.createSession({
+            sessionId: 'mobile-1',
+            timeout: 900_000,
+            deviceConfig: { device: 'mobile' },
+        });
+        expect(calls[0]!.body).toMatchObject({ deviceConfig: { device: 'mobile' } });
+    });
+
     it('never sends a metadata field, which the sessions endpoint does not have', async () => {
         const { api, calls } = client([{ body: { id: 'mine-1', status: 'live' } }]);
         await api.createSession({ sessionId: 'mine-1', timeout: 1000, inactivityTimeout: 500, namespace: 'ns' });

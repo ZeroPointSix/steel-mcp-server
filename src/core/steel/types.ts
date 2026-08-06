@@ -67,6 +67,7 @@ export interface CreateSessionRequest {
     profileId?: string | undefined;
     namespace?: string | undefined;
     dimensions?: { width: number; height: number } | undefined;
+    deviceConfig?: { device: 'desktop' | 'mobile' } | undefined;
     blockAds?: boolean | undefined;
     userAgent?: string | undefined;
 }

@@ -347,6 +347,22 @@ describe('steel_session_create', () => {
         expect(created.timeout).toBeGreaterThan(0);
     });
 
+    it('starts a genuine mobile browser when mobile device mode is requested', async () => {
+        const result = await harness.client.callTool({
+            name: 'steel_session_create',
+            arguments: { device: 'mobile' },
+        });
+
+        expect(isError(result)).toBe(false);
+        expect(harness.deps.api.created[0]!.deviceConfig).toEqual({ device: 'mobile' });
+
+        const create = (await harness.client.listTools()).tools.find(tool => tool.name === 'steel_session_create');
+        const properties = (
+            create?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined
+        )?.properties;
+        expect(properties?.device?.description).toMatch(/mobile.*fingerprint.*user agent.*touch/i);
+    });
+
     it('keeps the idle timeout strictly below the hard timeout, which is what makes it work', async () => {
         // Steel ignores inactivityTimeout when it is greater than or equal to timeout, which would
         // silently disable the only teardown layer that survives this process dying.

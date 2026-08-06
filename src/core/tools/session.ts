@@ -36,6 +36,7 @@ interface CreateArgs {
     profile_id?: string | undefined;
     namespace?: string | undefined;
     block_ads?: boolean | undefined;
+    device?: 'desktop' | 'mobile' | undefined;
     viewport?: { width: number; height: number } | undefined;
     timeout_ms?: number | undefined;
 }
@@ -65,6 +66,12 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     .optional()
                     .describe('Credential namespace to inject. Never put secrets in tool arguments.'),
                 block_ads: z.boolean().optional().describe('Block advertising and tracking requests.'),
+                device: z
+                    .enum(['desktop', 'mobile'])
+                    .optional()
+                    .describe(
+                        'Browser device mode. Use mobile for a mobile fingerprint, user agent, viewport and touch support.'
+                    ),
                 viewport: z
                     .object({ width: z.number().int().positive(), height: z.number().int().positive() })
                     .optional()
@@ -119,6 +126,7 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             profileId: args.profile_id,
                             namespace: args.namespace,
                             blockAds: args.block_ads,
+                            deviceConfig: args.device ? { device: args.device } : undefined,
                             dimensions: args.viewport,
                         },
                         ctx.mcpReq.signal
