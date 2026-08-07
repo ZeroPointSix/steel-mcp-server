@@ -1,5 +1,8 @@
 # Steel MCP Server
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)
+
 Give Claude, Cursor, VS Code, or another MCP client a Steel-managed Chromium browser. Use
 [Steel](https://steel.dev) to read pages that block a plain `fetch`, take screenshots, or work
 through interactive sites by clicking, typing, and filling forms.
@@ -9,6 +12,8 @@ shows small screenshots through MCP image blocks without using pixels for intera
 
 > **Status:** `2.0.0-rc.1`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
+
+<a href="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server"><img width="380" height="200" src="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server/badge" alt="Steel MCP Server listing on Glama" /></a>
 
 ## Example prompts
 
