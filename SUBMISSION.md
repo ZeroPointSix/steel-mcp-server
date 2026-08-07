@@ -180,8 +180,6 @@ Directory Terms. Draft answers below.
 
 ## Explicitly not blocking
 
-- **`src/index.ts`** — the 35KB v1 monolith, excluded from the build by `tsconfig.build.json` and
-  never shipped. Dead code worth deleting, but out of scope here; file an issue.
 - **MCP Apps session viewer** — the inline viewer is a differentiator, not a requirement. Whether
   Claude Desktop honours `_meta.ui.visibility` from an MCPB install is worth confirming in 1.6, but
   a "no" costs us a hidden tool becoming visible, not a rejection.
