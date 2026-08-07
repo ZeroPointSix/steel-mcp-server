@@ -254,7 +254,12 @@ export class FakeMcpAppHost {
     }
 
     async stop(): Promise<void> {
-        await new Promise<void>(resolve => this.server.close(() => resolve()));
+        // `close` stops new connections and then waits for the open ones, and a browser keeps its
+        // connection alive after the page using it is gone. Waiting for the browser to give it up is
+        // waiting on a keep-alive timeout, so the sockets are dropped rather than waited for.
+        const closed = new Promise<void>(resolve => this.server.close(() => resolve()));
+        this.server.closeAllConnections();
+        await closed;
     }
 }
 
