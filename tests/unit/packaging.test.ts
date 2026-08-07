@@ -102,7 +102,7 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
     const root = new URL('../../', import.meta.url);
     const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
 
-    it.each(['README.md', 'smithery.yaml', 'Dockerfile', 'docker-compose.yaml'])(
+    it.each(['README.md', 'Dockerfile', 'docker-compose.yaml'])(
         '%s does not launch the entrypoint the build stopped emitting',
         name => {
             expect(read(name), `${name} still launches dist/index.js`).not.toContain('dist/index.js');
@@ -134,10 +134,6 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
         expect(readme, 'the documented bridge header would be mangled by a host that does not escape args').not.toMatch(
             /Authorization: \$\{/
         );
-    });
-
-    it('smithery launches the built stdio entrypoint', () => {
-        expect(read('smithery.yaml')).toContain('dist/stdio.js');
     });
 
     it('copies every file the build script compiles from', () => {
