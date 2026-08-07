@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Unit tests
+        run: npm run test:unit
+      - name: Integration tests
+        run: npm run test:integration
+      - name: Browser-test prerequisites
+        run: |
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          command -v openssl
+      - name: MCP Apps in a real browser
+        run: npm run test:browser
+      - name: Real-browser E2E tests
+        run: npm run test:e2e
+      - name: tools/list byte budget
+        run: npm run budget
+      - name: MCP conformance
+        run: ./scripts/run-conformance.sh
+      - name: MCPB bundle
+        run: npm run pack:mcpb
+      # Nothing else builds this Dockerfile — the E2E stack runs upstream images — so without this the
+      # image is first built during a release. Running both entrypoints is the point rather than the
+      # build: three separate faults got through a green build here, each of them silent. The image
+      # reinstalled devDependencies and grew 280MB; a fix for that left the hosted server unable to
+      # resolve ioredis; and the documented way to select the hosted entrypoint ran the stdio one.
+      - name: Container image serves both entrypoints
+        run: ./scripts/smoke-container.sh steel-mcp:ci

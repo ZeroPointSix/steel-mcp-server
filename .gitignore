@@ -91,6 +91,9 @@ out
 .nuxt
 dist
 
+# MCPB staging tree and packed bundle
+build/
+
 # Gatsby files
 .cache/
 # Comment in the public line in if your project uses Gatsby and not Next.js
@@ -128,5 +131,7 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
-package-lock.json
 claude_desktop_config.json
+
+# Agent worktrees: transient checkouts, and a nested biome.json in one aborts `biome check .`
+.claude/worktrees/
