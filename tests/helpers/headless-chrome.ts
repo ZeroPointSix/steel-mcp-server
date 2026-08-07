@@ -153,7 +153,10 @@ class CdpConnection {
  * through the app frame's own CDP session rather than through the host page.
  */
 export class BrowserPage {
+    /** Set when Chrome gave the app frame its own target, which it does only when it isolates it. */
     private appSession: string | null = null;
+    /** Set when the app frame shares the page's process, where it has a context but no target. */
+    private appContextId: number | null = null;
     /** Uncaught errors the app frame reported, so a broken app cannot pass quietly. */
     readonly appExceptions: string[] = [];
 
@@ -168,7 +171,14 @@ export class BrowserPage {
                 if (info?.type === 'iframe') this.appSession = event.params.sessionId as string;
                 return;
             }
-            if (event.method === 'Runtime.exceptionThrown' && event.sessionId === this.appSession) {
+            if (event.method === 'Runtime.executionContextCreated' && event.sessionId === this.pageSession) {
+                const context = event.params.context as { id?: number; origin?: string } | undefined;
+                // The app frame is sandboxed and so has an opaque origin, which Chrome reports as
+                // `://`. The host page around it is served over http and never matches.
+                if (context?.origin === '://' && typeof context.id === 'number') this.appContextId = context.id;
+                return;
+            }
+            if (event.method === 'Runtime.exceptionThrown' && this.raisedByApp(event)) {
                 const details = event.params.exceptionDetails as
                     | { text?: string; exception?: { description?: string } }
                     | undefined;
@@ -177,15 +187,23 @@ export class BrowserPage {
         });
     }
 
+    /** Whether an exception came from the app frame, under either way of reaching it. */
+    private raisedByApp(event: CdpEvent): boolean {
+        if (this.appSession !== null) return event.sessionId === this.appSession;
+        if (this.appContextId === null || event.sessionId !== this.pageSession) return false;
+        const details = event.params.exceptionDetails as { executionContextId?: number } | undefined;
+        return details?.executionContextId === this.appContextId;
+    }
+
     /** Loads `url` and waits until the app frame inside it has built its DOM. */
     async load(url: string): Promise<void> {
         await this.connection.send('Page.navigate', { url }, this.pageSession);
         await until(
             'the app frame to attach',
-            async () => this.appSession,
-            found => found !== null
+            async () => ({ session: this.appSession, context: this.appContextId }),
+            found => found.session !== null || found.context !== null
         );
-        await this.connection.send('Runtime.enable', {}, this.appSession!);
+        if (this.appSession !== null) await this.connection.send('Runtime.enable', {}, this.appSession);
         await until(
             'the app document to build its stage',
             () => this.evalInApp<boolean>("document.getElementById('stage') !== null").catch(() => false),
@@ -200,8 +218,9 @@ export class BrowserPage {
 
     /** Evaluates inside the app frame, the only way to see the DOM the app writes. */
     evalInApp<T>(expression: string): Promise<T> {
-        if (this.appSession === null) throw new Error('the app frame has not attached yet');
-        return this.evaluate<T>(this.appSession, expression);
+        if (this.appSession !== null) return this.evaluate<T>(this.appSession, expression);
+        if (this.appContextId !== null) return this.evaluate<T>(this.pageSession, expression, this.appContextId);
+        throw new Error('the app frame has not attached yet');
     }
 
     /** Clicks at a point in the top-level page, in its own CSS pixels. */
@@ -224,11 +243,12 @@ export class BrowserPage {
         await this.connection.send('Target.closeTarget', { targetId: this.targetId }).catch(() => undefined);
     }
 
-    private async evaluate<T>(sessionId: string, expression: string): Promise<T> {
+    private async evaluate<T>(sessionId: string, expression: string, contextId?: number): Promise<T> {
+        const call = { expression, returnByValue: true, awaitPromise: true };
         const reply = await this.connection.send<{
             result: { value?: unknown };
             exceptionDetails?: { text?: string; exception?: { description?: string } };
-        }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId);
+        }>('Runtime.evaluate', contextId === undefined ? call : { ...call, contextId }, sessionId);
         if (reply.exceptionDetails) {
             const details = reply.exceptionDetails;
             throw new Error(`evaluating in the browser threw: ${details.exception?.description ?? details.text}`);
@@ -253,11 +273,6 @@ export class HeadlessChrome {
             binary,
             [
                 '--headless=new',
-                // The suite reads the app through the frame's own CDP session, and Chrome only gives
-                // a sandboxed frame its own target when it isolates one. Whether it does by default
-                // varies by platform, and where it does not, the app frame never attaches and every
-                // test waits out its timeout.
-                '--enable-features=IsolateSandboxedIframes',
                 '--remote-debugging-port=0',
                 `--user-data-dir=${profile}`,
                 '--no-first-run',
@@ -315,13 +330,18 @@ export class HeadlessChrome {
             flatten: true,
         });
         await this.connection.send('Page.enable', {}, sessionId);
-        // The app frame is sandboxed, so Chrome gives it its own target; auto-attach is how a
-        // session for it arrives.
+        // Chrome reaches the sandboxed app frame in one of two ways, and which one it picks is its
+        // own decision about processes rather than anything the test controls. An isolated frame
+        // gets its own target, and auto-attach is how a session for it arrives. A frame sharing the
+        // page's process gets no target at all, and is reachable only as an execution context on
+        // this session. Both are asked for here, because a suite that needs one of them is a suite
+        // that passes on one machine and times out on another.
         await this.connection.send(
             'Target.setAutoAttach',
             { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
             sessionId
         );
+        await this.connection.send('Runtime.enable', {}, sessionId);
         const page = new BrowserPage(this.connection, targetId, sessionId);
         await page.load(url);
         return page;
@@ -351,7 +371,7 @@ export class HeadlessChrome {
         this.connection.close();
         this.process.kill('SIGKILL');
         await new Promise<void>(resolve => this.process.once('exit', () => resolve()));
-        rmSync(this.profile, { recursive: true, force: true, maxRetries: 20 });
+        await removeOnceSettled(this.profile);
     }
 
     /** A tab with no app frame in it, used only as a scratch canvas for JPEG encoding. */
@@ -365,6 +385,26 @@ export class HeadlessChrome {
             flatten: true,
         });
         return new BrowserPage(this.connection, targetId, sessionId);
+    }
+}
+
+/**
+ * Deletes a Chrome profile directory once Chrome has finished writing into it.
+ *
+ * Killing the process Node spawned does not kill the zygote and renderers it left behind, and they
+ * keep writing for a few milliseconds after their parent is gone. A single delete races them and
+ * fails with ENOTEMPTY, which `maxRetries` does not cover: the directory is being refilled rather
+ * than locked.
+ */
+async function removeOnceSettled(directory: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            rmSync(directory, { recursive: true, force: true, maxRetries: 20 });
+            return;
+        } catch (error) {
+            if (attempt >= 20) throw error;
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
     }
 }
 
