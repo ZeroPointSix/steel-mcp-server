@@ -14,12 +14,17 @@ trap cleanup EXIT INT TERM
 
 docker build -t "$IMAGE" .
 
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"container-smoke","version":"1"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | docker run -i --rm -e STEEL_API_KEY=smoke-not-a-real-key "$IMAGE" 2>/dev/null \
-  | grep -q '"steel_scrape"'
+stdio_output="$(
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"container-smoke","version":"1"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | docker run -i --rm -e STEEL_API_KEY=smoke-not-a-real-key "$IMAGE" 2>/dev/null
+)"
+if ! grep -q '"steel_scrape"' <<<"$stdio_output"; then
+  echo 'stdio entrypoint did not list steel_scrape' >&2
+  exit 1
+fi
 echo 'stdio entrypoint lists its tools'
 
 docker run -d --rm --name "$CONTAINER" -p "$PORT:8080" \
@@ -32,5 +37,9 @@ for _ in $(seq 1 30); do
 done
 curl -sf "http://localhost:$PORT/healthz" >/dev/null
 echo 'hosted entrypoint answers /healthz'
-docker logs "$CONTAINER" 2>&1 | grep -q 'Tracing was requested but could not start'
+container_logs="$(docker logs "$CONTAINER" 2>&1)"
+if ! grep -q 'Tracing was requested but could not start' <<<"$container_logs"; then
+  echo 'hosted entrypoint did not report the expected optional-tracing warning' >&2
+  exit 1
+fi
 echo 'a missing exporter stack is a warning, not a crash'

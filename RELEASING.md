@@ -98,6 +98,9 @@ The manually dispatched `release.yml`:
 
 Configure the GitHub `release` environment with a required reviewer before dispatching the workflow.
 Never approve the publish job until the downloaded candidate checksum and Desktop smoke pass.
+The candidate artifact is retained for seven days, so approve within that window. If it expires
+while approval is pending, rerun the workflow to build and smoke a new candidate; never substitute a
+local MCPB or publish without redoing the checksum and Desktop gates.
 
 ### When package.json already states the version you want to release
 

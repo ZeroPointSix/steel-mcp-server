@@ -250,6 +250,13 @@ describe('what a default install pays for', () => {
         expect(smoke, 'nothing exercises the hosted entrypoint').toContain('dist/hosted.js');
         expect(smoke, 'the hosted server is never asked whether it is serving').toContain('/healthz');
     });
+
+    it('captures container output before grep -q can close a pipe early', () => {
+        const smoke = readFileSync(fileURLToPath(new URL('../../scripts/smoke-container.sh', import.meta.url)), 'utf8');
+        expect(smoke).toContain('stdio_output="$(');
+        expect(smoke).toContain('container_logs="$(');
+        expect(smoke).not.toMatch(/docker (?:run|logs)[^\n]*\| grep -q/);
+    });
 });
 
 describe('dependency pins', () => {
@@ -420,8 +427,15 @@ describe('the release workflow', () => {
 
     it('is manually dispatched and restricted to main', () => {
         expect(release).toContain('workflow_dispatch:');
-        expect(release).toContain("github.ref == 'refs/heads/main'");
+        expect(release).toContain('validate-source:');
+        expect(release).toContain('if [ "$GITHUB_REF" != \'refs/heads/main\' ]');
+        expect(release).toContain('needs: validate-source');
         expect(release).not.toMatch(/push:\s*\n\s*tags:/);
+    });
+
+    it('documents the protected approval deadline imposed by artifact retention', () => {
+        expect(release).toContain('retention-days: 7');
+        expect(read('RELEASING.md')).toMatch(/retained for seven days.*approve within that window/s);
     });
 
     it('builds once and promotes the exact artifact behind a protected environment', () => {

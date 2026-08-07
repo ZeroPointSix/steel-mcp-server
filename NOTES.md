@@ -165,6 +165,21 @@ Both diagnostic endpoints were **enveloped, not arrays**, and our types were wro
 - A parsed `RequestFailed` payload: `{pageId, error: {message, url}, createdAt}`.
 - Undocumented anywhere in Steel's public docs — the shape above is purely observed.
 
+### Screenshot artifact response
+
+Measured 2026-08-07 against the exact `images.steel.dev/v1/static/*.png` URL returned during the
+Claude Desktop rc.1 smoke. A `HEAD` request returned HTTP 200 with:
+
+- `Content-Type: image/png` and the exact byte `Content-Length`;
+- `Content-Disposition: attachment; filename="<artifact>.png"`;
+- `Cache-Control: public, max-age=31536000, immutable`;
+- `Access-Control-Allow-Origin: *` and `X-Content-Type-Options: nosniff`.
+
+This validates the bounded screenshot embed's strict PNG check against one real production artifact,
+rather than only against the fake. Claude's MCP log recorded three result blocks for the same call,
+matching the text, MCP image, and attachment resource link. Re-probe if the artifact host or storage
+provider changes; an `application/octet-stream` response would intentionally degrade to link-only.
+
 **Live trace streaming** exists per Steel's own developer, at
 `wss://<STEEL_WS_URL>/v1/sessions/<id>/agent-traces?apiKey=<KEY>`, one JSON array of events per
 message, session must be live. **Not verified here.** Note the auth is the **org-wide key in a query
