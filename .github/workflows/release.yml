@@ -59,6 +59,10 @@ jobs:
         run: |
           command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
           command -v openssl
+          # Ubuntu 24.04 forbids unprivileged user namespaces, which Chrome's sandbox needs to start.
+          # Without this the browser dies before it writes its debugging port. Relaxing the runner
+          # keeps the sandbox on, which is what the suite runs with on a developer machine.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm run test:browser
       - run: npm run test:e2e
       - run: npm run budget
