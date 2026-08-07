@@ -1,5 +1,9 @@
 name: CI
 
+# Three independent jobs rather than one chain. The browser and E2E suites drive real browsers and
+# are the slowest and least stable part of the run; behind a single job their failure also withheld
+# the byte budget, conformance, the MCPB bundle and the container smoke, so a browser fault read as
+# "packaging is unverified" when packaging had simply never run.
 on:
   push:
     branches: [main]
@@ -7,6 +11,7 @@ on:
 
 jobs:
   check:
+    name: Checks and packaging
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,18 +30,6 @@ jobs:
         run: npm run test:unit
       - name: Integration tests
         run: npm run test:integration
-      - name: Browser-test prerequisites
-        run: |
-          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
-          command -v openssl
-          # Ubuntu 24.04 forbids unprivileged user namespaces, which Chrome's sandbox needs to start.
-          # Without this the browser dies before it writes its debugging port. Relaxing the runner
-          # keeps the sandbox on, which is what the suite runs with on a developer machine.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: MCP Apps in a real browser
-        run: npm run test:browser
-      - name: Real-browser E2E tests
-        run: npm run test:e2e
       - name: tools/list byte budget
         run: npm run budget
       - name: MCP conformance
@@ -50,3 +43,40 @@ jobs:
       # resolve ioredis; and the documented way to select the hosted entrypoint ran the stdio one.
       - name: Container image serves both entrypoints
         run: ./scripts/smoke-container.sh steel-mcp:ci
+
+  browser:
+    name: MCP Apps in a real browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Browser-test prerequisites
+        run: |
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          command -v openssl
+          # Ubuntu 24.04 forbids unprivileged user namespaces, which Chrome's sandbox needs to start.
+          # Without this the browser dies before it writes its debugging port. Relaxing the runner
+          # keeps the sandbox on, which is what the suite runs with on a developer machine.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Session viewer in a real browser
+        run: npm run test:browser
+
+  e2e:
+    name: Real-browser E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The leak test spawns dist/stdio.js, so this job builds even though the checks job also does.
+      - name: Build
+        run: npm run build
+      - name: Real-browser E2E tests
+        run: npm run test:e2e

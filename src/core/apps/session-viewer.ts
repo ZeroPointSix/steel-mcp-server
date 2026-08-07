@@ -1051,6 +1051,7 @@ function start(id){
     expiresAt = live.expiresAt;
     if (live.width > 0 && live.height > 0) stage.style.setProperty('--ar', String(live.width / live.height));
     // Now that the page's shape is known, ask the host for a box that shape fits in.
+    shapeKnown = true;
     askForRoom();
     connect(target.url);
   }, function(error){
@@ -1193,7 +1194,13 @@ control.addEventListener('click', function(){ setDriving(!driving); });
 // height the content needs, and offer the person the host's own full-screen mode.
 var displayMode = 'inline';
 
+// Set once the live view has answered, which is the first moment this view knows it has something to
+// size. A layout that settles before then — which a frame sharing the page's process does — would
+// otherwise ask the host for room against a placeholder ratio, and ask again for the real one.
+var shapeKnown = false;
+
 function askForRoom(){
+  if (!shapeKnown) return;
   var width = Math.round(document.documentElement.clientWidth || stage.clientWidth || 0);
   if (width < 1) return;
   var ratio = parseFloat(stage.style.getPropertyValue('--ar')) || 1.6;
