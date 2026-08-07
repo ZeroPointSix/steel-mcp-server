@@ -281,16 +281,19 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             await cdp.waitForConnection();
 
             const log = await viewer.log();
-            expect(log.messages.map(message => message.method)).toEqual([
+            const methods = log.messages.map(message => message.method);
+            // A size notification is sent once the live view names the page's shape: the host sizes
+            // an inline view for a card, and a browser needs the height its aspect ratio implies.
+            // When the frame observes that size is the renderer's business, so this asserts the
+            // handshake order without it and its arrival separately.
+            expect(methods.filter(method => method !== 'ui/notifications/size-changed')).toEqual([
                 'ui/initialize',
                 'ui/initialize',
                 'ui/initialize',
                 'ui/notifications/initialized',
                 'tools/call',
-                // Sent once the live view names the page's shape: the host sizes an inline view for
-                // a card, and a browser needs the height its aspect ratio implies.
-                'ui/notifications/size-changed',
             ]);
+            expect(methods).toContain('ui/notifications/size-changed');
             expect(
                 log.messages.filter(message => message.method === 'ui/initialize').map(m => m.params!.protocolVersion)
             ).toEqual(['2026-01-26', '2025-11-25', '2025-06-18']);

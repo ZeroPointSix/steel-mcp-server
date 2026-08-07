@@ -253,6 +253,11 @@ export class HeadlessChrome {
             binary,
             [
                 '--headless=new',
+                // The suite reads the app through the frame's own CDP session, and Chrome only gives
+                // a sandboxed frame its own target when it isolates one. Whether it does by default
+                // varies by platform, and where it does not, the app frame never attaches and every
+                // test waits out its timeout.
+                '--enable-features=IsolateSandboxedIframes',
                 '--remote-debugging-port=0',
                 `--user-data-dir=${profile}`,
                 '--no-first-run',
