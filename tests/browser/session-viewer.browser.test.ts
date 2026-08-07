@@ -20,7 +20,7 @@ const CYAN: [number, number, number] = [0, 255, 255];
 const JPEG_WIDTH = 64;
 const JPEG_HEIGHT = 40;
 
-let chrome: HeadlessChrome;
+let chrome: HeadlessChrome | undefined;
 let magentaJpeg: string;
 let cyanJpeg: string;
 
@@ -35,7 +35,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-    if (available) await chrome.close();
+    // Guarded on the browser rather than on `available`, because a launch that threw leaves the
+    // prerequisites present and the browser unset, and closing it then buries the real failure.
+    if (chrome !== undefined) await chrome.close();
 });
 
 afterEach(async () => {
@@ -54,8 +56,14 @@ async function startHost(options: FakeHostOptions): Promise<FakeMcpAppHost> {
     return host;
 }
 
+/** The browser this run launched. A test only reaches it after `beforeAll` succeeded. */
+function browser(): HeadlessChrome {
+    if (chrome === undefined) throw new Error('The session viewer suite ran a test without a launched Chrome.');
+    return chrome;
+}
+
 async function openViewer(host: FakeMcpAppHost): Promise<HostedViewer> {
-    const viewer = await host.open(chrome);
+    const viewer = await host.open(browser());
     openedByTest.push(() => viewer.page.close());
     return viewer;
 }

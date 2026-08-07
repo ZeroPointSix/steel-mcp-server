@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 
+/**
+ * How much of Chrome's stderr to keep for a failure message. A browser that grumbles for the whole
+ * startup timeout must not grow the heap, and only the last lines say why it stopped.
+ */
+const STDERR_TAIL_CHARS = 4096;
+
 /** Browsers that can run the app, in the order they are preferred. `CHROME_PATH` wins over all. */
 const CHROME_CANDIDATES = [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -265,11 +271,26 @@ export class HeadlessChrome {
             { stdio: ['ignore', 'ignore', 'pipe'] }
         );
         // Chrome writes its startup banner and any GPU grumbling to stderr; draining keeps the pipe
-        // from filling and the test output clean.
-        child.stderr?.resume();
+        // from filling and the test output clean. The tail is kept rather than discarded, because a
+        // browser that refuses to start says why here and nowhere else.
+        let stderr = '';
+        child.stderr?.setEncoding('utf8');
+        child.stderr?.on('data', (chunk: string) => {
+            stderr = (stderr + chunk).slice(-STDERR_TAIL_CHARS);
+        });
+        // A browser that dies on startup never writes the port file, so without this the wait runs
+        // its full timeout and reports a deadline instead of the exit that caused it.
+        let exited: string | undefined;
+        child.on('exit', (code, signal) => {
+            exited = signal === null ? `exited with code ${code}` : `was killed by ${signal}`;
+        });
 
         try {
-            const connection = await CdpConnection.open(await readDebuggerUrl(profile, 20_000));
+            const url = await readDebuggerUrl(profile, 20_000, {
+                exited: () => exited,
+                stderr: () => stderr,
+            });
+            const connection = await CdpConnection.open(url);
             return new HeadlessChrome(child, connection, profile);
         } catch (error) {
             child.kill('SIGKILL');
@@ -342,13 +363,21 @@ export class HeadlessChrome {
     }
 }
 
+/** What a launching Chrome has said and whether it is still alive, so a failure can name its cause. */
+interface LaunchWatch {
+    /** How the process ended, or `undefined` while it is still running. */
+    exited: () => string | undefined;
+    /** The tail of everything the process wrote to stderr. */
+    stderr: () => string;
+}
+
 /**
  * Reads the debugging endpoint Chrome writes into its profile once it is listening.
  *
  * Asking for port 0 and reading the port back is what keeps two runs on one machine from fighting
  * over a hardcoded port.
  */
-async function readDebuggerUrl(profile: string, timeoutMs: number): Promise<string> {
+async function readDebuggerUrl(profile: string, timeoutMs: number, watch: LaunchWatch): Promise<string> {
     const file = join(profile, 'DevToolsActivePort');
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -358,7 +387,19 @@ async function readDebuggerUrl(profile: string, timeoutMs: number): Promise<stri
         } catch {
             // Chrome has not written the file yet.
         }
+        const ending = watch.exited();
+        if (ending !== undefined) {
+            throw new Error(`Chrome ${ending} before it started listening.${reportStderr(watch.stderr())}`);
+        }
         await new Promise(resolve => setTimeout(resolve, 50));
     }
-    throw new Error(`Chrome did not start listening within ${timeoutMs}ms (no ${file})`);
+    throw new Error(
+        `Chrome did not start listening within ${timeoutMs}ms (no ${file}).${reportStderr(watch.stderr())}`
+    );
+}
+
+/** Renders the captured stderr for an error message, saying so plainly when there was none. */
+function reportStderr(stderr: string): string {
+    const text = stderr.trim();
+    return text === '' ? ' It wrote nothing to stderr.' : `\nChrome stderr:\n${text}`;
 }
