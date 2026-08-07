@@ -155,8 +155,16 @@ class CdpConnection {
 export class BrowserPage {
     /** Set when Chrome gave the app frame its own target, which it does only when it isolates it. */
     private appSession: string | null = null;
-    /** Set when the app frame shares the page's process, where it has a context but no target. */
-    private appContextId: number | null = null;
+    /** The first child frame of the host document, which is the app. */
+    private appFrameId: string | null = null;
+    /** The default execution context of every frame reported on this page's session, by frame. */
+    private readonly contextByFrame = new Map<string, number>();
+
+    /** The app frame's context, used when the frame shares the page's process and so has no target. */
+    private get appContextId(): number | null {
+        if (this.appFrameId === null) return null;
+        return this.contextByFrame.get(this.appFrameId) ?? null;
+    }
     /** Uncaught errors the app frame reported, so a broken app cannot pass quietly. */
     readonly appExceptions: string[] = [];
 
@@ -171,11 +179,28 @@ export class BrowserPage {
                 if (info?.type === 'iframe') this.appSession = event.params.sessionId as string;
                 return;
             }
+            if (event.method === 'Page.frameAttached' && event.sessionId === this.pageSession) {
+                // The host document holds exactly one child frame, and it is the app.
+                this.appFrameId ??= event.params.frameId as string;
+                return;
+            }
             if (event.method === 'Runtime.executionContextCreated' && event.sessionId === this.pageSession) {
-                const context = event.params.context as { id?: number; origin?: string } | undefined;
-                // The app frame is sandboxed and so has an opaque origin, which Chrome reports as
-                // `://`. The host page around it is served over http and never matches.
-                if (context?.origin === '://' && typeof context.id === 'number') this.appContextId = context.id;
+                const context = event.params.context as
+                    | { id?: number; auxData?: { frameId?: string; isDefault?: boolean } }
+                    | undefined;
+                const frameId = context?.auxData?.frameId;
+                // Contexts are kept by frame rather than matched against the app frame as they
+                // arrive, because the frame one belongs to may not have been announced yet.
+                if (frameId !== undefined && context?.auxData?.isDefault === true && typeof context.id === 'number') {
+                    this.contextByFrame.set(frameId, context.id);
+                }
+                return;
+            }
+            if (event.method === 'Runtime.executionContextDestroyed' && event.sessionId === this.pageSession) {
+                const destroyed = event.params.executionContextId as number | undefined;
+                for (const [frameId, contextId] of this.contextByFrame) {
+                    if (contextId === destroyed) this.contextByFrame.delete(frameId);
+                }
                 return;
             }
             if (event.method === 'Runtime.exceptionThrown' && this.raisedByApp(event)) {

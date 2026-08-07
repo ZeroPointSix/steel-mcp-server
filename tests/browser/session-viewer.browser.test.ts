@@ -24,8 +24,8 @@ let chrome: HeadlessChrome | undefined;
 let magentaJpeg: string;
 let cyanJpeg: string;
 
-/** Everything one test opened, torn down newest first however the test ended. */
-const openedByTest: Array<() => Promise<void>> = [];
+/** Everything the running test opened, torn down newest first however the test ended. */
+let openedByTest: Array<() => Promise<void>> = [];
 
 beforeAll(async () => {
     if (!available) return;
@@ -41,7 +41,12 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-    while (openedByTest.length > 0) await openedByTest.pop()!();
+    // Taken before anything is awaited. Vitest does not cancel a hook it timed out, so one that
+    // resumes later would otherwise still be holding the list and would tear down the resources of
+    // whichever test is running by then, reporting the failure against the wrong test.
+    const opened = openedByTest;
+    openedByTest = [];
+    while (opened.length > 0) await opened.pop()!();
 });
 
 async function startCdp(options: FakeCdpOptions = {}): Promise<FakeCdpServer> {
