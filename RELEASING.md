@@ -13,8 +13,8 @@ between packages in exchange for nothing.
 | Artifact | Built from | For | Published by |
 |---|---|---|---|
 | **MCPB bundle** `steel-mcp-<version>.mcpb` | `dist/stdio.js` | Claude for macOS and Windows | `release.yml`, attached to the GitHub release |
-| **npm package** `steel-mcp` | `bin` → `dist/stdio.js`, plus `exports` for embedding | `npx`, CLI hosts, anyone importing the core | `release.yml`, when `PUBLISH_NPM` is on |
-| **Container image** | `dist/stdio.js` by default, `docker run <image> dist/hosted.js` for the HTTP endpoint | Self-hosters | `release.yml`, when `PUBLISH_DOCKER` is on |
+| **npm package** `steel-mcp` | `bin` → `dist/stdio.js`, plus `exports` for embedding | `npx`, CLI hosts, anyone importing the core | Not published by the rc.1 workflow |
+| **Container image** | `dist/stdio.js` by default, `docker run <image> dist/hosted.js` for the HTTP endpoint | Self-hosters | Built as a gate; not published by the rc.1 workflow |
 | **`mcp.steel.dev`** | `dist/hosted.js` | Steel's own hosted service | Not wired up here; deployed from the image |
 
 The entrypoints, since three of them have similar names:
@@ -28,7 +28,7 @@ The entrypoints, since three of them have similar names:
 
 ## Dependencies are split on purpose
 
-`dependencies` holds only what `dist/stdio.js` statically imports — four packages. Everything the
+`dependencies` holds only what `dist/stdio.js` imports — four packages. Everything the
 hosted path needs is an **optional `peerDependency`**, so it is absent from a default install:
 
 | Package | Needed by | Why it is not a dependency |
@@ -43,6 +43,7 @@ installs `optionalDependencies` by default, which is why the exporter stack reac
 `peerDependenciesMeta.<name>.optional` actually keeps a package out of a default install.
 
 All four are also in `devDependencies`, so this repository builds, typechecks and tests against them.
+The dashboard-only rc.1 replay path has no Hls.js dependency or staged player asset.
 Consequences to remember:
 
 - **A self-hoster running `dist/hosted.js` must install them.** The README's hosted section says so.
@@ -67,60 +68,56 @@ npm run sync:version -- --check # fail if any disagree; this is what CI runs
 
 Tests assert all four agree, so drift fails a pull request rather than a release.
 
+## Lockfile and install policy
+
+`package-lock.json` is committed. Dependency changes must update it. Local development may use
+`npm install`, while clean CI, release verification and the Docker builder use `npm ci` against that
+tracked graph. MCPB staging is the deliberate exception: its generated package manifest is narrower
+than the root manifest, so `scripts/pack-mcpb.sh` uses `npm install` inside the staging directory.
+
 ## Cutting a release
 
 ```bash
 # 1. On a clean tree, with the checks passing.
 npm run typecheck && npm run lint && npm test && npm run budget && npm run conformance
 
-# 2. Bump. This rewrites the other three files, commits, and tags.
-npm version patch     # or minor / major / 2.1.0
+# 2. Bump on a normal reviewed branch. This rewrites the other version surfaces.
+npm version --no-git-tag-version patch     # or minor / major / 2.1.0
 
-# 3. Push the commit and the tag together.
-git push --follow-tags
+# 3. Merge the reviewed commit to main, then manually dispatch release.yml for that exact SHA.
 ```
 
-The tag starts `release.yml`, which:
+The manually dispatched `release.yml`:
 
-1. **Refuses a tag that disagrees with `package.json`** before building anything. A published tag
-   naming a version nobody shipped is the one mistake here that cannot be walked back.
-2. Runs every gate `ci.yml` runs — a test asserts the two lists match, so a check added to CI cannot
-   be quietly skipped on the artifact that actually reaches users.
-3. Packs the MCPB bundle and **attaches it to the GitHub release**. Without that the only way to get
-   the file is to clone and build, which no Claude Desktop user will do.
-4. Publishes to npm and ghcr **only if** the repository variable `PUBLISH_NPM` or `PUBLISH_DOCKER` is
-   `true`. Both are off; `NPM_TOKEN` has to exist as a secret before the npm one will work.
+1. Runs every automated gate from the exact `main` SHA and packs the MCPB once.
+2. Uploads that MCPB with `SHA256SUMS`, then pauses at the protected `release` environment so an
+   operator can install and smoke those exact bytes in Claude Desktop.
+3. After approval, downloads and verifies the same artifact, creates an annotated immutable tag at
+   the recorded SHA, and publishes a GitHub prerelease. It never rebuilds in the publish job.
+4. Does not publish npm or GHCR. Those require a separate ownership and distribution decision.
 
-Prefer `npm version` over tagging by hand: it is what keeps the four files together. The exception is
-below, and the tag check in step 1 is what makes it safe.
+Configure the GitHub `release` environment with a required reviewer before dispatching the workflow.
+Never approve the publish job until the downloaded candidate checksum and Desktop smoke pass.
 
 ### When package.json already states the version you want to release
 
-`npm version 2.0.0` fails with `Version not changed` when `package.json` is already at 2.0.0, so the
-flow above cannot produce that tag. This is the situation for **2.0.0 itself**, which was set by
-editing the files rather than by bumping.
+`npm version 2.0.0-rc.1` fails with `Version not changed` when `package.json` already has that value,
+so the flow above cannot produce that tag. This release candidate was set during preparation rather
+than by running the version lifecycle.
 
-Tag it directly, once:
+Do not tag it locally. Confirm the version surfaces and dispatch the protected workflow after merge:
 
 ```bash
-npm run sync:version -- --check   # the four files agree
-git tag -a v2.0.0 -m 'v2.0.0'
-git push --follow-tags
+npm run sync:version -- --check   # the generated version surfaces agree
 ```
 
-`release.yml` still refuses the tag if it disagrees with `package.json`, so the guarantee that matters
-holds either way — what you lose by tagging by hand is only the automatic bump, and here there is
-nothing to bump. Every release after this one goes through `npm version`.
-
-Worth knowing before the first one: **`release.yml` has never run.** Tagging a throwaway prerelease
-(`npm version 2.0.1-rc.1`) exercises the whole workflow — including the publish steps' `if` guards —
-without putting a wrong release in front of anyone.
+The protected publish job creates `v2.0.0-rc.1` only after approval and marks its GitHub release as a
+prerelease that is not Latest. If anything is wrong after publication, prepare rc.2; never move rc.1.
 
 ## Before the first release
 
-- [ ] `PUBLISH_NPM` + an `NPM_TOKEN` secret, once the name `steel-mcp` is claimed. It is unpublished
-      today, so the README tells everyone to install from source.
-- [ ] `PUBLISH_DOCKER`, if `ghcr.io/steel-dev/steel-mcp-server` is the image you want.
+- [ ] Protect the GitHub `release` environment with a required reviewer.
+- [ ] Decide npm and GHCR ownership and prerelease tagging separately; rc.1 intentionally publishes neither.
 - [ ] The MCPB directory submission has its own checklist in [SUBMISSION.md](SUBMISSION.md).
 - [ ] The registry record, the DNS verification ticket, and the rest of distribution are in
       [RESEARCH.md §8](RESEARCH.md#8-distribution-checklist).

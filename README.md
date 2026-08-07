@@ -5,9 +5,9 @@ Give Claude, Cursor, VS Code, or another MCP client a Steel-managed Chromium bro
 through interactive sites by clicking, typing, and filling forms.
 
 Unlike v1's screenshot-and-numbered-box loop, v2 reads pages as markdown or accessibility trees,
-keeps screenshots out of the context by default, and makes browser sessions explicit.
+shows small screenshots through MCP image blocks without using pixels for interaction, and makes browser sessions explicit.
 
-> **Status:** `2.0.0`. Run the server locally over stdio, or run the hosted endpoint
+> **Status:** `2.0.0-rc.1`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
 
 ## Example prompts
@@ -18,16 +18,18 @@ keeps screenshots out of the context by default, and makes browser sessions expl
 | "Find and compare prices for this product across these three shops." | Three stateless reads, or a session where a shop needs JavaScript to render |
 | "Sign in to my account and check the total on last month's invoice." | A session, a snapshot, and a handoff to you at the login wall — the server never guesses at a password |
 | "Fill out this application form with the details from my CV." | A snapshot to find the fields, then `steel_act` per field, or one `steel_batch` for the lot |
-| "Screenshot the top of this article for a slide." | One `steel_screenshot`, returned as a link rather than base64 |
+| "Screenshot the top of this article for a slide." | One `steel_screenshot`, shown inline when small enough and always linked for download |
+| "Show me what happened in my last browser session." | `steel_session_diagnostics` reads the latest released session. No new browser is started |
+| "Replay my last finished browser session." | `steel_session_replay` returns the latest finished session's Steel dashboard link. No browser is started |
 
 ## What it exposes
 
-The default `browse` profile is thirteen tools:
+The default `browse` profile is fourteen tools:
 
 | Tool | What it does |
 |---|---|
 | `steel_scrape` | Read a page as markdown or HTML. Starts no browser session |
-| `steel_screenshot` | Capture a page; returns a link, not megabytes of base64 |
+| `steel_screenshot` | Capture a page; embed a bounded preview when possible and retain the attachment download link |
 | `steel_pdf` | Render a page to PDF and return a link |
 | `steel_session_create` | Start a browser session you can interact with |
 | `steel_session_release` | Shut it down and stop the meter |
@@ -36,12 +38,13 @@ The default `browse` profile is thirteen tools:
 | `steel_find` | Locate one element without reading the whole page |
 | `steel_act` | Click, type, fill a form, select, hover, scroll, press a key, go back, dismiss overlays |
 | `steel_wait_for` | Wait for named text, a selector, or a URL |
-| `steel_session_diagnostics` | A timestamped timeline of what the browser actually did |
+| `steel_session_diagnostics` | Read a live or finished session's timestamped activity without starting a browser |
+| `steel_session_replay` | On an explicit watch/replay request, return a finished session's safe dashboard link |
 | `steel_batch` | Run several steps in one call, with one page read at the end |
 | `steel_session_live_view` | Feeds the inline viewer its connection details. Hosts hide it from the model |
 
 Set `STEEL_PROFILE=scrape` to expose only the three stateless read tools. They never start a browser
-session. The default `browse` profile adds the ten session tools above.
+session. The default `browse` profile adds the eleven session tools above.
 
 ## Watching, and taking over
 
@@ -56,6 +59,11 @@ That is also what happens when the agent meets a login wall or a CAPTCHA: instea
 password, the tool answers `input_required` and points at the viewer, so a person signs in and the
 agent carries on. On a host without MCP Apps, nothing is lost — the same tools return text, and
 `viewer_url` opens the same browser in a tab.
+
+For a browser that has already finished, explicitly ask to watch or replay it and pass its Steel
+dashboard UUID to `steel_session_replay`, or omit the UUID to select the latest released session.
+This release returns a sanitized Steel dashboard link. Inline finished-session playback is disabled
+until its browser asset can be hosted immutably without inflating the MCP Apps payload.
 
 ## Quick start
 
@@ -246,8 +254,11 @@ to locate that element without returning the whole page. Both tools assign `@eN`
 elements the server can target. Elements without a reference cannot be clicked.
 
 Actions do not return another full snapshot unless you ask for one. Instead, they report what
-changed. If an action says nothing changed, take a fresh snapshot instead of repeating it. If a site
-appears to block you, `steel_session_diagnostics` shows what the browser did, with timestamps.
+changed. If an action says nothing changed, take a fresh snapshot instead of repeating it.
+`steel_session_diagnostics` accepts a live MCP `session_id`, a finished session UUID from the Steel
+dashboard, or no id to inspect the most recent released session. It never starts a browser. Direct
+clicks, scrolling and typing performed through the live viewer travel over CDP and may be absent
+from its agent-trace timeline; hidden counts refer only to routine browser network Request/Response logs.
 
 To watch or take over a cloud browser, open the `viewer_url` returned by `steel_session_create`.
 Active sessions also appear in the [Steel dashboard](https://app.steel.dev).
@@ -287,7 +298,9 @@ balance on Launch; free credits do not count.
 removed, or the element changed role or accessible name — and what to call to recover.
 
 **A session seems to have vanished.** Steel releases a session after two minutes with no activity,
-and at the plan's hard time limit. Create a new one.
+and at the plan's hard time limit. Create a new one only if you need to interact again. To read the
+old activity, call `steel_session_diagnostics` with its dashboard UUID, or omit the id for the latest
+released session.
 
 **A click reports that nothing changed.** It probably landed on something else. If an overlay is
 covering the target the error names it; run `steel_act` with `dismiss_overlays`, then retry.

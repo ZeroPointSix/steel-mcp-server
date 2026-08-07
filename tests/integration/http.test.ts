@@ -3,6 +3,7 @@
 import { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/core/config.js';
+import { SteelToolError } from '../../src/core/errors.js';
 import { InMemoryRateLimiter, RATE_LIMIT_NAME, type RateLimitPolicy } from '../../src/core/rate-limit.js';
 import { principalFromCredential } from '../../src/core/registry.js';
 import type { CreateSessionRequest, SteelSession } from '../../src/core/steel/types.js';
@@ -316,12 +317,89 @@ describe('hosted HTTP session isolation', () => {
             result: { isError?: boolean; content?: Array<{ text?: string }> };
         };
         expect(stranger.result.isError).toBe(true);
-        expect(stranger.result.content?.map(block => block.text).join('\n')).toMatch(/No live browser session/);
+        expect(stranger.result.content?.map(block => block.text).join('\n')).toMatch(
+            /MCP session handle.*Steel dashboard/i
+        );
 
         const releaseResponse = await handler.fetch(
             toolRequest('ste-owner', 'steel_session_release', { session_id: sessionId })
         );
         expect(releaseResponse.status).toBe(200);
+    });
+
+    it('authorizes a dashboard replay UUID per credential without reading private HLS data', async () => {
+        const replayId = '33333333-3333-4333-8333-333333333333';
+        const privateUpstreamMarker = 'session belongs to private tenant org-456';
+        const ownerApi = new FakeSteelApi({
+            sessionsById: {
+                [replayId]: {
+                    id: replayId,
+                    status: 'released',
+                    headless: false,
+                    sessionViewerUrl: `https://app.steel.dev/sessions/${replayId}`,
+                },
+            },
+            hlsBySession: { [replayId]: '#EXTM3U\n#EXT-X-ENDLIST' },
+        });
+        const strangerApi = new FakeSteelApi({
+            sessionsById: {
+                [replayId]: new SteelToolError(privateUpstreamMarker, { code: 'forbidden' }),
+            },
+        });
+        const runtime = new HostedRuntime({
+            configForCredential: credential => loadConfig({ STEEL_API_KEY: credential }),
+            createApi: config => {
+                if (config.apiKey === 'ste-replay-owner') return ownerApi;
+                if (config.apiKey === 'ste-replay-stranger') return strangerApi;
+                throw new Error('Unexpected test credential.');
+            },
+            createPool: () => testDeps().pool,
+        });
+        const handler = createSteelHttpHandler({
+            allowedHostnames: ['mcp.steel.dev'],
+            allowedOriginHostnames: ['steel.dev'],
+            depsForRequest: runtime.depsForRequest,
+        });
+        openHandlers.push({
+            close: async () => {
+                await handler.close();
+                await runtime.close();
+            },
+        });
+
+        const ownerResponse = await handler.fetch(
+            toolRequest('ste-replay-owner', 'steel_session_replay', { steel_session_id: replayId })
+        );
+        const owner = (await ownerResponse.json()) as { result: { isError?: boolean; structuredContent?: unknown } };
+        expect(ownerResponse.status).toBe(200);
+        expect(owner.result.isError).not.toBe(true);
+        expect(ownerApi.sessionReads).toEqual([replayId]);
+        expect(ownerApi.hlsReads).toEqual([]);
+        expect(JSON.stringify(owner.result.structuredContent)).not.toMatch(/manifest|kind.*hls|steel\/replay/i);
+
+        const strangerResponse = await handler.fetch(
+            toolRequest('ste-replay-stranger', 'steel_session_replay', { steel_session_id: replayId })
+        );
+        const stranger = (await strangerResponse.json()) as {
+            result: {
+                isError?: boolean;
+                content?: Array<{ text?: string }>;
+                structuredContent?: { error?: { code?: string } };
+            };
+        };
+        const strangerVisible = JSON.stringify({
+            content: stranger.result.content,
+            structuredContent: stranger.result.structuredContent,
+        });
+
+        expect(strangerResponse.status).toBe(200);
+        expect(stranger.result.isError).toBe(true);
+        expect(stranger.result.structuredContent?.error?.code).toBe('not_found');
+        expect(strangerVisible).toMatch(/No Steel session with that UUID was found for this credential/i);
+        expect(strangerVisible).not.toContain(privateUpstreamMarker);
+        expect(strangerVisible).not.toContain('#EXTM3U');
+        expect(strangerApi.sessionReads).toEqual([replayId]);
+        expect(strangerApi.hlsReads).toEqual([]);
     });
 
     it('serves a handle from a replica that did not create it, with no sticky routing', async () => {

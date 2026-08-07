@@ -1,5 +1,5 @@
 // ABOUTME: Session lifecycle tools: explicit create with both Steel timeouts set, a release that
-// ABOUTME: captures context first, the diagnostics timeline, and the app-only live-view endpoint.
+// ABOUTME: captures context first, live-or-finished diagnostics, and the app-only live-view endpoint.
 import { z } from 'zod';
 import { SESSION_VIEWER_URI } from '../apps/session-viewer.js';
 import { resolveInactivityTimeout } from '../config.js';
@@ -47,11 +47,9 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Start a browser session',
             description:
-                'Start a real browser you can navigate, click and type in. This is a billed resource: it is ' +
-                'charged per browser-minute and occupies one of your plan concurrency slots until it is released. ' +
-                'Call steel_session_release as soon as you are done. If nobody touches it for two minutes, or it ' +
-                'reaches the plan time limit, Steel releases it automatically and any refs you hold stop working. ' +
-                'For anything you only need to read, use steel_scrape instead — it starts no session.',
+                'Start a billed browser for interaction. It occupies a concurrency slot until ' +
+                'steel_session_release; call that as soon as you finish. Steel also releases it after two idle ' +
+                'minutes or the plan limit. Prefer steel_scrape for reads.',
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
             inputSchema: z.object({
                 region: z.string().optional().describe('Region to run the browser in, e.g. lax, iad, fra.'),
@@ -75,7 +73,10 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                 viewport: z
                     .object({ width: z.number().int().positive(), height: z.number().int().positive() })
                     .optional()
-                    .describe('Viewport size in CSS pixels. Defaults to 1280x720.'),
+                    .describe(
+                        'Desktop viewport size in CSS pixels; desktop defaults to 1280x720. For a genuine mobile ' +
+                            'fingerprint, user agent and touch environment, use device=mobile instead of only resizing.'
+                    ),
                 timeout_ms: z
                     .number()
                     .int()
@@ -266,7 +267,7 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
                     {
                         result: 'Released the browser session and stopped the meter.',
                         pageState: finalUrl ? `${finalUrl}${title ? ` — ${title}` : ''}` : undefined,
-                        notes: record.viewerUrl ? [`Recording and replay: ${record.viewerUrl}`] : undefined,
+                        notes: record.viewerUrl ? [`Steel dashboard: ${record.viewerUrl}`] : undefined,
                     },
                     { session_id: args.session_id, released: true, final_url: finalUrl, title }
                 );
@@ -390,34 +391,106 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
     );
 }
 
+const diagnosticsInputSchema = z
+    .object({
+        session_id: sessionIdSchema.optional().describe('Live id from steel_session_create.'),
+        steel_session_id: z.string().uuid().optional().describe('Finished Steel dashboard UUID.'),
+        since: z.string().optional().describe('Only events at or after this ISO-8601 time.'),
+        max_tokens: maxTokensSchema,
+        cursor: cursorSchema,
+    })
+    .refine(args => !(args.session_id && args.steel_session_id), {
+        message: 'Pass session_id or steel_session_id, not both.',
+        path: ['steel_session_id'],
+    });
+
+interface DiagnosticsTarget {
+    /** The id safe to echo back: an opaque live handle, or an already-supplied finished-session id. */
+    reference: string;
+    /** The authenticated Steel REST target. Never returned for a live opaque handle. */
+    steelSessionId: string;
+    kind: 'live_handle' | 'historical_id' | 'latest_released';
+    selectionNote?: string | undefined;
+}
+
+/** Resolves a live handle, a dashboard UUID, or the caller's newest released Steel session. */
+async function resolveDiagnosticsTarget(
+    deps: ServerDeps,
+    args: { session_id?: string | undefined; steel_session_id?: string | undefined },
+    signal?: AbortSignal
+): Promise<DiagnosticsTarget> {
+    if (args.steel_session_id) {
+        // Steel authorizes this UUID against the API credential on both diagnostics endpoints. A
+        // raw id is never resolved through our live-handle registry because finished records are
+        // deliberately absent there.
+        return {
+            reference: args.steel_session_id,
+            steelSessionId: args.steel_session_id,
+            kind: 'historical_id',
+        };
+    }
+
+    if (args.session_id) {
+        try {
+            const record = await deps.registry.resolve(args.session_id, deps.principal);
+            return { reference: args.session_id, steelSessionId: record.steelSessionId, kind: 'live_handle' };
+        } catch (error) {
+            if (error instanceof SteelToolError && (error.code === 'not_found' || error.code === 'session_expired')) {
+                throw new SteelToolError(
+                    'That MCP session handle is no longer live. Pass steel_session_id with the session UUID ' +
+                        'shown in the Steel dashboard, or omit both ids to inspect the most recent released session. ' +
+                        'A replacement browser cannot recover these logs.',
+                    { code: error.code }
+                );
+            }
+            throw error;
+        }
+    }
+
+    const recent = await deps.api.listSessions({ status: 'released', limit: 1 }, signal);
+    const latest = recent.sessions[0];
+    if (!latest) {
+        throw new SteelToolError(
+            'No released Steel session was found for this credential. Pass steel_session_id if you meant a ' +
+                'specific finished or failed session. A replacement browser would not recover historical logs.',
+            { code: 'not_found' }
+        );
+    }
+    return {
+        reference: latest.id,
+        steelSessionId: latest.id,
+        kind: 'latest_released',
+        selectionNote: `Reading the most recent released Steel session: ${latest.id}${
+            latest.createdAt ? ` (created ${latest.createdAt})` : ''
+        }.`,
+    };
+}
+
 export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): void {
     host.registerTool(
         'steel_session_diagnostics',
         {
             title: 'Explain what a browser session did',
             description:
-                'Show a timeline of what actually happened in a session — every click, input and navigation with ' +
-                'timestamps, plus browser errors. Use this when an action seemed to work but the page did not ' +
-                'change, or when a site behaves differently than expected, instead of guessing.',
+                'Read live or finished session activity; never starts a browser. Use session_id for live, ' +
+                'steel_session_id for a dashboard UUID, or neither for latest released.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                since: z.string().optional().describe('ISO-8601 timestamp; only show events at or after this time.'),
-                max_tokens: maxTokensSchema,
-                cursor: cursorSchema,
-            }),
+            inputSchema: diagnosticsInputSchema,
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_diagnostics', ctx.mcpReq, async () => {
-                const record = await deps.registry.resolve(args.session_id, deps.principal);
-                const [timeline, logs] = await Promise.all([
-                    deps.api
-                        .getAgentTraces(record.steelSessionId, ctx.mcpReq.signal)
-                        .catch(() => ({ events: [] }) as AgentTraceTimeline),
-                    deps.api
-                        .getSessionLogs(record.steelSessionId, ctx.mcpReq.signal)
-                        .catch(() => ({ events: [] }) as SessionLogTimeline),
+                const target = await resolveDiagnosticsTarget(deps, args, ctx.mcpReq.signal);
+                const [timelineRead, logsRead] = await Promise.allSettled([
+                    deps.api.getAgentTraces(target.steelSessionId, ctx.mcpReq.signal),
+                    deps.api.getSessionLogs(target.steelSessionId, ctx.mcpReq.signal),
                 ]);
+                // A 403/404 on both endpoints means the historical target is inaccessible, not that
+                // it has an empty timeline. Keep the log error because logs are the narrower promise
+                // this tool makes; the trace endpoint may be unsupported on older deployments.
+                if (timelineRead.status === 'rejected' && logsRead.status === 'rejected') throw logsRead.reason;
+                const timeline: AgentTraceTimeline =
+                    timelineRead.status === 'fulfilled' ? timelineRead.value : { events: [] };
+                const logs: SessionLogTimeline = logsRead.status === 'fulfilled' ? logsRead.value : { events: [] };
 
                 const since = args.since ? Date.parse(args.since) : Number.NEGATIVE_INFINITY;
                 const atOrAfter = (timestamp: string | undefined) =>
@@ -468,7 +541,17 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                     }),
                 ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-                const notes: string[] = [];
+                const notes: string[] = target.selectionNote ? [target.selectionNote] : [];
+                notes.push(
+                    'Takeover clicks, scrolling and typing performed through the live viewer may be absent: those ' +
+                        'direct CDP interactions do not necessarily enter Steel agent traces.'
+                );
+                if (timelineRead.status === 'rejected') {
+                    notes.push('Steel could not return agent traces for this session; browser logs are shown below.');
+                }
+                if (logsRead.status === 'rejected') {
+                    notes.push('Steel could not return browser logs for this session; agent traces are shown below.');
+                }
                 if (timeline.hasMore || logs.hasMore) {
                     // Distinct from the cursor below: this is Steel holding activity back, not this
                     // response running out of token budget.
@@ -479,7 +562,7 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                 }
                 if (hiddenLogCount > 0) {
                     notes.push(
-                        `Hid ${hiddenLogCount} routine request and response log entries. Failures and ` +
+                        `Hid ${hiddenLogCount} routine browser network Request/Response log entries. Failures and ` +
                             'navigations are kept.'
                     );
                 }
@@ -501,7 +584,7 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                         // server's own prose and is left outside the fence.
                         snapshot: events.length
                             ? fenceUntrusted(page.text, {
-                                  source: `steel-session:${args.session_id}`,
+                                  source: `steel-session:${target.reference}`,
                                   fetchedAt: deps.now().toISOString(),
                               })
                             : page.text,
@@ -509,7 +592,9 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
                         pagination: page.truncated ? `Continue with cursor="${page.nextCursor}".` : undefined,
                     },
                     {
-                        session_id: args.session_id,
+                        ...(target.kind === 'live_handle'
+                            ? { session_id: target.reference }
+                            : { steel_session_id: target.steelSessionId }),
                         event_count: events.length,
                         has_more: (timeline.hasMore ?? false) || (logs.hasMore ?? false),
                         hidden_log_count: hiddenLogCount,

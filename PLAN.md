@@ -5,7 +5,7 @@
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
-**Implementation checkpoint (2026-08-04):** stdio, the thirteen-tool core, real-browser E2E and
+**Implementation checkpoint (2026-08-07):** stdio, the fourteen-tool core, real-browser E2E and
 legacy/2026-07-28 conformance gates are passing. P2 has a web-standard `/mcp` boundary with
 request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
 validation, over a hosted runtime that shares handles across requests, isolates REST/CDP clients by
@@ -13,9 +13,9 @@ credential, and reclaims a session whose create request disconnects — with a R
 registry (`REDIS_URL`), per-principal cost-weighted rate limiting, OpenTelemetry with `_meta` trace
 propagation (`steel-mcp/tracing`), and the MRTR human-in-the-loop handoff.
 
-P4.5 landed ahead of P3 and past its original scope: the inline session viewer is served as an MCP
-app, paints the live browser onto a canvas from the CDP screencast, forwards canvas input back to
-the page, and is where MRTR now sends a person on a login wall or CAPTCHA (§14.A).
+P4.5 landed ahead of P3 and past its original scope: MCP Apps now show both a controllable live
+CDP screencast and a safe dashboard link for a finished headed session. MRTR sends a person to the live viewer
+on a login wall or CAPTCHA (§14.A).
 
 P3 now has its entrypoint: `src/hosted.ts` (`npm run start:hosted`) builds the runtime, picks the
 handle store from the environment, serves `/mcp` over Node's HTTP server with a `/healthz` probe
@@ -145,7 +145,7 @@ All tools `openWorldHint: true`, all carry `title` and `readOnlyHint`/`destructi
 | Tool | Returns | Why it earns its slot |
 |---|---|---|
 | `steel_scrape` | fenced content + always-present `links[]` + `metadata`, cursor-paginated | **Primary read.** No session, no billing, no leak risk. Param is `format` (array-valued, singular name); values `html`\|`readability`\|`cleaned_html`\|`markdown` |
-| `steel_screenshot` | **resource link** by default, inline base64 only on request | "Screenshot causes context overflow by default" is a real filed issue against Playwright MCP. Don't repeat it |
+| `steel_screenshot` | **4 MiB-bounded MCP image block** when possible, always with an attachment resource link | "Screenshot causes context overflow by default" is a real filed issue against Playwright MCP. Don't repeat it |
 | `steel_pdf` | resource link | `/v1/screenshot` and `/v1/pdf` return `{url}`, not bytes |
 | `steel_session_create` | `{session_id, viewer_url, expires_at, plan_limits}` | **Explicit, not lazy** — the model must see that a billed resource started, name it, and release it |
 | `steel_session_release` | confirmation + captured session context | Captures context *before* release so the ordering trap can't bite |
@@ -155,6 +155,7 @@ All tools `openWorldHint: true`, all carry `title` and `readOnlyHint`/`destructi
 | `steel_act` | outcome + change signal | One action enum (`click`\|`type`\|`fill_form`\|`select`\|`hover`\|`scroll`\|`press`\|`go_back`\|`dismiss_overlays`). `target` accepts a ref **or** a selector — agents guess selectors constantly |
 | `steel_wait_for` | outcome | Explicit waits only. **No `networkidle`** |
 | `steel_session_diagnostics` | timeline from `/agent-traces` + `/logs` | **P1, not polish.** Nobody else can build this |
+| `steel_session_replay` | safe Steel dashboard link | Explicit watch/replay request only; finished session by Steel UUID, or latest released; never starts a browser |
 | `steel_batch` | one snapshot at the end, stops at first failure | Where the round-trip win lives |
 | `steel_session_live_view` | scoped CDP connection details, no page content | Shipped with §14.A. `_meta.ui.visibility: ['app']`, so a supporting host keeps it out of the model's list; last in the tool table so every other tool's bytes stay identical |
 
@@ -164,7 +165,7 @@ Plus a **server `instructions` string** (≤2KB) as a reviewed deliverable. Clau
 
 Named presets, selected by credential or URL (`tools/list` must not vary per-connection, though it may vary by authorization):
 
-`scrape` (3 stateless tools, zero billing) · **`browse`** (default, the 13 above) · `vision` (+ coordinate tools) · `full` (+ `steel_execute_js`, self-host/stdio only)
+`scrape` (3 stateless tools, zero billing) · **`browse`** (default, the 14 above) · `vision` (+ coordinate tools) · `full` (+ `steel_execute_js`, self-host/stdio only)
 
 Design profiles at P0 when it's free, not later when it's breaking.
 
@@ -176,7 +177,7 @@ when the tools do.
 
 ### Deliberately not shipping
 
-`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · file upload/download · recording retrieval (return `sessionViewerUrl` instead) · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
+`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · file upload/download · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
 
 ## 8. Page representation and token economics
 
@@ -362,7 +363,7 @@ protocol machinery.
    token instead, and MRTR falls back to the player URL only for a client with no viewer rendered.
 6. Tests: unit (resource registration, `_meta`, no dynamic interpolation), integration
    (`server/discover` advertises the extension, `resources/read` MIME and cache hints), budget (the
-   `_meta.ui` bytes are priced — 13 tools, 15.5KB of the 16KB budget), and `npm run test:browser`,
+   `_meta.ui` bytes are priced — 14 tools, 15.9KB of the 16KB budget), and `npm run test:browser`,
    which runs the shell in a real Chrome against a fake CDP server. That last suite exists because
    unit tests asserting the shell's *source* passed while two runtime bugs made it unusable
    (NOTES §6).

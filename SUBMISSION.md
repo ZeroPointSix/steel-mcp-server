@@ -23,9 +23,9 @@ Recorded so review prep does not re-litigate it.
 | Public GitHub repo, MIT licensed | `steel-dev/steel-mcp-server`, MIT |
 | Built with Node.js | Node ≥20, ESM |
 | Tool names ≤64 chars (policy 5C) | Longest is `steel_session_diagnostics`, 25 |
-| `title` + `readOnlyHint`/`destructiveHint` on every tool (5E) | All 13, enforced by `tests/integration/tools.test.ts:92` |
+| `title` + `readOnlyHint`/`destructiveHint` on every tool (5E) | All 14, enforced by `tests/integration/tools.test.ts:92` |
 | Graceful, specific errors (5A) | Named errors with recovery actions; RESEARCH.md §7 |
-| Token frugality (5B) | `npm run budget` gate, screenshots return links, post-action snapshots off by default |
+| Token frugality (5B) | `npm run budget` gate, screenshots cap inline PNGs at 4 MiB and retain attachment links, post-action snapshots off by default |
 | No extraneous conversation data (1D) | Telemetry loads no exporter unless an `OTEL_*` var asks; `tests/unit/packaging.test.ts` guards it |
 | No catch-all tool | Every tool is a narrow verb; RESEARCH.md:94 notes a catch-all is an outright rejection |
 
@@ -43,8 +43,8 @@ Policy 2B requires descriptions to match actual functionality, and a reviewer re
 
 - ~~README documented `vision` and `full` as aliases of `browse`~~ — both are now refused rather
   than aliased (`PROFILE_NAMES` is `scrape`, `browse`), and the README documents only those two.
-- ~~README said "twelve tools"~~ — it says thirteen and lists `steel_session_live_view`, noting
-  that hosts hide it from the model via `_meta.ui.visibility: ['app']`. A test now asserts the
+- ~~README said "twelve tools"~~ — it says fourteen and lists both replay and `steel_session_live_view`,
+  noting that hosts hide the latter via `_meta.ui.visibility: ['app']`. A test now asserts the
   README mentions every entry in `TOOL_TABLE`.
 - ~~`repository.url` and `bugs` pointed at `steel-dev/mcp-server` and 404ed~~ — both now name
   `steel-dev/steel-mcp-server`, asserted against the real remote.
@@ -94,9 +94,10 @@ the README links the same privacy policy the manifest declares.
 
 ### 1.6 Install and exercise the bundle locally
 
-The bundle is packed at `build/steel-mcp-2.0.0.mcpb` and its staged server verified over JSON-RPC.
-Installing it into Claude for macOS, running all 13 tools against a real Steel key, and confirming the
-session viewer renders is **yours** — see 2.7.
+The release-candidate bundle is packed at `build/steel-mcp-2.0.0-rc.1.mcpb` and its staged server
+verified over JSON-RPC.
+Installing it into Claude for macOS, running all 14 tools against a real Steel key, and confirming the
+live viewer and finished-session replay render is **yours** — see 2.7.
 
 ---
 
@@ -113,8 +114,9 @@ which asks for *your* GitHub profile.
 
 ### 2.2 The release version — settled
 
-`2.0.0`. `package.json`, `SERVER_VERSION`, `manifest.json` and the README's Status line all say so,
-and tests hold them together.
+`2.0.0-rc.1`. `package.json`, `SERVER_VERSION`, `manifest.json` and the README's Status line all say
+so, and tests hold them together. Promote the same code to `2.0.0` after the release-candidate checks
+pass.
 
 ### 2.3 Publish a real privacy policy
 
@@ -148,12 +150,13 @@ Steel's behalf:
   address you gave me rather than guessing at one that might bounce.
 - Whether those response windows are ones Steel wants to be held to.
 
-### 2.7 Install the bundle and run all 13 tools
+### 2.7 Install the bundle and run all 14 tools
 
-`build/steel-mcp-2.0.0.mcpb`. Its staged server is verified over JSON-RPC and lists 13 tools, but
+`build/steel-mcp-2.0.0-rc.1.mcpb`. Its staged server is verified over JSON-RPC and lists 14 tools, but
 that proves it starts, not that a real Steel key drives a real browser through Desktop's own Node.
-Install it, run each tool, and confirm the inline session viewer renders — Desktop's handling of
-`_meta.ui.visibility: ['app']` for `steel_session_live_view` is the one thing untested here.
+Install it, run each tool, and confirm the live viewer renders. Finished-session replay is
+dashboard-only in rc.1, so verify that its safe dashboard link opens and that no replay app resource
+is registered or bundled.
 
 ### 2.8 Submit the form
 

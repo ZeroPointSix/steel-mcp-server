@@ -9,6 +9,8 @@ import { type WebSocket, WebSocketServer } from 'ws';
 
 /** The `openssl` this machine has, or `null`; the server needs it to mint its own certificate. */
 export function findOpenssl(): string | null {
+    const configured = process.env.OPENSSL_PATH;
+    if (configured !== undefined && configured !== '') return existsSync(configured) ? configured : null;
     return ['/usr/bin/openssl', '/opt/homebrew/bin/openssl', '/usr/local/bin/openssl'].find(existsSync) ?? null;
 }
 

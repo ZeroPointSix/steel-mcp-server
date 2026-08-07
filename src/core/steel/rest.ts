@@ -12,6 +12,8 @@ import type {
     CreateSessionRequest,
     ScrapeRequest,
     ScrapeResponse,
+    SessionListRequest,
+    SessionListResponse,
     SessionLogTimeline,
     SteelApi,
     SteelSession,
@@ -26,6 +28,10 @@ interface RequestSpec {
     body?: Record<string, unknown> | undefined;
     operation: SteelOperation;
     signal?: AbortSignal | undefined;
+    /** Defaults to JSON so existing endpoint decoding remains unchanged. */
+    responseType?: 'json' | 'text' | undefined;
+    /** Defaults to application/json; text endpoints can request their native media type. */
+    accept?: string | undefined;
     /** Statuses answered with `undefined` instead of an error, for idempotent operations. */
     tolerate?: number[] | undefined;
 }
@@ -65,7 +71,7 @@ export class SteelRestClient implements SteelApi {
             this.tracer,
             {
                 method: spec.method,
-                path: `/v1${spec.path}`,
+                path: `/v1${spec.path.replace(/\?.*$/, '')}`,
                 host: new URL(this.config.baseUrl).host,
                 operation: spec.operation,
             },
@@ -74,7 +80,7 @@ export class SteelRestClient implements SteelApi {
     }
 
     private async send<T>(spec: RequestSpec): Promise<T | undefined> {
-        const headers: Record<string, string> = { accept: 'application/json' };
+        const headers: Record<string, string> = { accept: spec.accept ?? 'application/json' };
         if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
         if (spec.body) headers['content-type'] = 'application/json';
         // Only set when something is actually tracing, so an untraced deployment sends what it always did.
@@ -110,11 +116,20 @@ export class SteelRestClient implements SteelApi {
         }
 
         if (response.status === 204) return undefined;
+        if (spec.responseType === 'text') return (await response.text()) as T;
         return (await response.json()) as T;
     }
 
     private async requireJson<T>(spec: RequestSpec): Promise<T> {
         const result = await this.request<T>(spec);
+        if (result === undefined) {
+            throw new SteelToolError(`Steel returned an empty body for ${spec.path}.`, { code: 'steel_error' });
+        }
+        return result;
+    }
+
+    private async requireText(spec: RequestSpec): Promise<string> {
+        const result = await this.request<string>({ ...spec, responseType: 'text' });
         if (result === undefined) {
             throw new SteelToolError(`Steel returned an empty body for ${spec.path}.`, { code: 'steel_error' });
         }
@@ -184,6 +199,22 @@ export class SteelRestClient implements SteelApi {
         });
     }
 
+    /** Lists organization sessions newest-first so a finished session can be inspected by id. */
+    async listSessions(request: SessionListRequest, signal?: AbortSignal): Promise<SessionListResponse> {
+        const query = new URLSearchParams();
+        if (request.status) query.set('status', request.status);
+        if (request.limit !== undefined) query.set('limit', String(request.limit));
+        if (request.cursorId) query.set('cursorId', request.cursorId);
+        const suffix = query.toString();
+        const result = await this.requireJson<SessionListResponse>({
+            method: 'GET',
+            path: `/sessions${suffix ? `?${suffix}` : ''}`,
+            operation: 'account',
+            signal,
+        });
+        return { ...result, sessions: Array.isArray(result.sessions) ? result.sessions : [] };
+    }
+
     async getSession(sessionId: string, signal?: AbortSignal): Promise<SteelSession> {
         return this.requireJson<SteelSession>({
             method: 'GET',
@@ -191,6 +222,22 @@ export class SteelRestClient implements SteelApi {
             operation: 'account',
             signal,
         });
+    }
+
+    /** Reads the durable recording playlist for a finished, headed session. */
+    async getSessionHls(sessionId: string, signal?: AbortSignal): Promise<string> {
+        const playlist = await this.requireText({
+            method: 'GET',
+            path: `/sessions/${encodeURIComponent(sessionId)}/hls`,
+            operation: 'account',
+            signal,
+            accept: 'application/vnd.apple.mpegurl',
+        });
+        if (!/^#EXTM3U(?:\r?\n|$)/.test(playlist)) {
+            // Never include the body here: a playlist contains presigned recording URLs.
+            throw new SteelToolError('Steel returned an invalid HLS playlist.', { code: 'steel_error' });
+        }
+        return playlist;
     }
 
     async getDetails(signal?: AbortSignal): Promise<AccountDetails> {

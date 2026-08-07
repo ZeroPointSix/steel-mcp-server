@@ -25,6 +25,12 @@ jobs:
         run: npm run test:unit
       - name: Integration tests
         run: npm run test:integration
+      - name: Browser-test prerequisites
+        run: |
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          command -v openssl
+      - name: MCP Apps in a real browser
+        run: npm run test:browser
       - name: Real-browser E2E tests
         run: npm run test:e2e
       - name: tools/list byte budget
@@ -39,29 +45,4 @@ jobs:
       # reinstalled devDependencies and grew 280MB; a fix for that left the hosted server unable to
       # resolve ioredis; and the documented way to select the hosted entrypoint ran the stdio one.
       - name: Container image serves both entrypoints
-        run: |
-          docker build -t steel-mcp:ci .
-
-          printf '%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            | docker run -i --rm -e STEEL_API_KEY=ci-not-a-real-key steel-mcp:ci 2>/dev/null \
-            | grep -q '"steel_scrape"'
-          echo 'stdio entrypoint lists its tools'
-
-          # OTEL_* asks for tracing the image deliberately cannot provide, so this also checks that a
-          # missing exporter stack is warned about rather than fatal.
-          docker run -d --rm --name steel-mcp-ci -p 18080:8080 \
-            -e STEEL_ALLOWED_HOSTS=localhost \
-            -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
-            steel-mcp:ci dist/hosted.js
-          for _ in $(seq 1 30); do
-            curl -sf http://localhost:18080/healthz > /dev/null 2>&1 && break
-            sleep 1
-          done
-          curl -sf http://localhost:18080/healthz > /dev/null
-          echo 'hosted entrypoint answers /healthz'
-          docker logs steel-mcp-ci 2>&1 | grep -q 'Tracing was requested but could not start'
-          echo 'a missing exporter stack is a warning, not a crash'
-          docker rm -f steel-mcp-ci > /dev/null
+        run: ./scripts/smoke-container.sh steel-mcp:ci

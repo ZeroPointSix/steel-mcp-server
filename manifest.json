@@ -2,7 +2,7 @@
     "manifest_version": "0.4",
     "name": "steel-mcp",
     "display_name": "Steel Browser",
-    "version": "2.0.0",
+    "version": "2.0.0-rc.1",
     "description": "Give Claude a real Chrome browser in the cloud: read pages that block a plain fetch, capture screenshots and PDFs, and work through interactive sites.",
     "long_description": "Steel runs a real Chromium in the cloud and hands it to Claude.\n\nMost questions about a web page end with one stateless read that starts no browser at all. When a task needs interaction — signing in, filling a form, stepping through checkout — Claude opens an explicit browser session and drives it by clicking, typing and selecting against accessibility-tree references rather than guessing at pixel coordinates.\n\nPages that need JavaScript to render, sites that refuse scripted requests, content behind a login, and multi-step flows are all reachable. Screenshots and PDFs come back as links rather than megabytes of base64, and page reads stay inside a response budget, so a browsing task does not consume the whole context.\n\nEverything read from a web page is fenced as untrusted data, and passwords and credentials are redacted before they reach a log.",
     "author": {
@@ -44,7 +44,7 @@
         "steel_profile": {
             "type": "string",
             "title": "Tool profile",
-            "description": "\"browse\" exposes all thirteen tools. \"scrape\" exposes only the three stateless read tools, which never start a billed browser session.",
+            "description": "\"browse\" exposes all fourteen tools. \"scrape\" exposes only the three stateless read tools, which never start a billed browser session.",
             "required": false,
             "default": "browse"
         }
@@ -57,7 +57,7 @@
         },
         {
             "name": "steel_screenshot",
-            "description": "Capture a screenshot of a page and return a link to it."
+            "description": "Capture a screenshot, embed a bounded PNG preview when possible, and retain its attachment download link."
         },
         {
             "name": "steel_pdf",
@@ -93,7 +93,11 @@
         },
         {
             "name": "steel_session_diagnostics",
-            "description": "Return a timestamped timeline of what the browser actually did, for when a site appears to block it."
+            "description": "Read timestamped activity from a live or finished browser session without starting a new one."
+        },
+        {
+            "name": "steel_session_replay",
+            "description": "On an explicit watch or replay request, return a finished session's safe Steel dashboard link without starting a browser."
         },
         {
             "name": "steel_batch",

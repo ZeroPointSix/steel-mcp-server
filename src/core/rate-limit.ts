@@ -37,6 +37,8 @@ export interface RateLimiter {
  * - `steel_session_live_view` is one session read for the inline viewer. It touches no browser and
  *   spends no Browser Tools call, and the app re-asks for it whenever its stream reconnects, so
  *   pricing it like a navigation would let a flapping viewer eat an agent's whole budget.
+ * - `steel_session_replay` reads one finished session and returns its safe dashboard link. It starts no
+ *   browser and consumes no concurrency slot, so it costs the same as another stateless read.
  * - `steel_session_release` is free: charging for handing a slot back would protect nothing and
  *   would keep a browser billing while its owner waited out a budget.
  */
@@ -52,6 +54,7 @@ export const TOOL_COSTS: Readonly<Record<string, number>> = {
     steel_scrape: 1,
     steel_screenshot: 1,
     steel_pdf: 1,
+    steel_session_replay: 1,
     steel_session_live_view: 1,
     steel_session_release: 0,
 };

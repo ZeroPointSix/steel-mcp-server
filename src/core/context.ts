@@ -60,6 +60,8 @@ export interface ServerDeps {
      */
     settleMultiplier: number;
     now(): Date;
+    /** Downloads hosted screenshots so tool results can embed them for chat UIs. */
+    artifactFetch?: typeof globalThis.fetch | undefined;
     /** Overridable so tests get deterministic Steel session ids. */
     newSessionId?: (() => string) | undefined;
     /**

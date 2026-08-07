@@ -73,9 +73,8 @@ export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Open a URL in a browser session',
             description:
-                'Point an existing browser session at a URL and wait for it to settle. Returns where it actually ' +
-                'ended up after redirects and what changed. It does not return the page contents unless you ask ' +
-                'for include_snapshot, because most of the time you only need to know the navigation worked.',
+                'Navigate a live session and wait for it to settle. Reports the final URL and changes; set ' +
+                'include_snapshot to also read the page.',
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
             inputSchema: z.object({
                 session_id: sessionIdSchema,

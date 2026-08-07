@@ -75,6 +75,8 @@ export interface CreateSessionRequest {
 export interface SteelSession {
     id: string;
     status?: string;
+    /** True when the session ran headlessly and therefore has no HLS video recording. */
+    headless?: boolean;
     createdAt?: string;
     duration?: number;
     sessionViewerUrl?: string;
@@ -90,6 +92,33 @@ export interface SteelSession {
     /** Viewport the session runs at, in CSS pixels. Absent on deployments that do not report it. */
     dimensions?: { width?: number; height?: number };
     [key: string]: unknown;
+}
+
+/** The terminal and live states accepted by `GET /v1/sessions`. */
+export type SteelSessionStatus = 'live' | 'released' | 'failed';
+
+/** Filters for the cursor-paginated organization session list. */
+export interface SessionListRequest {
+    status?: SteelSessionStatus | undefined;
+    limit?: number | undefined;
+    cursorId?: string | undefined;
+}
+
+/** The safe session metadata needed to choose a historical diagnostics target. */
+export interface SessionListEntry {
+    id: string;
+    createdAt?: string | undefined;
+    status?: SteelSessionStatus | undefined;
+    duration?: number | undefined;
+    eventCount?: number | undefined;
+    [key: string]: unknown;
+}
+
+/** `GET /v1/sessions` — newest first, with an id cursor for the next page. */
+export interface SessionListResponse {
+    sessions: SessionListEntry[];
+    nextCursor?: string | null | undefined;
+    totalCount?: number | undefined;
 }
 
 /** `GET /v1/details` — the source of truth for plan limits, never hardcode them. */
@@ -199,7 +228,9 @@ export interface SteelApi {
     pdf(request: ArtifactRequest, signal?: AbortSignal): Promise<ArtifactResponse>;
     createSession(request: CreateSessionRequest, signal?: AbortSignal): Promise<SteelSession>;
     releaseSession(sessionId: string, signal?: AbortSignal): Promise<void>;
+    listSessions(request: SessionListRequest, signal?: AbortSignal): Promise<SessionListResponse>;
     getSession(sessionId: string, signal?: AbortSignal): Promise<SteelSession>;
+    getSessionHls(sessionId: string, signal?: AbortSignal): Promise<string>;
     getDetails(signal?: AbortSignal): Promise<AccountDetails>;
     getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTraceTimeline>;
     getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogTimeline>;

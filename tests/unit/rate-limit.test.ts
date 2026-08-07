@@ -58,6 +58,11 @@ describe('the tool weight table', () => {
         expect(toolCost('steel_session_live_view')).toBeLessThan(toolCost('steel_navigate'));
     });
 
+    it('charges finished replay like a stateless read, since it starts no browser', () => {
+        expect(toolCost('steel_session_replay')).toBe(toolCost('steel_scrape'));
+        expect(toolCost('steel_session_replay')).toBeLessThan(toolCost('steel_navigate'));
+    });
+
     it('charges an unlisted tool the session-driving default rather than nothing', () => {
         expect(toolCost('steel_tool_added_later')).toBe(DEFAULT_TOOL_COST);
         expect(DEFAULT_TOOL_COST).toBeGreaterThan(0);

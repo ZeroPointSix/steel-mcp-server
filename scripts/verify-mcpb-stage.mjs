@@ -1,6 +1,7 @@
 // ABOUTME: Speaks JSON-RPC to the staged bundle's own dist/stdio.js against its pruned node_modules,
 // ABOUTME: so a dependency the pack script removed too eagerly fails here rather than on a user's Mac.
 import { spawn } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
 import { argv, exit, stderr as processStderr } from 'node:process';
 
 const stage = argv[2];
@@ -9,7 +10,7 @@ if (!stage) {
     exit(2);
 }
 
-const EXPECTED_TOOL_COUNT = 13;
+const EXPECTED_TOOL_COUNT = 14;
 const TIMEOUT_MS = 20_000;
 
 const child = spawn('node', [`${stage}/dist/stdio.js`], {
@@ -80,9 +81,30 @@ const tools = listed.result?.tools ?? [];
 if (tools.length !== EXPECTED_TOOL_COUNT) {
     fail(`expected ${EXPECTED_TOOL_COUNT} tools, the staged server listed ${tools.length}`);
 }
+const replay = tools.find(tool => tool.name === 'steel_session_replay');
+if (!replay) fail('the staged server omitted steel_session_replay from the fourteen-tool contract');
+if (replay._meta?.ui?.resourceUri) fail('dashboard-only replay unexpectedly declares an app resource');
+
+const resources = await send(3, 'resources/list');
+if (resources.error) fail(`resources/list returned an error: ${JSON.stringify(resources.error)}`);
+const retiredReplayUri = 'ui://steel/session-replay';
+if ((resources.result?.resources ?? []).some(resource => resource.uri === retiredReplayUri)) {
+    fail('the staged server still lists the retired replay app resource');
+}
+const retiredRead = await send(4, 'resources/read', { uri: retiredReplayUri });
+if (!retiredRead.error) fail('the staged server still serves the retired replay app resource');
+
+for (const relative of ['dist/core/apps/session-replay.js', 'dist/vendor/hls.light.min.js']) {
+    if (existsSync(`${stage}/${relative}`)) fail(`the staged bundle contains retired replay debris: ${relative}`);
+}
+const stagedFiles = readdirSync(stage, { recursive: true, encoding: 'utf8' });
+const sourceMap = stagedFiles.find(relative => relative.endsWith('.map'));
+if (sourceMap) fail(`the staged bundle contains a source map: ${sourceMap}`);
 
 clearTimeout(timeout);
 child.kill();
 
 const version = initialized.result?.serverInfo?.version ?? 'unknown';
-processStderr.write(`    staged server ${version} listed ${tools.length} tools from its pruned bundle\n`);
+processStderr.write(
+    `    staged server ${version} listed ${tools.length} tools and no retired replay app from its pruned bundle\n`
+);

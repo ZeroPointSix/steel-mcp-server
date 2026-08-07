@@ -1,86 +1,130 @@
-name: Release
+name: Release candidate
 
-# Tags are the trigger, so cutting a release is `npm version` + `git push --follow-tags` and nothing
-# else. The tag is checked against package.json before anything is built or published, because a tag
-# is the one thing here that cannot be corrected after the fact.
+# This workflow builds the candidate once, then pauses at a protected environment. The publish job
+# promotes those exact bytes; it does not install dependencies, rebuild, or repack the MCPB.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
-  # Only the container publish needs this, and only when it is switched on.
-  packages: write
+
+concurrency:
+  group: steel-mcp-release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  build-candidate:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      version: ${{ steps.identity.outputs.version }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
 
-      - name: The tag names the version package.json ships
+      - name: Record candidate identity
+        id: identity
         run: |
-          tagged="${GITHUB_REF_NAME#v}"
-          packaged="$(node -p 'require("./package.json").version')"
-          if [ "$tagged" != "$packaged" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match package.json $packaged." >&2
-            echo "Run 'npm version' rather than tagging by hand: it bumps every file that states" >&2
-            echo "the version and tags the resulting commit." >&2
-            exit 1
-          fi
-          echo "Releasing $packaged"
+          version="$(node -p 'require("./package.json").version')"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=steel-mcp-$version-$short_sha-candidate" >> "$GITHUB_OUTPUT"
 
-      - run: npm install
-
-      - name: Every file that states the version agrees
-        run: npm run sync:version -- --check
-
-      # The same gates ci.yml runs. A tag is not a reason to skip any of them.
+      - run: npm ci
+      - run: npm run sync:version -- --check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
       - run: npm run test:unit
       - run: npm run test:integration
+      - name: Browser-test prerequisites
+        run: |
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          command -v openssl
+      - run: npm run test:browser
       - run: npm run test:e2e
       - run: npm run budget
       - run: ./scripts/run-conformance.sh
+      - run: npm run pack:mcpb
+      - run: ./scripts/smoke-container.sh steel-mcp:candidate
 
-      - name: Pack the MCPB bundle
-        run: npm run pack:mcpb
+      - name: Checksum the inspected MCPB
+        run: |
+          cd build
+          sha256sum steel-mcp-${{ steps.identity.outputs.version }}.mcpb > SHA256SUMS
+          sha256sum -c SHA256SUMS
 
-      # Attaching the bundle is the point: without it the only way to get the file is to clone the
-      # repository and build it, which is not something a Claude Desktop user is going to do.
-      - name: Publish the GitHub release
+      - name: Upload exact candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            build/steel-mcp-${{ steps.identity.outputs.version }}.mcpb
+            build/SHA256SUMS
+
+  publish-candidate:
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build-candidate.outputs.source_sha }}
+          fetch-depth: 0
+      - name: Download exact candidate
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.build-candidate.outputs.artifact_name }}
+          path: build
+
+      - name: Verify candidate identity and checksum
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ needs.build-candidate.outputs.source_sha }}"
+          test "$(node -p 'require("./package.json").version')" = "${{ needs.build-candidate.outputs.version }}"
+          cd build
+          sha256sum -c SHA256SUMS
+
+      - name: Confirm the release tag is still absent
+        run: |
+          tag="v${{ needs.build-candidate.outputs.version }}"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1
+          remote_rc=$?
+          set -e
+          case "$remote_rc" in
+            0) echo "Release tag $tag already exists; tags are immutable." >&2; exit 1 ;;
+            2) echo "Release tag $tag is absent." ;;
+            *) echo "Could not verify remote tag absence (git exit $remote_rc)." >&2; exit "$remote_rc" ;;
+          esac
+
+      - name: Tag and publish the exact GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          version="${{ needs.build-candidate.outputs.version }}"
+          tag="v$version"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$tag" "${{ needs.build-candidate.outputs.source_sha }}" -m "Release $tag"
+          git push origin "$tag"
+
+          prerelease_flags=()
+          case "$version" in
+            *-*) prerelease_flags=(--prerelease --latest=false) ;;
+          esac
+          gh release create "$tag" \
+            --title "$tag" \
             --generate-notes \
-            --verify-tag \
-            build/steel-mcp-*.mcpb
-
-      # Both publishes stay off until the credentials exist and someone decides to turn them on.
-      # Set the repository variable PUBLISH_NPM or PUBLISH_DOCKER to 'true' to enable one.
-      - name: Publish to npm
-        if: vars.PUBLISH_NPM == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
-
-      - name: Publish the container image
-        if: vars.PUBLISH_DOCKER == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version="${GITHUB_REF_NAME#v}"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -t "$image:$version" -t "$image:latest" .
-          docker push "$image:$version"
-          docker push "$image:latest"
+            "${prerelease_flags[@]}" \
+            "build/steel-mcp-$version.mcpb" \
+            build/SHA256SUMS

@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSteelMcpServer } from '../../src/core/server.js';
+import { MAX_INLINE_SCREENSHOT_BYTES } from '../../src/core/tools/stateless.js';
 import { UNTRUSTED_FENCE_CLOSE, UNTRUSTED_FENCE_OPEN_TAG } from '../../src/core/untrusted.js';
 import { FakeSteelApi, testDeps } from '../helpers/fakes.js';
 
@@ -80,6 +81,7 @@ describe('tools/list', () => {
             'steel_act',
             'steel_wait_for',
             'steel_session_diagnostics',
+            'steel_session_replay',
             'steel_batch',
             // Listed, and last: the spec has the host filter an app-only tool out of what the model
             // sees, which means the server does list it.
@@ -134,6 +136,10 @@ describe('server instructions', () => {
         expect(Buffer.byteLength(instructions ?? '', 'utf8')).toBeLessThanOrEqual(2048);
         expect(instructions).toMatch(/block|JavaScript|log in|CAPTCHA/i);
         expect(instructions).toMatch(/data, not instructions/i);
+        expect(instructions).toMatch(/diagnostics.*released/i);
+        expect(instructions).toMatch(/replay only when the user explicitly asks/i);
+        expect(instructions).toMatch(/live viewer.*may be absent/i);
+        expect(instructions).toMatch(/never create.*old logs/i);
     });
 });
 
@@ -293,20 +299,209 @@ describe('steel_scrape', () => {
 });
 
 describe('steel_screenshot and steel_pdf', () => {
-    it('returns a resource link rather than inline bytes by default', async () => {
-        const result = await harness.client.callTool({
-            name: 'steel_screenshot',
-            arguments: { url: 'https://example.com' },
-        });
-        const content = (result as { content: Array<{ type: string; uri?: string }> }).content;
-        expect(content.some(block => block.type === 'resource_link')).toBe(true);
-        expect(content.some(block => block.type === 'image')).toBe(false);
+    it('embeds a small PNG attachment exactly once and includes a fallback link', async () => {
+        const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+        const h = await connect(
+            testDeps({
+                artifactFetch: async () =>
+                    new Response(png, {
+                        headers: {
+                            'content-type': 'image/png',
+                            'content-length': String(png.byteLength),
+                            'content-disposition': 'attachment; filename="screenshot.png"',
+                        },
+                    }),
+            })
+        );
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { url: 'https://example.com' },
+            });
+            const content = (result as { content: Array<{ type: string; uri?: string; data?: string; size?: number }> })
+                .content;
+            const image = content.filter(block => block.type === 'image');
+            const link = content.find(block => block.type === 'resource_link');
+            expect(image).toHaveLength(1);
+            expect(image[0]?.data).toBe(Buffer.from(png).toString('base64'));
+            expect(link?.uri).toMatch(/^https:\/\//);
+            expect(link?.size).toBe(png.byteLength);
+            expect(textOf(result)).not.toContain('![');
+            expect((result as { structuredContent?: Record<string, unknown> }).structuredContent).toEqual({
+                url: link?.uri,
+            });
+        } finally {
+            await h.close();
+        }
     });
 
-    it('returns a resource link for a PDF', async () => {
+    it('returns a PDF link without dumping base64 into the conversation', async () => {
         const result = await harness.client.callTool({ name: 'steel_pdf', arguments: { url: 'https://example.com' } });
         const content = (result as { content: Array<{ type: string; uri?: string }> }).content;
+        expect(content.some(block => block.type === 'resource')).toBe(false);
         expect(content.find(block => block.type === 'resource_link')?.uri).toMatch(/\.pdf$/);
+    });
+
+    it('can opt out without fetching the attachment', async () => {
+        let fetches = 0;
+        const h = await connect(
+            testDeps({
+                artifactFetch: async () => {
+                    fetches += 1;
+                    return new Response('unexpected');
+                },
+            })
+        );
+        try {
+            const screenshot = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { url: 'https://example.com', inline: false },
+            });
+            const content = (screenshot as { content: Array<{ type: string }> }).content;
+            expect(content.some(block => block.type === 'resource_link')).toBe(true);
+            expect(content.some(block => block.type === 'image')).toBe(false);
+            expect(fetches).toBe(0);
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('returns only the link when Content-Length exceeds the inline cap', async () => {
+        let readerRequested = false;
+        let cancelled = false;
+        const response = {
+            ok: true,
+            headers: new Headers({
+                'content-type': 'image/png',
+                'content-length': String(MAX_INLINE_SCREENSHOT_BYTES + 1),
+            }),
+            body: {
+                getReader() {
+                    readerRequested = true;
+                    throw new Error('body must not be read after the Content-Length precheck');
+                },
+                async cancel() {
+                    cancelled = true;
+                },
+            },
+        } as unknown as Response;
+        const h = await connect(
+            testDeps({
+                artifactFetch: async () => response,
+            })
+        );
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { url: 'https://example.com' },
+            });
+            const content = (result as { content: Array<{ type: string }> }).content;
+            expect(content.some(block => block.type === 'image')).toBe(false);
+            expect(textOf(result)).toMatch(/exceeds the 4 MiB inline limit/i);
+            expect(readerRequested).toBe(false);
+            expect(cancelled).toBe(true);
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('cancels a chunked response as soon as it crosses the inline cap', async () => {
+        let cancelled = false;
+        const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+                controller.enqueue(new Uint8Array(3 * 1024 * 1024));
+                controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+            },
+            cancel() {
+                cancelled = true;
+            },
+        });
+        const h = await connect(
+            testDeps({
+                artifactFetch: async () => new Response(body, { headers: { 'content-type': 'image/png' } }),
+            })
+        );
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { url: 'https://example.com' },
+            });
+            expect((result as { content: Array<{ type: string }> }).content.some(block => block.type === 'image')).toBe(
+                false
+            );
+            expect(cancelled).toBe(true);
+        } finally {
+            await h.close();
+        }
+    });
+
+    it.each([
+        ['an HTTP error', async () => new Response('failed', { status: 500 })],
+        ['a non-PNG response', async () => new Response('html', { headers: { 'content-type': 'text/html' } })],
+        ['a download rejection', async () => Promise.reject(new Error('secret signed URL failed'))],
+    ])('degrades %s to a safe link-only success', async (_label, artifactFetch) => {
+        const h = await connect(testDeps({ artifactFetch }));
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { url: 'https://example.com' },
+            });
+            expect(isError(result)).toBe(false);
+            expect((result as { content: Array<{ type: string }> }).content.some(block => block.type === 'image')).toBe(
+                false
+            );
+            expect(textOf(result)).not.toContain('secret signed URL');
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('propagates caller cancellation instead of reporting a successful fallback', async () => {
+        const h = await connect(
+            testDeps({
+                artifactFetch: async (_url, init) =>
+                    new Promise<Response>((_resolve, reject) => {
+                        init?.signal?.addEventListener(
+                            'abort',
+                            () => reject(new DOMException('cancelled', 'AbortError')),
+                            { once: true }
+                        );
+                    }),
+            })
+        );
+        try {
+            const controller = new AbortController();
+            const pending = h.client.callTool(
+                { name: 'steel_screenshot', arguments: { url: 'https://example.com' } },
+                { signal: controller.signal }
+            );
+            controller.abort();
+            await expect(pending).rejects.toMatchObject({ name: 'SdkError' });
+            await expect(pending).rejects.toThrow(/AbortError/);
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('rejects session_id plus inline=false before resolving or touching the session', async () => {
+        const deps = testDeps();
+        const touched: string[] = [];
+        const h = await connect(deps);
+        try {
+            const handle = await newSession(h);
+            deps.registry.touch = async (candidate: string) => {
+                touched.push(candidate);
+            };
+            const result = await h.client.callTool({
+                name: 'steel_screenshot',
+                arguments: { session_id: handle, inline: false },
+            });
+            expect(isError(result)).toBe(true);
+            expect(textOf(result)).toMatch(/no hosted download link/i);
+            expect(touched).toEqual([]);
+        } finally {
+            await h.close();
+        }
     });
 
     it('keeps a session alive while screenshotting it, so a loop is not reaped mid-use', async () => {
@@ -361,6 +556,7 @@ describe('steel_session_create', () => {
             create?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined
         )?.properties;
         expect(properties?.device?.description).toMatch(/mobile.*fingerprint.*user agent.*touch/i);
+        expect(properties?.viewport?.description).toMatch(/desktop.*1280x720.*device=mobile/i);
     });
 
     it('keeps the idle timeout strictly below the hard timeout, which is what makes it work', async () => {
@@ -669,6 +865,161 @@ describe('steel_wait_for', () => {
 });
 
 describe('steel_session_diagnostics', () => {
+    it('advertises historical retrieval as read-only and never as a reason to create a session', async () => {
+        const tool = (await harness.client.listTools()).tools.find(entry => entry.name === 'steel_session_diagnostics');
+        expect(tool?.description).toMatch(/released|finished|historical/i);
+        expect(tool?.description).toMatch(/never starts|does not start/i);
+
+        const properties = (tool?.inputSchema as { properties?: Record<string, { description?: string }> })?.properties;
+        expect(properties?.steel_session_id?.description).toMatch(/dashboard|released|finished/i);
+    });
+
+    it('reads an existing Steel session directly without creating a browser', async () => {
+        const oldSteelSessionId = '7dbe8308-59f0-4f6f-8685-8fe9673d98fa';
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: { steel_session_id: oldSteelSessionId },
+        });
+
+        expect(isError(result)).toBe(false);
+        expect(textOf(result)).toContain('ERR_ABORTED');
+        expect(harness.deps.api.created).toEqual([]);
+        expect(harness.deps.api.traceReads).toEqual([oldSteelSessionId]);
+        expect(harness.deps.api.logReads).toEqual([oldSteelSessionId]);
+        const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent;
+        expect(structured?.steel_session_id).toBe(oldSteelSessionId);
+        expect(structured).not.toHaveProperty('session_id');
+    });
+
+    it('finds the most recent released session when no id is supplied', async () => {
+        const oldSteelSessionId = '9f35c731-8146-45a0-984d-42e2d8a50cb7';
+        const historical = await connect(
+            testDeps({
+                api: new FakeSteelApi({
+                    sessions: {
+                        sessions: [
+                            {
+                                id: oldSteelSessionId,
+                                createdAt: '2026-08-05T11:00:00.000Z',
+                                status: 'released',
+                                duration: 42_000,
+                                eventCount: 7,
+                            },
+                        ],
+                        nextCursor: null,
+                        totalCount: 1,
+                    },
+                }),
+            })
+        );
+        try {
+            const result = await historical.client.callTool({ name: 'steel_session_diagnostics', arguments: {} });
+            expect(isError(result)).toBe(false);
+            expect(historical.deps.api.created).toEqual([]);
+            expect(historical.deps.api.sessionLists).toEqual([{ status: 'released', limit: 1 }]);
+            expect(historical.deps.api.traceReads).toEqual([oldSteelSessionId]);
+            expect(historical.deps.api.logReads).toEqual([oldSteelSessionId]);
+            expect(textOf(result)).toContain(oldSteelSessionId);
+        } finally {
+            await historical.close();
+        }
+    });
+
+    it('can read the same Steel session after its live MCP handle is released', async () => {
+        const handle = await newSession();
+        const steelSessionId = harness.deps.api.created[0]!.sessionId;
+        await harness.client.callTool({ name: 'steel_session_release', arguments: { session_id: handle } });
+
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: { steel_session_id: steelSessionId },
+        });
+
+        expect(isError(result)).toBe(false);
+        expect(harness.deps.api.created).toHaveLength(1);
+        expect(harness.deps.api.traceReads).toEqual([steelSessionId]);
+        expect(harness.deps.api.logReads).toEqual([steelSessionId]);
+    });
+
+    it('does not suggest creating a replacement when only a released MCP handle is available', async () => {
+        const handle = await newSession();
+        await harness.client.callTool({ name: 'steel_session_release', arguments: { session_id: handle } });
+
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: { session_id: handle },
+        });
+
+        expect(isError(result)).toBe(true);
+        expect(textOf(result)).toMatch(/Steel session.*dashboard|most recent released/i);
+        expect(textOf(result)).not.toMatch(/call steel_session_create|start a new/i);
+        expect(harness.deps.api.created).toHaveLength(1);
+        expect(harness.deps.api.traceReads).toEqual([]);
+        expect(harness.deps.api.logReads).toEqual([]);
+    });
+
+    it('does not create a browser when there is no released session to inspect', async () => {
+        const result = await harness.client.callTool({ name: 'steel_session_diagnostics', arguments: {} });
+        expect(isError(result)).toBe(true);
+        expect(textOf(result)).toMatch(/No released Steel session/i);
+        expect(harness.deps.api.created).toEqual([]);
+        expect(harness.deps.api.traceReads).toEqual([]);
+        expect(harness.deps.api.logReads).toEqual([]);
+    });
+
+    it('rejects an ambiguous live-and-historical target before reading either one', async () => {
+        const handle = await newSession();
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: {
+                session_id: handle,
+                steel_session_id: '167d821e-c6a9-44c6-9ee3-c164a75306cc',
+            },
+        });
+        expect(isError(result)).toBe(true);
+        expect(harness.deps.api.traceReads).toEqual([]);
+        expect(harness.deps.api.logReads).toEqual([]);
+    });
+
+    it('returns browser logs when agent traces alone are unavailable', async () => {
+        const partial = await connect(
+            testDeps({ api: new FakeSteelApi({ failTracesWith: new Error('traces unsupported') }) })
+        );
+        try {
+            const result = await partial.client.callTool({
+                name: 'steel_session_diagnostics',
+                arguments: { steel_session_id: '6f894bea-26ef-48d2-845b-037e639154a8' },
+            });
+            expect(isError(result)).toBe(false);
+            expect(textOf(result)).toContain('ERR_ABORTED');
+            expect(textOf(result)).toMatch(/could not return agent traces/i);
+        } finally {
+            await partial.close();
+        }
+    });
+
+    it('reports an inaccessible historical session instead of claiming its timeline is empty', async () => {
+        const unavailable = await connect(
+            testDeps({
+                api: new FakeSteelApi({
+                    failTracesWith: new Error('trace session not found'),
+                    failLogsWith: new Error('log session not found'),
+                }),
+            })
+        );
+        try {
+            const result = await unavailable.client.callTool({
+                name: 'steel_session_diagnostics',
+                arguments: { steel_session_id: '811e22dd-383f-4a61-b3b7-6f6411671689' },
+            });
+            expect(isError(result)).toBe(true);
+            expect(textOf(result)).not.toMatch(/No traces or logs recorded/i);
+            expect(unavailable.deps.api.created).toEqual([]);
+        } finally {
+            await unavailable.close();
+        }
+    });
+
     it('returns a compact timeline built from agent traces and logs', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({
@@ -680,6 +1031,10 @@ describe('steel_session_diagnostics', () => {
         expect(text).toContain('click');
         expect(text).toContain('Sign in');
         expect(text).toContain('ERR_ABORTED');
+        expect(text).toMatch(/takeover clicks, scrolling and typing.*may be absent/i);
+        const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent;
+        expect(structured?.session_id).toBe(handle);
+        expect(structured).not.toHaveProperty('steel_session_id');
     });
 
     it('names the real activity type and the page each one happened on', async () => {
@@ -746,7 +1101,7 @@ describe('steel_session_diagnostics', () => {
             });
             const text = textOf(result);
             expect(text.split(UNTRUSTED_FENCE_CLOSE).length - 1).toBe(1);
-            expect(text.trimEnd().endsWith(UNTRUSTED_FENCE_CLOSE)).toBe(true);
+            expect(text).toContain(UNTRUSTED_FENCE_CLOSE);
         } finally {
             await smuggled.close();
         }
@@ -835,7 +1190,7 @@ describe('steel_session_diagnostics', () => {
         });
         const text = textOf(result);
         expect(text).not.toContain('https://example.com/app.js');
-        expect(text).toMatch(/hid 2\b/i);
+        expect(text).toMatch(/hid 2 routine browser network Request\/Response log entries/i);
         expect(
             (result as { structuredContent?: { hidden_log_count?: number } }).structuredContent?.hidden_log_count
         ).toBe(2);

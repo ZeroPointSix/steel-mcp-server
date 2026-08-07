@@ -144,12 +144,20 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
         const project = /tsc -p (\S+)/.exec(manifest.scripts.build ?? '')?.[1] ?? '';
         expect(project, 'the build script no longer names a tsconfig').not.toBe('');
         expect(read('Dockerfile'), `the build compiles ${project}, which the image never copies`).toContain(project);
+        expect(manifest.scripts.build, 'stale dist files can survive source deletion').toMatch(/clean-dist\.mjs.*tsc/);
+        expect(read('Dockerfile'), 'the image cannot run the clean build').toContain('clean-dist.mjs');
     });
 
-    it('does not copy a lockfile the repository does not track', () => {
-        // package-lock.json is gitignored, so COPYing it fails on every clean checkout — including
-        // the ones Smithery and the release build run from.
-        expect(read('Dockerfile')).not.toContain('package-lock.json');
+    it('copies the tracked lockfile and uses it for the initial Docker install', () => {
+        const dockerfile = read('Dockerfile');
+        expect(dockerfile).toContain('package-lock.json');
+        expect(dockerfile).toContain('npm ci --ignore-scripts');
+        expect(dockerfile).not.toContain('stage-hls-player.mjs');
+    });
+
+    it('removes source maps from the Desktop staging tree', () => {
+        expect(read('scripts/pack-mcpb.sh')).toMatch(/find .*STAGE.*-name '\*\.map'.*-delete/);
+        expect(read('scripts/verify-mcpb-stage.mjs')).toContain("relative.endsWith('.map')");
     });
 
     it('documents every tool the browse profile registers', () => {
@@ -235,10 +243,12 @@ describe('what a default install pays for', () => {
         // faults reached a green build: reinstalled devDependencies, an unresolvable ioredis, and an
         // override that selected the wrong server. A build on its own catches none of them.
         const ci = readFileSync(fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)), 'utf8');
-        expect(ci).toContain('docker build');
-        expect(ci, 'nothing exercises the stdio entrypoint').toContain('tools/list');
-        expect(ci, 'nothing exercises the hosted entrypoint').toContain('dist/hosted.js');
-        expect(ci, 'the hosted server is never asked whether it is serving').toContain('/healthz');
+        const smoke = readFileSync(fileURLToPath(new URL('../../scripts/smoke-container.sh', import.meta.url)), 'utf8');
+        expect(ci).toContain('./scripts/smoke-container.sh');
+        expect(smoke).toContain('docker build');
+        expect(smoke, 'nothing exercises the stdio entrypoint').toContain('tools/list');
+        expect(smoke, 'nothing exercises the hosted entrypoint').toContain('dist/hosted.js');
+        expect(smoke, 'the hosted server is never asked whether it is serving').toContain('/healthz');
     });
 });
 
@@ -266,6 +276,15 @@ describe('dependency pins', () => {
 
     it('requires Zod 4.2 or newer, which the v2 SDK depends on', () => {
         expect(manifest.dependencies.zod).toMatch(/^\^4\.[2-9]/);
+    });
+
+    it('does not stage the retired replay player into dist', () => {
+        expect(manifest.dependencies['hls.js']).toBeUndefined();
+        expect(manifest.devDependencies['hls.js']).toBeUndefined();
+        expect(manifest.scripts.build).not.toContain('stage-hls-player.mjs');
+        expect(readFileSync(fileURLToPath(new URL('../../Dockerfile', import.meta.url)), 'utf8')).not.toContain(
+            'stage-hls-player.mjs'
+        );
     });
 });
 
@@ -399,14 +418,21 @@ describe('the release workflow', () => {
     const read = (name: string) => readFileSync(fileURLToPath(new URL(name, root)), 'utf8');
     const release = read('.github/workflows/release.yml');
 
-    it('runs on a version tag rather than on a branch', () => {
-        expect(release).toContain("tags: ['v*']");
+    it('is manually dispatched and restricted to main', () => {
+        expect(release).toContain('workflow_dispatch:');
+        expect(release).toContain("github.ref == 'refs/heads/main'");
+        expect(release).not.toMatch(/push:\s*\n\s*tags:/);
     });
 
-    it('refuses a tag that disagrees with the version being released', () => {
-        // The one mistake a release cannot walk back: a published tag naming a version nobody shipped.
-        expect(release).toContain('GITHUB_REF_NAME#v');
-        expect(release).toContain('exit 1');
+    it('builds once and promotes the exact artifact behind a protected environment', () => {
+        expect(release).toContain('actions/upload-artifact@v4');
+        expect(release).toContain('actions/download-artifact@v5');
+        expect(release).toContain('environment: release');
+        expect(release).toContain('sha256sum -c SHA256SUMS');
+        const publishJob = release.split('publish-candidate:')[1] ?? '';
+        expect(publishJob).not.toContain('npm ci');
+        expect(publishJob).not.toContain('npm run build');
+        expect(publishJob).not.toContain('npm run pack:mcpb');
     });
 
     it('runs every gate CI runs, so a tag cannot take a shortcut', () => {
@@ -420,16 +446,18 @@ describe('the release workflow', () => {
         }
     });
 
-    it('attaches the bundle to the release', () => {
+    it('attaches the bundle and checksum as an RC that cannot become Latest', () => {
         // Without this the only way to get the .mcpb is to clone the repository and build it, which
         // is not something a Claude Desktop user will do.
         expect(release).toContain('gh release create');
-        expect(release).toMatch(/build\/steel-mcp-\*\.mcpb/);
+        expect(release).toContain('build/steel-mcp-$version.mcpb');
+        expect(release).toContain('build/SHA256SUMS');
+        expect(release).toContain('--prerelease --latest=false');
     });
 
-    it('leaves npm and container publishing switched off until someone turns them on', () => {
-        expect(release).toContain("vars.PUBLISH_NPM == 'true'");
-        expect(release).toContain("vars.PUBLISH_DOCKER == 'true'");
+    it('does not publish npm or GHCR from the RC workflow', () => {
+        expect(release).not.toContain('npm publish');
+        expect(release).not.toContain('docker push');
     });
 });
 

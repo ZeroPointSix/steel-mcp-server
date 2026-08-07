@@ -14,6 +14,8 @@ import type {
     CreateSessionRequest,
     ScrapeRequest,
     ScrapeResponse,
+    SessionListRequest,
+    SessionListResponse,
     SessionLogTimeline,
     SteelApi,
     SteelSession,
@@ -25,6 +27,9 @@ export interface FakeSteelApiOptions {
     details?: AccountDetails;
     traces?: AgentTraceTimeline;
     logs?: SessionLogTimeline;
+    sessions?: SessionListResponse;
+    failTracesWith?: Error;
+    failLogsWith?: Error;
     failCreateWith?: Error;
     /** Overrides the live-player URL; `null` models a deployment that returns none at all. */
     debugUrl?: string | null;
@@ -37,6 +42,10 @@ export interface FakeSteelApiOptions {
     /** Overrides the session's viewport; `null` models a session Steel reports no dimensions for. */
     dimensions?: { width: number; height: number } | null;
     failGetSessionWith?: Error;
+    /** Exact metadata (or failure) returned for a historical session id. */
+    sessionsById?: Record<string, SteelSession | Error>;
+    /** Exact HLS manifest (or failure) returned for a historical session id. */
+    hlsBySession?: Record<string, string | Error>;
 }
 
 /** The viewport a session read reports unless a test asks for another one. */
@@ -50,6 +59,13 @@ export class FakeSteelApi implements SteelApi {
     readonly artifacts: ArtifactRequest[] = [];
     /** Every `GET /v1/sessions/{id}`, in order, so a test can prove a URL was fetched afresh. */
     readonly sessionReads: string[] = [];
+    /** Every `GET /v1/sessions/{id}/hls`, kept separately from metadata reads. */
+    readonly hlsReads: string[] = [];
+    /** Every historical-session listing request, in order. */
+    readonly sessionLists: SessionListRequest[] = [];
+    /** Session ids sent to the two diagnostics endpoints, kept separately to catch wrong-session reads. */
+    readonly traceReads: string[] = [];
+    readonly logReads: string[] = [];
 
     constructor(private readonly options: FakeSteelApiOptions = {}) {}
 
@@ -101,6 +117,9 @@ export class FakeSteelApi implements SteelApi {
     async getSession(sessionId: string): Promise<SteelSession> {
         if (this.options.failGetSessionWith) throw this.options.failGetSessionWith;
         this.sessionReads.push(sessionId);
+        const configured = this.options.sessionsById?.[sessionId];
+        if (configured instanceof Error) throw configured;
+        if (configured) return configured;
         const websocketUrl =
             this.options.websocketUrl === null
                 ? undefined
@@ -114,12 +133,28 @@ export class FakeSteelApi implements SteelApi {
         };
     }
 
+    /** Answers the finished-session recording endpoint without putting its manifest in session metadata. */
+    async getSessionHls(sessionId: string): Promise<string> {
+        this.hlsReads.push(sessionId);
+        const configured = this.options.hlsBySession?.[sessionId];
+        if (configured instanceof Error) throw configured;
+        if (typeof configured === 'string') return configured;
+        throw new Error(`No HLS fixture configured for Steel session ${sessionId}.`);
+    }
+
     async getDetails(): Promise<AccountDetails> {
         return this.options.details ?? { maxSessionDuration: 900_000, concurrencyLimit: 10, plan: 'launch' };
     }
 
+    async listSessions(request: SessionListRequest): Promise<SessionListResponse> {
+        this.sessionLists.push(request);
+        return this.options.sessions ?? { sessions: [], nextCursor: null };
+    }
+
     /** Answers with the `{events,total,hasMore}` envelope and the field names Steel really sends. */
-    async getAgentTraces(): Promise<AgentTraceTimeline> {
+    async getAgentTraces(sessionId: string): Promise<AgentTraceTimeline> {
+        this.traceReads.push(sessionId);
+        if (this.options.failTracesWith) throw this.options.failTracesWith;
         return (
             this.options.traces ?? {
                 events: [
@@ -154,7 +189,9 @@ export class FakeSteelApi implements SteelApi {
      * JSON-encoded string it really is. The routine Request and Response pair is here on purpose:
      * a real page load buries the two useful entries under dozens of them.
      */
-    async getSessionLogs(): Promise<SessionLogTimeline> {
+    async getSessionLogs(sessionId: string): Promise<SessionLogTimeline> {
+        this.logReads.push(sessionId);
+        if (this.options.failLogsWith) throw this.options.failLogsWith;
         return (
             this.options.logs ?? {
                 events: [
@@ -388,6 +425,7 @@ export interface TestDepsOptions {
     env?: Record<string, string | undefined>;
     page?: () => FixturePage;
     tracer?: Tracer;
+    artifactFetch?: typeof globalThis.fetch;
     /**
      * Handle store to use instead of a fresh in-process one.
      *
@@ -427,5 +465,17 @@ export function testDeps(options: TestDepsOptions = {}): ServerDeps & {
         // Real time: the registry checks handle expiry against the real clock.
         now: () => new Date(),
         tracer: options.tracer,
+        artifactFetch:
+            options.artifactFetch ??
+            (async input => {
+                const url = String(input);
+                const pdf = url.endsWith('.pdf');
+                return new Response(pdf ? '%PDF-test' : 'fake-png', {
+                    headers: {
+                        'content-type': pdf ? 'application/pdf' : 'image/png',
+                        'content-disposition': `attachment; filename="${pdf ? 'page.pdf' : 'screenshot.png'}"`,
+                    },
+                });
+            }),
     };
 }

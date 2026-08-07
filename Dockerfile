@@ -6,13 +6,13 @@ WORKDIR /app
 
 # Everything `npm run build` compiles from. tsconfig.build.json is the project the build script
 # names; without it the build fails before it reads a source file.
-COPY package.json tsconfig.json tsconfig.build.json ./
+COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
 COPY src ./src
+COPY scripts/clean-dist.mjs ./scripts/clean-dist.mjs
 
-# No lockfile is copied because the repository does not track one, so `npm ci` would have nothing to
-# read. Scripts are skipped because `prepare` builds, and the explicit build below is the one whose
-# failure should be visible.
-RUN npm install --ignore-scripts
+# The tracked lock makes the image use the same dependency graph as CI and release. Scripts are
+# skipped because `prepare` builds, and the explicit build below is the one whose failure is visible.
+RUN npm ci --ignore-scripts
 RUN npm run build
 
 # Reduces node_modules to what the runtime stage should carry: the four production dependencies, plus

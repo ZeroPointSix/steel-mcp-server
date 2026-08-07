@@ -96,4 +96,15 @@ describe('successResult', () => {
         expect(result.content).toHaveLength(2);
         expect(result.content[1]).toMatchObject({ type: 'resource_link' });
     });
+
+    it('can attach component-only result metadata without copying it into model-visible content', () => {
+        const manifest = '#EXTM3U\nhttps://signed.example/segment.ts?secret=redacted';
+        const result = successResult({ result: 'Replay is ready.' }, { replay: { state: 'ready' } }, [], {
+            'steel/replay': { kind: 'hls', manifest },
+        });
+
+        expect(result._meta).toEqual({ 'steel/replay': { kind: 'hls', manifest } });
+        expect(JSON.stringify(result.content)).not.toContain('signed.example');
+        expect(JSON.stringify(result.structuredContent)).not.toContain('signed.example');
+    });
 });

@@ -13,9 +13,7 @@ import { recordSpanFailure, resolveTracer, withToolCallSpan } from '../telemetry
 import { fenceUntrusted } from '../untrusted.js';
 
 /** The `session_id` argument shared by every stateful tool. */
-export const sessionIdSchema = z
-    .string()
-    .describe('A session_id returned by steel_session_create. Required for every stateful browser tool.');
+export const sessionIdSchema = z.string().describe('Live session_id from steel_session_create.');
 
 export const maxTokensSchema = z
     .number()

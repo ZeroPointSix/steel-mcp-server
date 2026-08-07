@@ -76,11 +76,13 @@ export function describeChange(signal: ChangeSignal): string {
 export function successResult(
     sections: EnvelopeSections,
     structuredContent?: Record<string, unknown>,
-    extraContent: ContentBlock[] = []
+    extraContent: ContentBlock[] = [],
+    resultMeta?: Record<string, unknown>
 ): CallToolResult {
     const result: CallToolResult = {
         content: [{ type: 'text', text: renderEnvelope(sections) }, ...extraContent],
     };
     if (structuredContent) result.structuredContent = structuredContent;
+    if (resultMeta) result._meta = resultMeta;
     return result;
 }

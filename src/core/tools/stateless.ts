@@ -10,6 +10,68 @@ import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult, wit
 
 const FORMATS = ['markdown', 'html', 'cleaned_html', 'readability'] as const;
 
+export const MAX_INLINE_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+
+type ArtifactDownload =
+    | { state: 'embedded'; base64: string; size: number }
+    | { state: 'link_only'; reason: 'download_failed' | 'http_error' | 'invalid_type' | 'too_large' };
+
+/** Whether an artifact-read failure is really caller cancellation and must not degrade to success. */
+function isAbort(error: unknown, signal: AbortSignal): boolean {
+    return signal.aborted || (error instanceof Error && error.name === 'AbortError');
+}
+
+/** Reads a Steel attachment into an MCP image block only while it remains safe and small. */
+async function downloadArtifact(deps: ServerDeps, url: string, signal: AbortSignal): Promise<ArtifactDownload> {
+    let response: Response;
+    try {
+        response = await (deps.artifactFetch ?? globalThis.fetch)(url, { signal });
+    } catch (error) {
+        if (isAbort(error, signal)) throw error;
+        return { state: 'link_only', reason: 'download_failed' };
+    }
+
+    if (!response.ok) return { state: 'link_only', reason: 'http_error' };
+    if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'image/png') {
+        return { state: 'link_only', reason: 'invalid_type' };
+    }
+
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > MAX_INLINE_SCREENSHOT_BYTES) {
+        await response.body?.cancel();
+        return { state: 'link_only', reason: 'too_large' };
+    }
+    if (!response.body) return { state: 'link_only', reason: 'download_failed' };
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            size += value.byteLength;
+            if (size > MAX_INLINE_SCREENSHOT_BYTES) {
+                await reader.cancel();
+                return { state: 'link_only', reason: 'too_large' };
+            }
+            chunks.push(value);
+        }
+    } catch (error) {
+        if (isAbort(error, signal)) throw error;
+        return { state: 'link_only', reason: 'download_failed' };
+    }
+
+    return { state: 'embedded', base64: Buffer.concat(chunks, size).toString('base64'), size };
+}
+
+const INLINE_FALLBACK_NOTES: Record<Extract<ArtifactDownload, { state: 'link_only' }>['reason'], string> = {
+    download_failed: 'The screenshot is available from the download link, but its inline preview could not be read.',
+    http_error: 'The screenshot is available from the download link, but its inline preview could not be downloaded.',
+    invalid_type: 'The screenshot is available from the download link, but the response was not a PNG.',
+    too_large: `The screenshot is available from the download link, but it exceeds the ${MAX_INLINE_SCREENSHOT_BYTES / (1024 * 1024)} MiB inline limit.`,
+};
+
 /** Formats that carry raw markup, where an HTML comment can hide instructions a person never sees. */
 const MARKUP_FORMATS = new Set<ScrapeFormat>(['html', 'cleaned_html']);
 
@@ -154,10 +216,10 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Screenshot a web page',
             description:
-                'Capture a PNG of a page and return a link to it. Screenshots are for showing a person what a ' +
-                'page looks like; you cannot act on pixels, so use steel_snapshot when you need to click or type. ' +
-                'Pass a url to capture without starting a session, or a session_id to capture the page a browser ' +
-                'session is currently on.',
+                'Capture a PNG of a page and show it inline, with a download link as fallback. Screenshots are ' +
+                'for showing a person what a page looks like; you cannot act on pixels, so use steel_snapshot ' +
+                'when you need to click or type. Pass a url to capture without starting a session, or a session_id ' +
+                'to capture the page a browser session is currently on.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
             inputSchema: z.object({
                 url: z.url().optional().describe('Page to capture. Starts no browser session.'),
@@ -169,10 +231,20 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                 inline: z
                     .boolean()
                     .optional()
-                    .describe('Return the image bytes in the response instead of a link. Costs far more context.'),
+                    .describe('Embed the image for inline display. Defaults to true; false returns only a link.'),
             }),
         },
         async (args, ctx) => {
+            if (args.session_id && args.inline === false) {
+                return guard(deps, 'steel_screenshot', ctx.mcpReq, async () => {
+                    throw new SteelToolError(
+                        'Session screenshots are returned directly and have no hosted download link. Omit ' +
+                            'inline=false, or capture a URL when you need a link-only result.',
+                        { code: 'invalid_argument' }
+                    );
+                });
+            }
+
             // The session branch goes through withPage so there is exactly one path that resolves
             // a handle and marks it as used; screenshotting in a loop must not let the reaper
             // reclaim the session out from under the agent doing it.
@@ -198,22 +270,37 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                     { url: args.url, fullPage: args.full_page },
                     ctx.mcpReq.signal
                 );
-                const content: ContentBlock[] = [
-                    {
-                        type: 'resource_link',
-                        uri: artifact.url,
-                        name: 'screenshot.png',
+                const inline = args.inline ?? true;
+                const downloaded = inline ? await downloadArtifact(deps, artifact.url, ctx.mcpReq.signal) : undefined;
+                const content: ContentBlock[] = [];
+                if (downloaded?.state === 'embedded') {
+                    content.push({
+                        type: 'image',
+                        data: downloaded.base64,
                         mimeType: 'image/png',
-                        description: `Screenshot of ${args.url}`,
-                    },
-                ];
-                if (args.inline) {
-                    const response = await fetch(artifact.url, { signal: ctx.mcpReq.signal });
-                    const bytes = Buffer.from(await response.arrayBuffer());
-                    content.push({ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' });
+                        annotations: { audience: ['user'] },
+                    });
                 }
+                content.push({
+                    type: 'resource_link',
+                    uri: artifact.url,
+                    name: 'screenshot.png',
+                    title: 'Page screenshot',
+                    mimeType: 'image/png',
+                    size: downloaded?.state === 'embedded' ? downloaded.size : undefined,
+                    description: `Screenshot of ${args.url}`,
+                    annotations: { audience: ['user'] },
+                });
+                const fallbackNote =
+                    downloaded?.state === 'link_only' ? INLINE_FALLBACK_NOTES[downloaded.reason] : undefined;
                 return successResult(
-                    { result: `Captured ${args.url}. The image is linked below${args.inline ? ' and inlined' : ''}.` },
+                    {
+                        result:
+                            downloaded?.state === 'embedded'
+                                ? `Captured ${args.url}. The screenshot is attached inline and linked below.`
+                                : `Captured ${args.url}. The screenshot is linked below.`,
+                        notes: fallbackNote ? [fallbackNote] : undefined,
+                    },
                     { url: artifact.url },
                     content
                 );
@@ -229,7 +316,7 @@ export function registerPdf(host: ToolHost, deps: ServerDeps): void {
             title: 'Render a web page as PDF',
             description:
                 'Render a page to PDF and return a link to the file. Starts no browser session. Use steel_scrape ' +
-                'if you want to read the text — a PDF link is for handing a document to a person.',
+                'if you want to read the text — the PDF link is for handing a document to a person.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
             inputSchema: z.object({
                 url: z.url().describe('The page to render.'),
@@ -239,15 +326,18 @@ export function registerPdf(host: ToolHost, deps: ServerDeps): void {
         async (args, ctx) =>
             guard(deps, 'steel_pdf', ctx.mcpReq, async () => {
                 const artifact = await deps.api.pdf({ url: args.url, delay: args.delay_ms }, ctx.mcpReq.signal);
-                return successResult({ result: `Rendered ${args.url} to PDF.` }, { url: artifact.url }, [
+                const content: ContentBlock[] = [
                     {
                         type: 'resource_link',
                         uri: artifact.url,
                         name: 'page.pdf',
+                        title: 'Rendered page PDF',
                         mimeType: 'application/pdf',
                         description: `PDF of ${args.url}`,
+                        annotations: { audience: ['user'] },
                     },
-                ]);
+                ];
+                return successResult({ result: `Rendered ${args.url} to PDF.` }, { url: artifact.url }, content);
             })
     );
 }

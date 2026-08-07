@@ -282,7 +282,7 @@ Dockerfile. Every one of these produced a successful `docker build`.
   peerDependenciesMeta` → `npm prune --omit=dev` → `npm install --no-save <the two peers>`. Result:
   **178MB image, 22M `node_modules`**, holding exactly the four production dependencies and the two
   peers `hosted.ts` statically imports.
-- Verified in the image: stdio lists 13 tools over real JSON-RPC; `dist/hosted.js` answers `/healthz`
+- Verified in the image: stdio lists 14 tools over real JSON-RPC; `dist/hosted.js` answers `/healthz`
   200; and with `OTEL_EXPORTER_OTLP_ENDPOINT` set but no exporter installed it logs
   "Tracing was requested but could not start" exactly once and serves anyway. CI now runs all three.
 
@@ -318,7 +318,7 @@ deployment sitting behind a Traefik reverse proxy.
   brand-new key registers without a restart was *not* established, which is the standing caveat on
   the finding above.
 - **`tools/list` is not evidence that a credential works.** It never calls Steel, so a bridge that
-  failed to substitute `${STEEL_AUTH_HEADER}` still lists all thirteen tools and looks healthy. Only
+  failed to substitute `${STEEL_AUTH_HEADER}` still lists all fourteen tools and looks healthy. Only
   a tool that reaches Steel — `steel_scrape` is the cheapest, since it starts no session —
   distinguishes a live credential from a literal `${...}` sent as a bearer token.
 - **A proxy's port field is not the public port.** Coolify's domain field takes `https://host:8080`

@@ -1,5 +1,5 @@
 // ABOUTME: Assembles an McpServer for one profile: registers the tool table in a fixed order, serves
-// ABOUTME: the session-viewer app resource, and sets the cache hints the 2026-07-28 revision requires.
+// ABOUTME: the live-view app resource, and sets the cache hints the 2026-07-28 revision requires.
 import { McpServer } from '@modelcontextprotocol/server';
 import { SESSION_VIEWER_HTML, SESSION_VIEWER_MIME_TYPE, SESSION_VIEWER_URI } from './apps/session-viewer.js';
 import type { SteelConfig } from './config.js';
@@ -10,7 +10,7 @@ import { toolsForProfile } from './profiles.js';
 import type { RateLimiter } from './rate-limit.js';
 import { SERVER_VERSION } from './version.js';
 
-/** One hour. The tool list and the viewer shell are both org-independent, so both cache publicly. */
+/** One hour. The tool list and viewer shell are org-independent, so both cache publicly. */
 const PUBLIC_CACHE_TTL_MS = 3_600_000;
 
 /** The MCP Apps extension, negotiated per request under `capabilities.extensions`. */

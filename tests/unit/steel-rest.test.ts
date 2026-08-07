@@ -14,7 +14,9 @@ interface RecordedCall {
     body: unknown;
 }
 
-function fakeFetch(responses: Array<{ status?: number; body?: unknown; headers?: Record<string, string> }>) {
+function fakeFetch(
+    responses: Array<{ status?: number; body?: unknown; rawBody?: string; headers?: Record<string, string> }>
+) {
     const calls: RecordedCall[] = [];
     let index = 0;
     const fetchImpl = async (input: string | URL, init?: RequestInit): Promise<Response> => {
@@ -26,9 +28,12 @@ function fakeFetch(responses: Array<{ status?: number; body?: unknown; headers?:
             body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
         });
         const spec = responses[Math.min(index++, responses.length - 1)] ?? {};
-        return new Response(JSON.stringify(spec.body ?? {}), {
+        return new Response(spec.rawBody ?? JSON.stringify(spec.body ?? {}), {
             status: spec.status ?? 200,
-            headers: { 'content-type': 'application/json', ...(spec.headers ?? {}) },
+            headers: {
+                'content-type': spec.rawBody === undefined ? 'application/json' : 'application/vnd.apple.mpegurl',
+                ...(spec.headers ?? {}),
+            },
         });
     };
     return { calls, fetchImpl };
@@ -228,6 +233,16 @@ describe('SteelRestClient trace propagation', () => {
         await harness.shutdown();
     });
 
+    it('keeps historical-list filters out of the traced URL path', async () => {
+        const harness = tracingHarness();
+        const { api } = client([{ body: { sessions: [], nextCursor: null } }], undefined, harness.tracer);
+
+        await api.listSessions({ status: 'released', limit: 1 });
+
+        expect(harness.span('steel account').attributes['url.path']).toBe('/v1/sessions');
+        await harness.shutdown();
+    });
+
     it('marks the client span failed with the mapped error code', async () => {
         const harness = tracingHarness();
         const { api } = client([{ status: 429, body: { message: 'slow down' } }], undefined, harness.tracer);
@@ -242,6 +257,30 @@ describe('SteelRestClient trace propagation', () => {
 });
 
 describe('SteelRestClient diagnostics endpoints', () => {
+    it('lists the newest released session without starting one', async () => {
+        const { api, calls } = client([
+            {
+                body: {
+                    sessions: [
+                        {
+                            id: '7dbe8308-59f0-4f6f-8685-8fe9673d98fa',
+                            createdAt: '2026-08-05T11:00:00.000Z',
+                            status: 'released',
+                        },
+                    ],
+                    nextCursor: null,
+                    totalCount: 1,
+                },
+            },
+        ]);
+
+        const sessions = await api.listSessions({ status: 'released', limit: 1 });
+
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions?status=released&limit=1');
+        expect(calls[0]!.method).toBe('GET');
+        expect(sessions.sessions[0]?.id).toBe('7dbe8308-59f0-4f6f-8685-8fe9673d98fa');
+    });
+
     it('reads agent traces and session logs', async () => {
         const { api, calls } = client([
             { body: { events: [{ timestamp: '2026-07-27T00:00:00Z', type: 'click' }], total: 1, hasMore: false } },
@@ -318,5 +357,43 @@ describe('SteelRestClient diagnostics endpoints', () => {
         const { api } = client([{ body: { total: 0, hasMore: false } }]);
         const logs = await api.getSessionLogs('abc');
         expect(logs.events).toEqual([]);
+    });
+});
+
+describe('SteelRestClient session replay', () => {
+    it('retrieves an authenticated HLS playlist as text and encodes the historical session id', async () => {
+        const playlist =
+            '#EXTM3U\n#EXT-X-VERSION:7\n#EXTINF:2.000,\nhttps://recordings.test/segment.ts?token=short-lived\n';
+        const { api, calls } = client([{ rawBody: playlist }]);
+
+        const result = await api.getSessionHls('old/session');
+
+        expect(result).toBe(playlist);
+        expect(calls[0]!.url).toBe('https://api.steel.dev/v1/sessions/old%2Fsession/hls');
+        expect(calls[0]!.method).toBe('GET');
+        expect(calls[0]!.headers.authorization).toBe('Bearer ste-secret');
+        expect(calls[0]!.headers.accept).toBe('application/vnd.apple.mpegurl');
+    });
+
+    it('rejects a malformed successful response without exposing its body', async () => {
+        const privateBody = '<html>gateway response containing credential=private-recording-token</html>';
+        const { api } = client([{ rawBody: privateBody }]);
+
+        const error = await captureError(api.getSessionHls('finished'));
+
+        expect(error).toBeInstanceOf(SteelToolError);
+        expect(error.code).toBe('steel_error');
+        expect(error.message).toMatch(/invalid HLS playlist/i);
+        expect(error.message).not.toContain(privateBody);
+        expect(error.message).not.toContain('private-recording-token');
+    });
+
+    it('maps an HLS HTTP failure through the normal Steel error layer', async () => {
+        const { api } = client([{ status: 404, body: { message: 'Recording is not ready' } }]);
+
+        const error = await captureError(api.getSessionHls('finished'));
+
+        expect(error.code).toBe('not_found');
+        expect(error.message).toBe('Recording is not ready');
     });
 });

@@ -29,9 +29,14 @@ cp "$ROOT/$ICON" "$STAGE/$ICON"
 echo "==> Narrowing the staged package.json"
 node "$ROOT/scripts/stage-mcpb-package.mjs" "$STAGE"
 
-# `npm install` rather than `ci`: package-lock.json is gitignored, so a clean checkout has none.
+# `npm install` rather than `ci`: the staged package manifest is deliberately narrowed and therefore
+# no longer matches the tracked root lockfile.
 echo "==> Installing runtime dependencies"
 npm --prefix "$STAGE" install --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+
+# Source maps help package consumers debug, but the Desktop bundle is a release artifact rather than
+# a development install. Remove them after install so dependency maps cannot carry embedded source.
+find "$STAGE" -type f -name '*.map' -delete
 
 echo "==> Verifying the staged server starts and lists its tools"
 node "$ROOT/scripts/verify-mcpb-stage.mjs" "$STAGE"

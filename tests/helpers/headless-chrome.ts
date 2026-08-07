@@ -33,6 +33,9 @@ export function findChrome(): string | null {
  */
 export function announceMissing(suite: string, missing: readonly string[]): void {
     if (missing.length === 0) return;
+    if (process.env.CI === 'true') {
+        throw new Error(`${suite} requires ${missing.join(' and ')} in CI; skipping browser coverage is forbidden.`);
+    }
     process.stderr.write(
         `\n  SKIPPED ${suite}: this machine has no ${missing.join(' and no ')}.\n` +
             '  Install Google Chrome (or point CHROME_PATH at a Chromium build) and re-run npm run test:browser.\n\n'

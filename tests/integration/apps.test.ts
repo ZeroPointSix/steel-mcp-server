@@ -85,6 +85,7 @@ async function liveView(harness: Harness, sessionId?: string) {
 }
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
+const RETIRED_SESSION_REPLAY_URI = 'ui://steel/session-replay';
 
 /**
  * Answers one request on the 2026-07-28 era, through the hosted HTTP boundary.
@@ -141,7 +142,7 @@ interface UiMeta {
     resourceUri?: string;
     visibility?: string[];
     prefersBorder?: boolean;
-    csp?: { connectDomains?: string[] };
+    csp?: { connectDomains?: string[]; resourceDomains?: string[] };
 }
 
 function uiMetaOf(carrier: unknown): UiMeta | undefined {
@@ -214,6 +215,22 @@ describe('the session-viewer resource', () => {
         const result = await modernResult('resources/list');
         expect(result.ttlMs).toBe(0);
         expect(result.cacheScope).toBe('private');
+    });
+});
+
+describe('the retired session-replay resource', () => {
+    it('is absent from resources/list while the dashboard-only tool remains available', async () => {
+        const harness = await connect();
+        const { resources } = await harness.client.listResources();
+        const { tools } = await harness.client.listTools();
+
+        expect(resources.map(resource => resource.uri)).not.toContain(RETIRED_SESSION_REPLAY_URI);
+        expect(tools.map(tool => tool.name)).toContain('steel_session_replay');
+    });
+
+    it('returns not-found when an old host reads the retired URI', async () => {
+        const harness = await connect();
+        await expect(harness.client.readResource({ uri: RETIRED_SESSION_REPLAY_URI })).rejects.toThrow(/not found/i);
     });
 });
 

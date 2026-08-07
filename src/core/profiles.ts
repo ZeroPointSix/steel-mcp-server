@@ -4,6 +4,7 @@ import type { ProfileName } from './config.js';
 import type { ServerDeps, ToolHost } from './context.js';
 import { registerBatch } from './tools/batch.js';
 import { registerAct, registerFind, registerNavigate, registerSnapshot, registerWaitFor } from './tools/browse.js';
+import { registerSessionReplay } from './tools/replay.js';
 import {
     registerSessionCreate,
     registerSessionDiagnostics,
@@ -40,6 +41,7 @@ export const TOOL_TABLE: ToolDefinition[] = [
     { name: 'steel_act', profiles: BROWSE_AND_UP, register: registerAct },
     { name: 'steel_wait_for', profiles: BROWSE_AND_UP, register: registerWaitFor },
     { name: 'steel_session_diagnostics', profiles: BROWSE_AND_UP, register: registerSessionDiagnostics },
+    { name: 'steel_session_replay', profiles: BROWSE_AND_UP, register: registerSessionReplay },
     { name: 'steel_batch', profiles: BROWSE_AND_UP, register: registerBatch },
     // Last on purpose. A host filters this one out of the list it shows the model, and appending
     // rather than inserting keeps the prefix every other tool sits in byte-identical.
