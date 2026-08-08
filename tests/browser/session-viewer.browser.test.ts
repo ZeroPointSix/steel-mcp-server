@@ -19,6 +19,9 @@ const MAGENTA: [number, number, number] = [255, 0, 255];
 const CYAN: [number, number, number] = [0, 255, 255];
 const JPEG_WIDTH = 64;
 const JPEG_HEIGHT = 40;
+// The one expensive hook owns a 90s launch, a 20s WebSocket handshake and four 20s CDP commands.
+// Its bound is scoped here so a broken cleanup hook still fails at the ordinary 60s project limit.
+const BROWSER_SETUP_TIMEOUT_MS = 220_000;
 
 let chrome: HeadlessChrome | undefined;
 let magentaJpeg: string;
@@ -32,7 +35,7 @@ beforeAll(async () => {
     chrome = await HeadlessChrome.launch(chromePath!);
     magentaJpeg = await chrome.encodeJpeg('#ff00ff', JPEG_WIDTH, JPEG_HEIGHT);
     cyanJpeg = await chrome.encodeJpeg('#00ffff', JPEG_WIDTH, JPEG_HEIGHT);
-});
+}, BROWSER_SETUP_TIMEOUT_MS);
 
 afterAll(async () => {
     // Guarded on the browser rather than on `available`, because a launch that threw leaves the

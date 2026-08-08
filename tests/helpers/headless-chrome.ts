@@ -1,7 +1,7 @@
 // ABOUTME: Launches a local headless Chrome and drives it over CDP, exposing one session for a host
 // ABOUTME: page and one for the sandboxed app frame inside it, so a test can read what the app painted.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -10,7 +10,20 @@ import WebSocket from 'ws';
  * How much of Chrome's stderr to keep for a failure message. A browser that grumbles for the whole
  * startup timeout must not grow the heap, and only the last lines say why it stopped.
  */
-const STDERR_TAIL_CHARS = 4096;
+const STDERR_TAIL_CHARS = 16_384;
+
+/**
+ * How long to wait for a launching Chrome to publish its debugging port.
+ *
+ * This is a bounded experiment after two CI runners reached the old 20s bound without publishing a
+ * port. An early exit is still reported promptly; a process that remains unready may be slow or stuck,
+ * and this deadline does not claim to distinguish the two.
+ */
+const LAUNCH_TIMEOUT_MS = 90_000;
+
+/** Every launch stage has its own bound so Vitest reports the stage, not only that its hook expired. */
+const CDP_HANDSHAKE_TIMEOUT_MS = 20_000;
+const PROCESS_EXIT_TIMEOUT_MS = 5_000;
 
 /** Browsers that can run the app, in the order they are preferred. `CHROME_PATH` wins over all. */
 const CHROME_CANDIDATES = [
@@ -111,11 +124,23 @@ class CdpConnection {
     }
 
     static async open(url: string): Promise<CdpConnection> {
-        const socket = new WebSocket(url, { perMessageDeflate: false, maxPayload: 256 << 20 });
-        await new Promise<void>((resolve, reject) => {
-            socket.once('open', resolve);
-            socket.once('error', reject);
+        const socket = new WebSocket(url, {
+            perMessageDeflate: false,
+            maxPayload: 256 << 20,
+            handshakeTimeout: CDP_HANDSHAKE_TIMEOUT_MS,
         });
+        try {
+            await new Promise<void>((resolve, reject) => {
+                socket.once('open', resolve);
+                socket.once('error', reject);
+            });
+        } catch (cause) {
+            socket.terminate();
+            throw new Error(
+                `Chrome published its debugging endpoint, but the CDP WebSocket failed to open within ${CDP_HANDSHAKE_TIMEOUT_MS}ms: ${errorMessage(cause)}`,
+                { cause }
+            );
+        }
         return new CdpConnection(socket);
     }
 
@@ -294,6 +319,8 @@ export class HeadlessChrome {
 
     static async launch(binary: string): Promise<HeadlessChrome> {
         const profile = mkdtempSync(join(tmpdir(), 'steel-viewer-chrome-'));
+        const startedAt = Date.now();
+        const loggingArgs = process.env.CHROME_DEBUG_LOGGING === '1' ? ['--enable-logging=stderr', '--v=1'] : [];
         const child = spawn(
             binary,
             [
@@ -311,6 +338,7 @@ export class HeadlessChrome {
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding',
+                ...loggingArgs,
                 'about:blank',
             ],
             { stdio: ['ignore', 'ignore', 'pipe'] }
@@ -323,24 +351,57 @@ export class HeadlessChrome {
         child.stderr?.on('data', (chunk: string) => {
             stderr = (stderr + chunk).slice(-STDERR_TAIL_CHARS);
         });
+        const stderrClosed = child.stderr
+            ? new Promise<void>(resolve => {
+                  if (child.stderr!.closed) resolve();
+                  else child.stderr!.once('close', () => resolve());
+              })
+            : Promise.resolve();
         // A browser that dies on startup never writes the port file, so without this the wait runs
         // its full timeout and reports a deadline instead of the exit that caused it.
         let exited: string | undefined;
+        let spawnFailure: string | undefined;
         child.on('exit', (code, signal) => {
             exited = signal === null ? `exited with code ${code}` : `was killed by ${signal}`;
         });
+        child.on('error', error => {
+            spawnFailure = `could not be spawned: ${error.message}`;
+        });
 
         try {
-            const url = await readDebuggerUrl(profile, 20_000, {
-                exited: () => exited,
+            const endpoint = await readDebuggerUrl(profile, LAUNCH_TIMEOUT_MS, {
+                ending: () => processEnding(child, spawnFailure, exited),
+                status: () => describeProcess(child, spawnFailure),
                 stderr: () => stderr,
             });
-            const connection = await CdpConnection.open(url);
+            const connection = await CdpConnection.open(endpoint.url);
+            if (process.env.CI === 'true') {
+                process.stderr.write(
+                    `\n  Chrome launch: binary=${JSON.stringify(binary)}, pid=${child.pid ?? 'unassigned'}, ` +
+                        `port=${endpoint.elapsedMs}ms, cdp=${Date.now() - startedAt}ms.\n`
+                );
+            }
             return new HeadlessChrome(child, connection, profile);
         } catch (error) {
-            child.kill('SIGKILL');
-            rmSync(profile, { recursive: true, force: true, maxRetries: 20 });
-            throw error;
+            const primary = asError(error);
+            const cleanupErrors: string[] = [];
+            const stderrAtFailure = stderr;
+            try {
+                await terminateProcess(child);
+            } catch (cleanupError) {
+                cleanupErrors.push(`terminating Chrome: ${errorMessage(cleanupError)}`);
+            }
+            await Promise.race([stderrClosed, delay(1_000)]);
+            try {
+                await removeOnceSettled(profile);
+            } catch (cleanupError) {
+                cleanupErrors.push(`removing ${profile}: ${errorMessage(cleanupError)}`);
+            }
+            const lateStderr = stderrSince(stderrAtFailure, stderr);
+            if (lateStderr !== '') primary.message += `\nChrome stderr captured during cleanup:\n${lateStderr}`;
+            if (cleanupErrors.length > 0)
+                primary.message += `\nLaunch cleanup also failed: ${cleanupErrors.join('; ')}`;
+            throw primary;
         }
     }
 
@@ -394,8 +455,7 @@ export class HeadlessChrome {
 
     async close(): Promise<void> {
         this.connection.close();
-        this.process.kill('SIGKILL');
-        await new Promise<void>(resolve => this.process.once('exit', () => resolve()));
+        await terminateProcess(this.process);
         await removeOnceSettled(this.profile);
     }
 
@@ -411,6 +471,32 @@ export class HeadlessChrome {
         });
         return new BrowserPage(this.connection, targetId, sessionId);
     }
+}
+
+/** Sends Chrome its terminal signal and does not return until the spawned process has ended. */
+export async function terminateProcess(child: ChildProcess): Promise<void> {
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve, reject) => {
+        const finish = (): void => {
+            clearTimeout(timer);
+            child.off('exit', finish);
+            child.off('error', fail);
+            resolve();
+        };
+        const fail = (error: Error): void => {
+            clearTimeout(timer);
+            child.off('exit', finish);
+            child.off('error', fail);
+            reject(error);
+        };
+        const timer = setTimeout(() => {
+            fail(new Error(`Chrome pid ${child.pid} did not exit within ${PROCESS_EXIT_TIMEOUT_MS}ms after SIGKILL`));
+        }, PROCESS_EXIT_TIMEOUT_MS);
+        child.once('exit', finish);
+        child.once('error', fail);
+        if (child.exitCode !== null || child.signalCode !== null) finish();
+        else if (!child.kill('SIGKILL')) fail(new Error(`could not send SIGKILL to Chrome pid ${child.pid}`));
+    });
 }
 
 /**
@@ -433,13 +519,26 @@ async function removeOnceSettled(directory: string): Promise<void> {
     }
 }
 
-/** What a launching Chrome has said and whether it is still alive, so a failure can name its cause. */
-interface LaunchWatch {
-    /** How the process ended, or `undefined` while it is still running. */
-    exited: () => string | undefined;
+/** What a launching Chrome has said and what Node can observe about its process. */
+export interface LaunchWatch {
+    /** How the process ended or failed to spawn, or `undefined` when neither has been observed. */
+    ending: () => string | undefined;
+    /** A point-in-time process snapshot for a timeout report. */
+    status: () => string;
     /** The tail of everything the process wrote to stderr. */
     stderr: () => string;
 }
+
+interface DebuggerEndpoint {
+    url: string;
+    elapsedMs: number;
+}
+
+type PortObservation =
+    | { kind: 'ready'; url: string }
+    | { kind: 'missing' }
+    | { kind: 'unreadable'; error: string }
+    | { kind: 'malformed'; contents: string };
 
 /**
  * Reads the debugging endpoint Chrome writes into its profile once it is listening.
@@ -447,29 +546,107 @@ interface LaunchWatch {
  * Asking for port 0 and reading the port back is what keeps two runs on one machine from fighting
  * over a hardcoded port.
  */
-async function readDebuggerUrl(profile: string, timeoutMs: number, watch: LaunchWatch): Promise<string> {
+export async function readDebuggerUrl(
+    profile: string,
+    timeoutMs: number,
+    watch: LaunchWatch
+): Promise<DebuggerEndpoint> {
     const file = join(profile, 'DevToolsActivePort');
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        try {
-            const [port, path] = readFileSync(file, 'utf8').split('\n');
-            if (port !== undefined && path !== undefined && path !== '') return `ws://127.0.0.1:${port}${path}`;
-        } catch {
-            // Chrome has not written the file yet.
-        }
-        const ending = watch.exited();
+    const startedAt = Date.now();
+    for (;;) {
+        const observation = observeDebuggerPort(file);
+        const elapsedMs = Date.now() - startedAt;
+        if (observation.kind === 'ready') return { url: observation.url, elapsedMs };
+        const ending = watch.ending();
         if (ending !== undefined) {
-            throw new Error(`Chrome ${ending} before it started listening.${reportStderr(watch.stderr())}`);
+            throw new Error(
+                `Chrome ${ending} after ${elapsedMs}ms before it started listening. ` +
+                    `${describePort(file, observation)} ${watch.status()}.${reportStderr(watch.stderr())}`
+            );
         }
-        await new Promise(resolve => setTimeout(resolve, 50));
+        if (elapsedMs >= timeoutMs) {
+            throw new Error(
+                `Chrome did not start listening within ${timeoutMs}ms. ${describePort(file, observation)} ` +
+                    `${watch.status()}. ${describeProfile(profile)}.${reportStderr(watch.stderr())}`
+            );
+        }
+        await delay(Math.min(50, timeoutMs - elapsedMs));
     }
-    throw new Error(
-        `Chrome did not start listening within ${timeoutMs}ms (no ${file}).${reportStderr(watch.stderr())}`
+}
+
+function observeDebuggerPort(file: string): PortObservation {
+    let contents: string;
+    try {
+        contents = readFileSync(file, 'utf8');
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code === 'ENOENT' ? { kind: 'missing' } : { kind: 'unreadable', error: errorMessage(error) };
+    }
+    const [portText, path] = contents.split(/\r?\n/);
+    const port = Number(portText);
+    if (Number.isInteger(port) && port > 0 && port <= 65_535 && path?.startsWith('/') === true) {
+        return { kind: 'ready', url: `ws://127.0.0.1:${port}${path}` };
+    }
+    return { kind: 'malformed', contents: contents.slice(0, 256) };
+}
+
+function describePort(file: string, observation: Exclude<PortObservation, { kind: 'ready' }>): string {
+    if (observation.kind === 'missing') return `${file} was absent.`;
+    if (observation.kind === 'unreadable') return `${file} could not be read: ${observation.error}.`;
+    return `${file} existed but was malformed: ${JSON.stringify(observation.contents)}.`;
+}
+
+function describeProcess(child: ChildProcess, spawnFailure: string | undefined): string {
+    return (
+        `Process status: pid=${child.pid ?? 'unassigned'}, exitCode=${String(child.exitCode)}, ` +
+        `signalCode=${String(child.signalCode)}, killed=${child.killed}` +
+        (spawnFailure === undefined ? '' : `, spawnError=${JSON.stringify(spawnFailure)}`)
     );
 }
 
-/** Renders the captured stderr for an error message, saying so plainly when there was none. */
+function processEnding(
+    child: ChildProcess,
+    spawnFailure: string | undefined,
+    observedExit: string | undefined
+): string | undefined {
+    if (spawnFailure !== undefined) return spawnFailure;
+    if (observedExit !== undefined) return observedExit;
+    if (child.signalCode !== null) return `was killed by ${child.signalCode}`;
+    if (child.exitCode !== null) return `exited with code ${child.exitCode}`;
+    return undefined;
+}
+
+function describeProfile(profile: string): string {
+    try {
+        const entries = readdirSync(profile).sort();
+        if (entries.length === 0) return 'The Chrome profile was empty';
+        const shown = entries.slice(0, 20).map(name => JSON.stringify(name));
+        const suffix = entries.length > shown.length ? `, and ${entries.length - shown.length} more` : '';
+        return `The Chrome profile contained ${shown.join(', ')}${suffix}`;
+    } catch (error) {
+        return `The Chrome profile could not be inspected: ${errorMessage(error)}`;
+    }
+}
+
+/** Renders what stderr had delivered by the deadline; Chrome may still have buffered other output. */
 function reportStderr(stderr: string): string {
     const text = stderr.trim();
-    return text === '' ? ' It wrote nothing to stderr.' : `\nChrome stderr:\n${text}`;
+    return text === '' ? ' No Chrome stderr had been captured by the deadline.' : `\nChrome stderr:\n${text}`;
+}
+
+function stderrSince(before: string, after: string): string {
+    if (after === before) return '';
+    return (after.startsWith(before) ? after.slice(before.length) : after).trim();
+}
+
+function asError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(errorMessage(error));
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function delay(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
