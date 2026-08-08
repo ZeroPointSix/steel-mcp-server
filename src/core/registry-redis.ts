@@ -4,12 +4,16 @@ import {
     type CreateHandleInput,
     type HandleRecord,
     type HandleRegistry,
+    type HumanControlLease,
     handleExpiredError,
     handleNotFoundError,
+    humanControlError,
+    mintControlToken,
     mintHandle,
     type ReapOptions,
     type RegistryDeps,
     type ReleasePath,
+    sessionReleasingError,
 } from './registry.js';
 
 /**
@@ -27,6 +31,12 @@ export interface RedisCommands {
      * path: it is always set far beyond the handle's own hard expiry.
      */
     set(key: string, value: string, ttlMs: number): Promise<void>;
+    /** SET NX PX: claims a missing expiring key atomically. */
+    setIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean>;
+    /** Replaces an expiring value only when its current bytes match `expected`. */
+    compareSet(key: string, expected: string, value: string, ttlMs: number): Promise<boolean>;
+    /** Deletes a value only when its current bytes match `expected`. */
+    compareDelete(key: string, expected: string): Promise<boolean>;
     /** Returns how many keys were removed, which is how one of two concurrent sweepers wins. */
     del(key: string): Promise<number>;
     /**
@@ -62,7 +72,7 @@ const DEFAULT_KEY_PREFIX = 'steel-mcp';
 const RECORD_GRACE_MS = 86_400_000;
 
 /**
- * How long each of the three mutable-field keys lives.
+ * How long the activity, pending-input and handoff-round keys live.
  *
  * Its expiry is not a deadline anything depends on: a missing `lastUsedAt` means nothing has
  * touched the handle for this long, so falling back to `createdAt` reports it as idle, which it
@@ -78,7 +88,10 @@ const MUTABLE_FIELD_TTL_MS = RECORD_GRACE_MS;
  * creation, and a whole-record rewrite is what made a concurrent touch able to undo a release or a
  * handoff.
  */
-type StoredRecord = Omit<HandleRecord, 'lastUsedAt' | 'awaitingInputUntil' | 'handoffRounds'>;
+type StoredRecord = Omit<
+    HandleRecord,
+    'lastUsedAt' | 'awaitingInputUntil' | 'handoffRounds' | 'humanControl' | 'releasing'
+>;
 
 /** Reads a timestamp key, treating anything unparseable as absent. */
 function readTimestamp(raw: string | null): number | undefined {
@@ -105,12 +118,11 @@ export class RedisHandleRegistry implements HandleRegistry {
     }
 
     /**
-     * The three keys holding the fields that change after creation.
+     * Keys holding fields that change after creation.
      *
-     * Each is owned by exactly one operation — `touch` writes the first, `awaitInput` the second,
-     * `recordHandoff` the third — so every mutation is a single-key command that depends on no
-     * record read a moment earlier. A handle is base64url, so no suffix can collide with another
-     * handle's record key.
+     * The first three are each owned by one operation. Human/release ownership shares `control`,
+     * where SET-NX and compare-and-set provide the atomic fencing a plain record rewrite cannot.
+     * A handle is base64url, so no suffix can collide with another handle's record key.
      */
     private usedKey(handle: string): string {
         return `${this.recordKey(handle)}:used`;
@@ -124,6 +136,10 @@ export class RedisHandleRegistry implements HandleRegistry {
         return `${this.recordKey(handle)}:rounds`;
     }
 
+    private controlKey(handle: string): string {
+        return `${this.recordKey(handle)}:control`;
+    }
+
     /** Index of one principal's handles, so a count or a list never scans another tenant's records. */
     private principalKey(principal: string): string {
         return `${this.prefix}:principal:${principal}`;
@@ -134,14 +150,15 @@ export class RedisHandleRegistry implements HandleRegistry {
         return `${this.prefix}:live`;
     }
 
-    /** Reassembles a record from its immutable JSON and the three keys holding its mutable fields. */
+    /** Reassembles a record from its immutable JSON and four keys holding mutable fields. */
     private async read(handle: string): Promise<HandleRecord | null> {
-        // Issued together so reading four keys costs one round trip rather than four.
-        const [raw, used, awaiting, rounds] = await Promise.all([
+        // Issued together so reading five keys costs one round trip rather than five.
+        const [raw, used, awaiting, rounds, control] = await Promise.all([
             this.commands.get(this.recordKey(handle)),
             this.commands.get(this.usedKey(handle)),
             this.commands.get(this.awaitKey(handle)),
             this.commands.get(this.roundsKey(handle)),
+            this.commands.get(this.controlKey(handle)),
         ]);
         // The record is what decides whether the handle exists at all; the other three are only ever
         // read for a handle that does, so a stray one left by a released handle changes nothing.
@@ -156,6 +173,25 @@ export class RedisHandleRegistry implements HandleRegistry {
             return null;
         }
 
+        let humanControl: HandleRecord['humanControl'];
+        let releasing = false;
+        if (control !== null) {
+            try {
+                const parsed = JSON.parse(control) as HumanControlLease | { releasing?: unknown };
+                if ('releasing' in parsed && parsed.releasing === true) {
+                    releasing = true;
+                } else if (
+                    'token' in parsed &&
+                    typeof parsed.token === 'string' &&
+                    Number.isFinite(parsed.leaseUntil)
+                ) {
+                    humanControl = parsed;
+                }
+            } catch {
+                // A malformed lease grants nobody control and expires independently.
+            }
+        }
+
         return {
             ...stored,
             // No use recorded means none since creation — see MUTABLE_FIELD_TTL_MS for why an
@@ -164,6 +200,8 @@ export class RedisHandleRegistry implements HandleRegistry {
             awaitingInputUntil: readTimestamp(awaiting),
             // No counter key means no handoff has been offered yet.
             handoffRounds: readTimestamp(rounds) ?? 0,
+            humanControl,
+            releasing,
         };
     }
 
@@ -181,7 +219,7 @@ export class RedisHandleRegistry implements HandleRegistry {
     }
 
     /**
-     * Removes a record, its two mutable-field keys and both of its index entries.
+     * Removes a record, all four mutable-field keys and both index entries.
      *
      * Returns whether this caller was the one that removed the record. Two replicas sweeping at
      * once both see the handle, so `del` of the record deciding the winner is what keeps the
@@ -192,6 +230,7 @@ export class RedisHandleRegistry implements HandleRegistry {
         await this.commands.del(this.usedKey(handle));
         await this.commands.del(this.awaitKey(handle));
         await this.commands.del(this.roundsKey(handle));
+        await this.commands.del(this.controlKey(handle));
         await this.commands.srem(this.principalKey(principal), handle);
         await this.commands.srem(this.liveKey, `${principal}:${handle}`);
         return removed > 0;
@@ -252,6 +291,61 @@ export class RedisHandleRegistry implements HandleRegistry {
         await this.commands.del(this.awaitKey(handle));
     }
 
+    async resolveForAgent(handle: string, principal: string): Promise<HandleRecord> {
+        const record = await this.resolve(handle, principal);
+        if (record.releasing) throw sessionReleasingError();
+        if (record.humanControl && record.humanControl.leaseUntil > this.now().getTime()) {
+            throw humanControlError(record.humanControl.leaseUntil);
+        }
+        return record;
+    }
+
+    async acquireHumanControl(handle: string, principal: string, leaseMs: number) {
+        const record = await this.resolve(handle, principal);
+        const now = this.now().getTime();
+        if (record.releasing) throw sessionReleasingError();
+        const lease = { token: mintControlToken(), leaseUntil: Math.min(now + leaseMs, record.expiresAt) };
+        const raw = JSON.stringify(lease);
+        const claimed = await this.commands.setIfAbsent(
+            this.controlKey(handle),
+            raw,
+            Math.max(1, lease.leaseUntil - now)
+        );
+        if (!claimed) {
+            const current = await this.read(handle);
+            if (current?.releasing) throw sessionReleasingError();
+            throw humanControlError(current?.humanControl?.leaseUntil);
+        }
+        return lease;
+    }
+
+    async renewHumanControl(handle: string, principal: string, token: string, leaseMs: number) {
+        const record = await this.resolve(handle, principal);
+        const current = record.humanControl;
+        const now = this.now().getTime();
+        if (!current || current.token !== token || current.leaseUntil <= now) throw humanControlError();
+        const lease = { token, leaseUntil: Math.min(now + leaseMs, record.expiresAt) };
+        const renewed = await this.commands.compareSet(
+            this.controlKey(handle),
+            JSON.stringify(current),
+            JSON.stringify(lease),
+            Math.max(1, lease.leaseUntil - now)
+        );
+        if (!renewed) throw humanControlError();
+        return lease;
+    }
+
+    async releaseHumanControl(handle: string, principal: string, token: string): Promise<void> {
+        const record = await this.resolve(handle, principal);
+        const current = record.humanControl;
+        if (!current || current.token !== token) throw humanControlError();
+        if (!(await this.commands.compareDelete(this.controlKey(handle), JSON.stringify(current)))) {
+            throw humanControlError();
+        }
+        await this.commands.del(this.awaitKey(handle));
+        await this.commands.set(this.usedKey(handle), String(this.now().getTime()), MUTABLE_FIELD_TTL_MS);
+    }
+
     async awaitInput(handle: string, untilMs: number): Promise<void> {
         await this.commands.set(this.awaitKey(handle), String(untilMs), MUTABLE_FIELD_TTL_MS);
     }
@@ -283,7 +377,22 @@ export class RedisHandleRegistry implements HandleRegistry {
         if (record.principal !== principal) {
             throw handleNotFoundError();
         }
-        await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
+        if (record.releasing) return null;
+        if (record.humanControl && record.humanControl.leaseUntil > this.now().getTime()) {
+            throw humanControlError(record.humanControl.leaseUntil);
+        }
+        const marker = JSON.stringify({ releasing: true, token: mintControlToken() });
+        if (!(await this.commands.setIfAbsent(this.controlKey(handle), marker, 120_000))) {
+            const current = await this.read(handle);
+            if (current?.humanControl) throw humanControlError(current.humanControl.leaseUntil);
+            return null;
+        }
+        try {
+            await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
+        } catch (error) {
+            await this.commands.compareDelete(this.controlKey(handle), marker);
+            throw error;
+        }
         if (await this.forget(principal, handle)) this.counts[path] += 1;
         return record;
     }
@@ -332,18 +441,22 @@ export class RedisHandleRegistry implements HandleRegistry {
                 continue;
             }
 
-            const awaitingHuman = (record.awaitingInputUntil ?? 0) > now;
+            const awaitingHuman =
+                (record.awaitingInputUntil ?? 0) > now || (record.humanControl?.leaseUntil ?? 0) > now;
             const idle = !awaitingHuman && now - record.lastUsedAt >= options.idleMs;
             const expired = record.expiresAt <= now;
             if (!idle && !expired) continue;
 
+            const marker = JSON.stringify({ releasing: true, token: mintControlToken() });
             try {
+                if (!(await this.commands.setIfAbsent(this.controlKey(handle), marker, 120_000))) continue;
                 await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
                 if (await this.forget(record.principal, handle)) {
                     this.counts.reaper += 1;
                     reaped += 1;
                 }
             } catch (error) {
+                await this.commands.compareDelete(this.controlKey(handle), marker);
                 // The record stays so the next sweep — on this replica or any other — tries again.
                 // Dropping it here would leave the browser running with nothing tracking it.
                 this.deps.onReapError?.(error);

@@ -74,6 +74,7 @@ interface LiveView {
     cdp_url?: string;
     viewport?: { width: number; height: number };
     expires_at?: string;
+    control?: { state?: string; token?: string; lease_expires_at?: string };
 }
 
 async function liveView(harness: Harness, sessionId?: string) {
@@ -399,5 +400,57 @@ describe('steel_session_live_view', () => {
         const span = tracing.span('tools/call steel_session_live_view');
         expect(JSON.stringify(span.attributes)).not.toContain('token=');
         await tracing.shutdown();
+    });
+
+    it('acquires, renews and releases exclusive human control without exposing the token in text', async () => {
+        const harness = await connect();
+        const sessionId = await newSession(harness);
+        const acquire = await harness.client.callTool({
+            name: 'steel_session_live_view',
+            arguments: { session_id: sessionId, action: 'acquire' },
+        });
+        const control = (acquire as { structuredContent?: LiveView }).structuredContent?.control;
+        expect(control?.state).toBe('human');
+        expect(control?.token).toMatch(/^ctl_/);
+        expect(textOf(acquire)).not.toContain(control?.token ?? 'ctl_');
+
+        const blocked = await harness.client.callTool({
+            name: 'steel_snapshot',
+            arguments: { session_id: sessionId },
+        });
+        expect(isError(blocked)).toBe(true);
+        expect((blocked as { structuredContent?: { error?: { code?: string } } }).structuredContent?.error?.code).toBe(
+            'human_control_active'
+        );
+
+        const renew = await harness.client.callTool({
+            name: 'steel_session_live_view',
+            arguments: { session_id: sessionId, action: 'renew', control_token: control?.token },
+        });
+        expect((renew as { structuredContent?: LiveView }).structuredContent?.control?.token).toBe(control?.token);
+
+        const released = await harness.client.callTool({
+            name: 'steel_session_live_view',
+            arguments: { session_id: sessionId, action: 'release', control_token: control?.token },
+        });
+        expect((released as { structuredContent?: LiveView }).structuredContent?.control?.state).toBe('agent');
+        expect(isError(released)).toBe(false);
+    });
+
+    it('allows only the viewer holding the current fencing token to hand control back', async () => {
+        const harness = await connect();
+        const sessionId = await newSession(harness);
+        await harness.client.callTool({
+            name: 'steel_session_live_view',
+            arguments: { session_id: sessionId, action: 'acquire' },
+        });
+        const release = await harness.client.callTool({
+            name: 'steel_session_live_view',
+            arguments: { session_id: sessionId, action: 'release', control_token: 'ctl_stale' },
+        });
+        expect(isError(release)).toBe(true);
+        expect((release as { structuredContent?: { error?: { code?: string } } }).structuredContent?.error?.code).toBe(
+            'human_control_active'
+        );
     });
 });

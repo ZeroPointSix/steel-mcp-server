@@ -121,13 +121,28 @@ function decline(id, message){ post({ jsonrpc: '2.0', id: id, error: { code: -32
 /** The app broke the bridge contract. Recorded, so a test never has to infer it from ordering. */
 function refuse(id, message){ log.violations.push(message); post({ jsonrpc: '2.0', id: id, error: { code: -32600, message: message } }); }
 
-function answerLiveView(id){
+function answerLiveView(id, args){
+  var action = args && args.action;
+  if (action === 'acquire' || action === 'renew') {
+    var token = action === 'renew' ? args.control_token : 'ctl-fake-viewer';
+    reply(id, { content: [{ type: 'text', text: 'control ready' }], structuredContent: {
+      session_id: args.session_id,
+      control: { state: 'human', token: token, lease_expires_at: new Date(Date.now() + 60000).toISOString() }
+    } });
+    return;
+  }
+  if (action === 'release') {
+    reply(id, { content: [{ type: 'text', text: 'control returned' }], structuredContent: {
+      session_id: args.session_id, control: { state: 'agent' }
+    } });
+    return;
+  }
   var answer = CONFIG.liveView;
   if (answer.kind === 'silent') return;
   if (answer.kind === 'rpc-error') { decline(id, answer.message); return; }
   if (answer.kind === 'tool-error') { reply(id, { isError: true, content: [{ type: 'text', text: answer.message }] }); return; }
   if (answer.kind === 'no-details') { reply(id, { content: [{ type: 'text', text: 'the live view is not available' }] }); return; }
-  var structured = { cdp_url: answer.cdpUrl };
+  var structured = { session_id: (args && args.session_id) || 'sess-resolved-by-host', cdp_url: answer.cdpUrl };
   if (answer.viewport) structured.viewport = answer.viewport;
   if (answer.expiresAt !== undefined) structured.expires_at = answer.expiresAt;
   reply(id, { content: [{ type: 'text', text: 'live view ready' }], structuredContent: structured });
@@ -188,7 +203,7 @@ window.addEventListener('message', function (event) {
     if (!log.initialized) { refuse(message.id, 'tools/call before ui/notifications/initialized'); return; }
     var name = message.params && message.params.name;
     if (name !== CONFIG.liveViewTool) { refuse(message.id, 'tools/call for an unexpected tool: ' + name); return; }
-    answerLiveView(message.id);
+    answerLiveView(message.id, (message.params && message.params.arguments) || {});
     return;
   }
 
@@ -345,17 +360,27 @@ export class HostedViewer {
     }
 
     /** Turns take-control on by clicking the real toggle, the path a human takes. */
-    takeControl(): Promise<void> {
-        return this.page.evalInApp(
+    async takeControl(): Promise<void> {
+        await this.page.evalInApp(
             "var b=document.getElementById('control'); if(b.getAttribute('aria-pressed')!=='true') b.click();"
         );
+        for (let attempt = 0; attempt < 100; attempt++) {
+            if (await this.driving()) return;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error('the viewer did not acquire human control');
     }
 
     /** Turns take-control off by clicking the real toggle again. */
-    handBack(): Promise<void> {
-        return this.page.evalInApp(
+    async handBack(): Promise<void> {
+        await this.page.evalInApp(
             "var b=document.getElementById('control'); if(b.getAttribute('aria-pressed')==='true') b.click();"
         );
+        for (let attempt = 0; attempt < 100; attempt++) {
+            if (!(await this.driving())) return;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error('the viewer did not return control');
     }
 
     /** Whether the app is currently forwarding input, read off the toggle's pressed state. */
@@ -366,6 +391,23 @@ export class HostedViewer {
     /** The visible mode label ("Watching (read-only)" / "You are driving this browser"). */
     modeLabel(): Promise<string> {
         return this.page.evalInApp<string>("document.getElementById('mode').textContent");
+    }
+
+    /** Whether a remote file input has made the trusted local-picker control available. */
+    fileControl(): Promise<{ hidden: boolean; disabled: boolean }> {
+        return this.page.evalInApp(
+            `(function(){var b=document.getElementById('attach');return {hidden:b.hidden,disabled:b.disabled};})()`
+        );
+    }
+
+    /** Supplies a local file to the viewer as if the native picker returned it, without disk fixtures. */
+    selectLocalFile(name: string, text: string, type: string): Promise<void> {
+        return this.page.evalInApp(
+            `(function(){window.confirm=function(){return true};var input=document.getElementById('local-file');` +
+                `var transfer=new DataTransfer();transfer.items.add(new File([${JSON.stringify(text)}],` +
+                `${JSON.stringify(name)},{type:${JSON.stringify(type)}}));input.files=transfer.files;` +
+                `input.dispatchEvent(new Event('change',{bubbles:true}));})()`
+        );
     }
 
     /** Dispatches a synthetic key event on the canvas the way a focused canvas would receive it. */

@@ -106,6 +106,7 @@ export function readSessionIdFromToolResult(result: unknown): string | null {
 
 /** What the live-view tool tells the app: where to connect, how big the page is, when access ends. */
 export interface LiveView {
+    readonly sessionId: string;
     readonly cdpUrl: string;
     /** Captured viewport width in CSS pixels, or `0` when the tool did not say. */
     readonly width: number;
@@ -129,7 +130,8 @@ export function readLiveView(result: unknown): LiveView | null {
     if ((result as { isError?: unknown }).isError === true) return null;
     const structured = (result as { structuredContent?: unknown }).structuredContent;
     if (typeof structured !== 'object' || structured === null) return null;
-    const fields = structured as { cdp_url?: unknown; viewport?: unknown; expires_at?: unknown };
+    const fields = structured as { session_id?: unknown; cdp_url?: unknown; viewport?: unknown; expires_at?: unknown };
+    if (typeof fields.session_id !== 'string' || !/^[A-Za-z0-9_-]{4,128}$/.test(fields.session_id)) return null;
     if (typeof fields.cdp_url !== 'string' || fields.cdp_url === '') return null;
     const viewport = (typeof fields.viewport === 'object' && fields.viewport !== null ? fields.viewport : {}) as {
         width?: unknown;
@@ -145,7 +147,32 @@ export function readLiveView(result: unknown): LiveView | null {
         expiresAt =
             fields.expires_at < 100000000000 ? Math.round(fields.expires_at * 1000) : Math.round(fields.expires_at);
     }
-    return { cdpUrl: fields.cdp_url, width: size(viewport.width), height: size(viewport.height), expiresAt };
+    return {
+        sessionId: fields.session_id,
+        cdpUrl: fields.cdp_url,
+        width: size(viewport.width),
+        height: size(viewport.height),
+        expiresAt,
+    };
+}
+
+export interface ViewerControlLease {
+    token: string;
+    leaseExpiresAt: number;
+}
+
+/** Reads the opaque control token returned only to this app. Embedded into the viewer by source. */
+export function readControlLease(result: unknown): ViewerControlLease | null {
+    if (typeof result !== 'object' || result === null) return null;
+    const structured = (result as { structuredContent?: unknown }).structuredContent;
+    if (typeof structured !== 'object' || structured === null) return null;
+    const control = (structured as { control?: unknown }).control;
+    if (typeof control !== 'object' || control === null) return null;
+    const fields = control as { state?: unknown; token?: unknown; lease_expires_at?: unknown };
+    if (fields.state !== 'human' || typeof fields.token !== 'string' || fields.token === '') return null;
+    if (typeof fields.lease_expires_at !== 'string') return null;
+    const leaseExpiresAt = Date.parse(fields.lease_expires_at);
+    return Number.isFinite(leaseExpiresAt) ? { token: fields.token, leaseExpiresAt } : null;
 }
 
 /**
@@ -217,6 +244,24 @@ export function readCdpReply(message: unknown): CdpReply | null {
     }
     if (!('result' in frame)) return null;
     return { id: frame.id, result: frame.result, errorMessage: null };
+}
+
+/** A remote file input Chrome asked the controlling person to populate. */
+export interface FileChooserTarget {
+    readonly backendNodeId: number;
+}
+
+/** Reads only the node id from Chrome's trusted file-chooser event. Embedded into the app by source. */
+export function readFileChooserTarget(message: unknown): FileChooserTarget | null {
+    if (typeof message !== 'object' || message === null) return null;
+    const event = message as { method?: unknown; params?: unknown };
+    if (event.method !== 'Page.fileChooserOpened' || typeof event.params !== 'object' || event.params === null) {
+        return null;
+    }
+    const backendNodeId = (event.params as { backendNodeId?: unknown }).backendNodeId;
+    return typeof backendNodeId === 'number' && Number.isInteger(backendNodeId) && backendNodeId > 0
+        ? { backendNodeId }
+        : null;
 }
 
 /** The screencast frame metadata the coordinate mapping needs, all of it verified present. */
@@ -836,7 +881,7 @@ p:empty{display:none}
 .badge{position:absolute;left:8px;bottom:8px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
 .ctl{position:absolute;right:8px;top:8px;display:flex;align-items:center;gap:6px}
 .mode{padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:#fafafa;font-size:11px;font-weight:600}
-#control,#expand{padding:4px 10px;border-radius:999px;border:0;background:var(--fg);color:var(--bg);font:600 11px/1.4 system-ui,sans-serif;cursor:pointer}
+#control,#expand,#attach{padding:4px 10px;border-radius:999px;border:0;background:var(--fg);color:var(--bg);font:600 11px/1.4 system-ui,sans-serif;cursor:pointer}
 #expand{background:rgba(0,0,0,.62);color:#fafafa}
 #control[aria-pressed="true"]{background:#2563eb;color:#fff}
 .stage.driving{box-shadow:inset 0 0 0 2px #2563eb}
@@ -846,7 +891,8 @@ p:empty{display:none}
 <body>
 <div class="stage" id="stage">
 <canvas id="screen" tabindex="0" aria-label="Live view of the browser session"></canvas>
-<div class="ctl" id="ctl" hidden><span class="mode" id="mode">Watching (read-only)</span><button id="expand" type="button">Full screen</button><button id="control" type="button" aria-pressed="false">Take control</button></div>
+<div class="ctl" id="ctl" hidden><span class="mode" id="mode">Watching (read-only)</span><button id="attach" type="button" hidden>Choose local file</button><button id="expand" type="button">Full screen</button><button id="control" type="button" aria-pressed="false">Take control</button></div>
+<input id="local-file" type="file" hidden>
 <div class="badge" id="badge" hidden></div>
 <div class="veil" id="veil" role="status" aria-live="polite">
 <div class="spin" id="spin"></div>
@@ -870,10 +916,12 @@ var ASK_RETRY_MS = [800, 2000, 5000];
 var validateCdpUrl = ${validateCdpUrl};
 var scrubCredentials = ${scrubCredentials};
 var readSessionIdFromToolResult = ${readSessionIdFromToolResult};
-var readLiveView = ${readLiveView};
+	var readLiveView = ${readLiveView};
+	var readControlLease = ${readControlLease};
 var readToolErrorText = ${readToolErrorText};
 var parseSocketMessage = ${parseSocketMessage};
-var readCdpReply = ${readCdpReply};
+	var readCdpReply = ${readCdpReply};
+	var readFileChooserTarget = ${readFileChooserTarget};
 var readScreencastFrame = ${readScreencastFrame};
 var pickPageTargetId = ${pickPageTargetId};
 var readAttachedSessionId = ${readAttachedSessionId};
@@ -906,6 +954,8 @@ var ctl = document.getElementById('ctl');
 var modeLabel = document.getElementById('mode');
 var control = document.getElementById('control');
 var expand = document.getElementById('expand');
+var attachFile = document.getElementById('attach');
+var localFile = document.getElementById('local-file');
 
 var phase = 'awaiting-session';
 var detail = '';
@@ -1043,7 +1093,7 @@ function start(id){
     var live = readLiveView(result);
     if (!live) { setPhase('live-view-failed', 'The live view tool returned no connection details.'); return; }
     // Known either way now, so a late push cannot open a second connection over this one.
-    if (!sessionId) sessionId = id || 'resolved-by-server';
+    if (!sessionId) sessionId = live.sessionId;
     // The URL can drive the browser. It is validated here and never shown, logged or stored in the DOM.
     var target = validateCdpUrl(live.cdpUrl, cdpHost);
     if (!target) { setPhase('live-view-failed', 'The live view address was refused before anything was opened.'); return; }
@@ -1112,6 +1162,8 @@ function receive(raw){
   }
   var frame = readScreencastFrame(message);
   if (frame) paint(frame);
+  var chooser = readFileChooserTarget(message);
+  if (chooser) offerLocalFile(chooser);
 }
 
 function attach(){
@@ -1125,7 +1177,12 @@ function attach(){
     cdpSessionId = attached;
     ctl.hidden = false;
     setPhase('awaiting-first-frame');
-    return cdpSend('Page.enable');
+    return Promise.all([
+      cdpSend('Page.enable'),
+      cdpSend('DOM.enable'),
+      cdpSend('Runtime.enable'),
+      cdpSend('Page.setInterceptFileChooserDialog', { enabled: true }).catch(function(){})
+    ]);
   }).then(function(){
     return cdpSend('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 });
   }).catch(function(error){
@@ -1158,7 +1215,7 @@ function paint(frame){
 
 function stop(){
   stopped = true;
-  setDriving(false);
+  releaseControl();
   if (!socket) return;
   var closing = socket;
   socket = null;
@@ -1177,6 +1234,9 @@ window.addEventListener('pagehide', stop);
 // attached session. The drive-capable CDP address never enters this path: only the mapped point and
 // the DOM event itself do, and no input-related text is ever derived from a CDP reply.
 var driving = false;
+var controlToken = null;
+var controlRenewTimer = null;
+var CONTROL_RENEW_MS = 20000;
 
 function setDriving(on){
   driving = on;
@@ -1187,7 +1247,146 @@ function setDriving(on){
   else { stage.classList.remove('driving'); }
 }
 
-control.addEventListener('click', function(){ setDriving(!driving); });
+function controlCall(action, token){
+  if (!sessionId || sessionId === 'resolved-by-server') return Promise.reject(new Error('The viewer has no session id.'));
+  var args = { session_id: sessionId, action: action };
+  if (token) args.control_token = token;
+  return bridgeSend('tools/call', { name: LIVE_VIEW_TOOL, arguments: args }).then(function(result){
+    var failure = readToolErrorText(result);
+    if (failure) throw new Error(failure);
+    return result;
+  });
+}
+
+function scheduleControlRenewal(){
+  if (controlRenewTimer) clearTimeout(controlRenewTimer);
+  if (!controlToken || stopped) return;
+  controlRenewTimer = setTimeout(function(){
+    var token = controlToken;
+    controlCall('renew', token).then(function(result){
+      var lease = readControlLease(result);
+      if (!lease || lease.token !== token) throw new Error('The control lease was not renewed.');
+      scheduleControlRenewal();
+    }).catch(function(error){
+      controlToken = null;
+      setDriving(false);
+      modeLabel.textContent = scrubCredentials(error.message) || 'Human control ended';
+    });
+  }, CONTROL_RENEW_MS);
+}
+
+function acquireControl(){
+  control.disabled = true;
+  modeLabel.textContent = 'Claiming control…';
+  controlCall('acquire').then(function(result){
+    var lease = readControlLease(result);
+    if (!lease) throw new Error('The server returned no control lease.');
+    controlToken = lease.token;
+    setDriving(true);
+    scheduleControlRenewal();
+  }).catch(function(error){
+    setDriving(false);
+    modeLabel.textContent = scrubCredentials(error.message) || 'Could not take control';
+  }).then(function(){ control.disabled = false; });
+}
+
+function releaseControl(){
+  var token = controlToken;
+  controlToken = null;
+  if (controlRenewTimer) clearTimeout(controlRenewTimer);
+  controlRenewTimer = null;
+  setDriving(false);
+  if (!token || !sessionId || sessionId === 'resolved-by-server') return Promise.resolve();
+  return controlCall('release', token).catch(function(){ /* The bounded lease expires by itself. */ });
+}
+
+control.addEventListener('click', function(){
+  if (driving) releaseControl();
+  else acquireControl();
+});
+
+// Local files stay on the user plane: the person picks one in this trusted viewer, then the bytes
+// travel over the session-scoped CDP socket straight into a File object in the remote page. No path,
+// byte or base64 string crosses an MCP tool call or enters model context.
+var pendingFileChooser = null;
+var MAX_LOCAL_FILE_BYTES = 5 * 1024 * 1024;
+
+function offerLocalFile(target){
+  if (!driving) {
+    modeLabel.textContent = 'Take control, then click the page’s file button again';
+    return;
+  }
+  pendingFileChooser = target;
+  attachFile.hidden = false;
+  modeLabel.textContent = 'File requested — choose it locally';
+}
+
+attachFile.addEventListener('click', function(){
+  if (!driving || !pendingFileChooser) return;
+  localFile.value = '';
+  localFile.click();
+});
+
+function fileAsBase64(file){
+  return new Promise(function(resolve, reject){
+    var reader = new FileReader();
+    reader.onload = function(){
+      var value = typeof reader.result === 'string' ? reader.result : '';
+      var comma = value.indexOf(',');
+      if (comma < 0) reject(new Error('The selected file could not be read.'));
+      else resolve(value.slice(comma + 1));
+    };
+    reader.onerror = function(){ reject(new Error('The selected file could not be read.')); };
+    reader.readAsDataURL(file);
+  });
+}
+
+function pageOrigin(){
+  return cdpSend('Runtime.evaluate', { expression: 'location.origin', returnByValue: true }).then(function(result){
+    var value = result && result.result && result.result.value;
+    return typeof value === 'string' && value.length <= 100 ? value : 'the current page';
+  }, function(){ return 'the current page'; });
+}
+
+function installLocalFile(target, file, base64){
+  return cdpSend('DOM.resolveNode', { backendNodeId: target.backendNodeId }).then(function(result){
+    var objectId = result && result.object && result.object.objectId;
+    if (typeof objectId !== 'string') throw new Error('The page file input is no longer available.');
+    return cdpSend('Runtime.callFunctionOn', {
+      objectId: objectId,
+      functionDeclaration: "function(data,name,type){var raw=atob(data),bytes=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);var f=new File([bytes],name,{type:type||'application/octet-stream'}),d=new DataTransfer();d.items.add(f);this.files=d.files;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));return true}",
+      arguments: [{ value: base64 }, { value: file.name }, { value: file.type }],
+      returnByValue: true,
+      awaitPromise: false
+    });
+  });
+}
+
+localFile.addEventListener('change', function(){
+  var file = localFile.files && localFile.files[0];
+  var target = pendingFileChooser;
+  if (!file || !target) return;
+  if (file.size > MAX_LOCAL_FILE_BYTES) {
+    modeLabel.textContent = 'File is over the 5 MB secure viewer limit';
+    return;
+  }
+  attachFile.disabled = true;
+  pageOrigin().then(function(origin){
+    var size = Math.max(1, Math.round(file.size / 1024));
+    if (!window.confirm('Attach “' + file.name + '” (' + size + ' KB) to ' + origin + '? The site may upload it immediately.')) {
+      throw new Error('File selection cancelled.');
+    }
+    return fileAsBase64(file);
+  }).then(function(base64){
+    return installLocalFile(target, file, base64);
+  }).then(function(){
+    pendingFileChooser = null;
+    attachFile.hidden = true;
+    modeLabel.textContent = 'File attached — you are driving';
+  }).catch(function(error){
+    modeLabel.textContent = scrubCredentials(error.message) || 'File was not attached';
+  }).then(function(){ attachFile.disabled = false; localFile.value = ''; });
+});
 
 // A host sizes an inline view for a card, not for a browser: a 16:9 page arrives as a letterboxed
 // strip a few pixels tall. These are the two levers the apps protocol gives a view — ask for the

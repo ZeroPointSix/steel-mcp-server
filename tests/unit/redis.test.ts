@@ -47,6 +47,20 @@ describe('redisConnection commands', () => {
             { command: 'pexpire', args: ['steel-mcp:handle:sess_1:rounds', 90_000] },
         ]);
     });
+
+    it('maps lease claims and fenced updates to atomic Redis operations', async () => {
+        const client = new RecordingRedisClient();
+        const commands = connection(client).commands;
+
+        expect(await commands.setIfAbsent('control', 'lease-1', 60_000)).toBe(true);
+        expect(await commands.compareSet('control', 'lease-1', 'lease-2', 60_000)).toBe(true);
+        expect(await commands.compareDelete('control', 'lease-2')).toBe(true);
+
+        expect(client.calls[0]).toEqual({ command: 'set', args: ['control', 'lease-1', 'PX', 60_000, 'NX'] });
+        expect(client.calls.slice(1).map(call => call.command)).toEqual(['eval', 'eval']);
+        expect(client.calls[1]?.args).toContain('lease-1');
+        expect(client.calls[2]?.args).toContain('lease-2');
+    });
 });
 
 describe('redisConnection lifecycle', () => {

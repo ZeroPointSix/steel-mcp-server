@@ -131,6 +131,75 @@ describe('RedisHandleRegistry.create', () => {
     });
 });
 
+describe('RedisHandleRegistry human control', () => {
+    it('shares an exclusive fencing lease across replicas', async () => {
+        const clock = testClock();
+        const store = new FakeRedis({ now: clock.now });
+        const first = harness({ clock, store }).registry;
+        const second = harness({ clock, store }).registry;
+        const { handle } = await first.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: clock.ms + 600_000,
+        });
+
+        const lease = await first.acquireHumanControl(handle, ORG_A, 60_000);
+        await expect(second.acquireHumanControl(handle, ORG_A, 60_000)).rejects.toMatchObject({
+            code: 'human_control_active',
+        });
+        await expect(second.resolveForAgent(handle, ORG_A)).rejects.toMatchObject({
+            code: 'human_control_active',
+        });
+        const renewed = await second.renewHumanControl(handle, ORG_A, lease.token, 60_000);
+        await second.releaseHumanControl(handle, ORG_A, renewed.token);
+        await expect(first.resolveForAgent(handle, ORG_A)).resolves.toMatchObject({ handle });
+    });
+
+    it('lets an expired viewer lease disappear without a cleanup call', async () => {
+        const { registry, clock } = harness();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: clock.ms + 600_000,
+        });
+        await registry.acquireHumanControl(handle, ORG_A, 60_000);
+        clock.advance(60_001);
+        await expect(registry.resolveForAgent(handle, ORG_A)).resolves.toMatchObject({ handle });
+    });
+
+    it('shares the release fence before an external release completes', async () => {
+        const clock = testClock();
+        const store = new FakeRedis({ now: clock.now });
+        let finish!: () => void;
+        let started!: () => void;
+        const releasing = new Promise<void>(resolve => (started = resolve));
+        const gate = new Promise<void>(resolve => (finish = resolve));
+        const first = harness({
+            clock,
+            store,
+            releaseSteelSession: async () => {
+                started();
+                await gate;
+            },
+        }).registry;
+        const second = harness({ clock, store }).registry;
+        const { handle } = await first.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: clock.ms + 600_000,
+        });
+
+        const pending = first.release(handle, ORG_A, 'explicit');
+        await releasing;
+        await expect(second.resolveForAgent(handle, ORG_A)).rejects.toMatchObject({ code: 'session_releasing' });
+        await expect(second.acquireHumanControl(handle, ORG_A, 60_000)).rejects.toMatchObject({
+            code: 'session_releasing',
+        });
+        finish();
+        await pending;
+    });
+});
+
 describe('RedisHandleRegistry.resolve', () => {
     it('returns the record for the principal that created it', async () => {
         const { registry, clock } = harness();

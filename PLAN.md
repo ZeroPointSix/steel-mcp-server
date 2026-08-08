@@ -5,7 +5,7 @@
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
-**Implementation checkpoint (2026-08-07):** stdio, the fourteen-tool core, real-browser E2E and
+**Implementation checkpoint (2026-08-08):** stdio, the fifteen-tool core, real-browser E2E and
 legacy/2026-07-28 conformance gates are passing. P2 has a web-standard `/mcp` boundary with
 request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
 validation, over a hosted runtime that shares handles across requests, isolates REST/CDP clients by
@@ -13,9 +13,11 @@ credential, and reclaims a session whose create request disconnects — with a R
 registry (`REDIS_URL`), per-principal cost-weighted rate limiting, OpenTelemetry with `_meta` trace
 propagation (`steel-mcp/tracing`), and the MRTR human-in-the-loop handoff.
 
-P4.5 landed ahead of P3 and past its original scope: MCP Apps now show both a controllable live
-CDP screencast and a safe dashboard link for a finished headed session. MRTR sends a person to the live viewer
-on a login wall or CAPTCHA (§14.A).
+P4.5 landed ahead of P3 and past its original scope: MCP Apps now show a controllable live CDP
+screencast with exclusive renewable human-control leases, release fencing, and a trusted local-file
+picker whose bytes stay off the MCP/model plane, plus a safe dashboard link for a finished headed
+session. `steel_session_handoff` invokes the same MRTR path for any manual step; login walls and
+CAPTCHAs still invoke it automatically (§14.A).
 
 P3 now has its entrypoint: `src/hosted.ts` (`npm run start:hosted`) builds the runtime, picks the
 handle store from the environment, serves `/mcp` over Node's HTTP server with a `/healthz` probe
@@ -110,7 +112,7 @@ Five layers. The strongest is not ours:
 | # | Layer | Survives |
 |---|---|---|
 | 1 | **Steel `inactivityTimeout`** (~120s) set on every create | our process dying, replica rescheduling, network partition, client vanishing. **This is the guarantee** |
-| 2 | **Steel `timeout`** hard cap. Clamped to the plan maximum *when `GET /v1/details` reports one* — a live smoke test on 2026-07-28 got back only `{"plan":"admin"}`, so the configured default (5 min, below the smallest plan cap) is what actually governs | same |
+| 2 | **Steel `timeout`** hard cap. Requested as 15 minutes by default and clamped only when `GET /v1/details` reports a maximum. When it does not, Steel validates the requested value; the configured default is not misreported as a plan ceiling | same |
 | 3 | **Client-minted `sessionId` UUID** passed on create | the create-then-crash gap: we know the id before create returns |
 | 4 | **`steel_session_release`** tool, idempotent, retention policy stated in `steel_session_create`'s description so the model can see the cost | fast path |
 | 5 | **Abort on stream close** — plumb the request abort signal into every CDP call | closing the SSE stream *is* cancellation now; `notifications/cancelled` survives only on stdio. A client hang-up mid-navigate otherwise burns minutes with nobody listening |
@@ -177,7 +179,7 @@ when the tools do.
 
 ### Deliberately not shipping
 
-`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · file upload/download · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
+`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · model-visible local paths or file bytes (the trusted viewer owns local file selection) · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
 
 ## 8. Page representation and token economics
 
@@ -257,7 +259,7 @@ Distribution prerequisites with external queue time start **in parallel with P1*
 | 5 | Is the reported Claude Code bug real — custom headers sent on connect but not forwarded on tool-call POSTs? | Reproduce. If real, header auth is fragile on our best host and the query-param fallback becomes load-bearing |
 | 7 | **Is our a11y snapshot good enough that a host's model can drive it?** | Build and measure in P1 against a hostile corpus. **The highest technical risk here** — the entire "deterministic, no LLM" differentiation rests on it |
 | 8 | Which `region` values are actually valid? | Three Steel sources disagree. Pass through as a string, let the API validate |
-| 11 | **Does a Launch or Scale key get session/concurrency limits back from `GET /v1/details`?** | Steel platform, or a smoke run with a non-admin key. An admin key returns only `{"plan":"admin"}`, so we cannot currently discover a caller's real cap and fall back to a conservative 5 min |
+| 11 | **Does a Launch or Scale key get session/concurrency limits back from `GET /v1/details`?** | Steel platform, or a smoke run with a non-admin key. An admin key returns only `{"plan":"admin"}`; the MCP now treats the maximum as unknown and lets Steel validate the requested duration |
 | 9 | Should `/v1/search` be promoted from the OSS image to Cloud? | Steel platform. Agents constantly want search; until then we can't offer it |
 | 10 | What is `steel-computer` (private repo, "persistent computers for AI agents")? | Steel product. An adjacent surface this may need to accommodate |
 | 13 | When does server-side support for the redesigned `io.modelcontextprotocol/tasks` extension ship in an official SDK? | Watch the SDK releases and the ext-tasks repo. Gates §14.B — SDK 2.0.0 carries only the legacy experimental task shim |

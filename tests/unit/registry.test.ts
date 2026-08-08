@@ -182,6 +182,65 @@ describe('InMemoryHandleRegistry.release', () => {
     });
 });
 
+describe('InMemoryHandleRegistry human control', () => {
+    it('fences agent page operations until the owning viewer hands control back', async () => {
+        const { registry } = newRegistry();
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 'steel-1',
+            expiresAt: Date.now() + 600_000,
+        });
+
+        const lease = await registry.acquireHumanControl(handle, ORG_A, 60_000);
+        const blocked = await captureError(registry.resolveForAgent(handle, ORG_A));
+        expect(blocked.code).toBe('human_control_active');
+
+        await expect(registry.releaseHumanControl(handle, ORG_A, 'wrong-token')).rejects.toMatchObject({
+            code: 'human_control_active',
+        });
+        await registry.releaseHumanControl(handle, ORG_A, lease.token);
+        await expect(registry.resolveForAgent(handle, ORG_A)).resolves.toMatchObject({ handle });
+    });
+
+    it('renews only the current fencing token and never beyond hard expiry', async () => {
+        vi.useFakeTimers();
+        try {
+            const { registry } = newRegistry();
+            const expiresAt = Date.now() + 70_000;
+            const { handle } = await registry.create({ principal: ORG_A, steelSessionId: 's1', expiresAt });
+            const lease = await registry.acquireHumanControl(handle, ORG_A, 60_000);
+            vi.advanceTimersByTime(20_000);
+            const renewed = await registry.renewHumanControl(handle, ORG_A, lease.token, 60_000);
+            expect(renewed.leaseUntil).toBe(expiresAt);
+            await expect(registry.renewHumanControl(handle, ORG_A, 'stale', 60_000)).rejects.toMatchObject({
+                code: 'human_control_active',
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not reap active human control, but hard expiry still wins', async () => {
+        vi.useFakeTimers();
+        try {
+            const { registry, released } = newRegistry();
+            const { handle } = await registry.create({
+                principal: ORG_A,
+                steelSessionId: 's1',
+                expiresAt: Date.now() + 90_000,
+            });
+            await registry.acquireHumanControl(handle, ORG_A, 60_000);
+            vi.advanceTimersByTime(40_000);
+            expect(await registry.reap({ idleMs: 30_000 })).toBe(0);
+            vi.advanceTimersByTime(51_000);
+            expect(await registry.reap({ idleMs: 30_000 })).toBe(1);
+            expect(released).toEqual(['s1']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
 describe('InMemoryHandleRegistry.release ordering', () => {
     it('releases the Steel session before forgetting the handle', async () => {
         // If the record went first, a transient failure would lose it: no retry, the reaper could
@@ -226,6 +285,33 @@ describe('InMemoryHandleRegistry.release ordering', () => {
         await expect(registry.release(handle, ORG_A, 'explicit')).resolves.toBeTruthy();
         expect(await registry.countLive(ORG_A)).toBe(0);
         expect(registry.releaseCounts().explicit).toBe(1);
+    });
+
+    it('fences new agent and human ownership before the external release begins', async () => {
+        let finish!: () => void;
+        let started!: () => void;
+        const releasing = new Promise<void>(resolve => (started = resolve));
+        const gate = new Promise<void>(resolve => (finish = resolve));
+        const registry = new InMemoryHandleRegistry({
+            releaseSteelSession: async () => {
+                started();
+                await gate;
+            },
+        });
+        const { handle } = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        const pending = registry.release(handle, ORG_A, 'explicit');
+        await releasing;
+        await expect(registry.resolveForAgent(handle, ORG_A)).rejects.toMatchObject({ code: 'session_releasing' });
+        await expect(registry.acquireHumanControl(handle, ORG_A, 60_000)).rejects.toMatchObject({
+            code: 'session_releasing',
+        });
+        finish();
+        await pending;
     });
 
     it('counts the release only once even if the same handle is released twice', async () => {

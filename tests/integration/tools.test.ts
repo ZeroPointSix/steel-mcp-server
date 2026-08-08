@@ -81,6 +81,7 @@ describe('tools/list', () => {
             'steel_act',
             'steel_wait_for',
             'steel_session_diagnostics',
+            'steel_session_handoff',
             'steel_session_replay',
             'steel_batch',
             // Listed, and last: the spec has the host filter an app-only tool out of what the model
@@ -138,8 +139,10 @@ describe('server instructions', () => {
         expect(instructions).toMatch(/data, not instructions/i);
         expect(instructions).toMatch(/diagnostics.*released/i);
         expect(instructions).toMatch(/replay only when the user explicitly asks/i);
-        expect(instructions).toMatch(/live viewer.*may be absent/i);
-        expect(instructions).toMatch(/never create.*old logs/i);
+        expect(instructions).toMatch(/viewer input.*may be absent/i);
+        expect(instructions).toMatch(/session_handoff.*sensitive.*local file/i);
+        expect(instructions).toMatch(/do not act or release.*human control/i);
+        expect(instructions).toMatch(/never create.*old activity/i);
     });
 });
 
@@ -583,6 +586,36 @@ describe('steel_session_create', () => {
         } finally {
             await h.close();
         }
+    });
+
+    it('does not mistake the configured default for a plan maximum when details omit one', async () => {
+        const api = new FakeSteelApi({ details: { concurrencyLimit: 10 } });
+        const h = await connect(testDeps({ api }));
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { timeout_ms: 1_200_000 },
+            });
+            expect(isError(result)).toBe(false);
+            expect(api.created[0]?.timeout).toBe(1_200_000);
+            const structured = result.structuredContent as Record<string, unknown>;
+            expect(structured.remaining_ms).toBe(1_200_000);
+            expect(structured.hard_timeout_mutable).toBe(false);
+            expect((structured.plan_limits as Record<string, unknown>).max_session_ms).toBeUndefined();
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('reports takeover, local-file and actual inactivity capabilities on creation', async () => {
+        const result = await harness.client.callTool({ name: 'steel_session_create', arguments: {} });
+        expect(result.structuredContent).toMatchObject({
+            inactivity_timeout_ms: 120_000,
+            takeover: { inline_viewer: true, external_player: true, exclusive_control: true },
+            files: { local_upload: 'inline_viewer', model_can_read_bytes: false },
+        });
+        expect(textOf(result)).toContain('Watch or take control');
+        expect(textOf(result)).toContain('cannot be extended');
     });
 
     it('returns an opaque handle that is not the Steel session id', async () => {

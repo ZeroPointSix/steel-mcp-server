@@ -12,6 +12,8 @@ import type { RedisCommands } from './registry-redis.js';
 export interface RedisClient {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, mode: 'PX', ttlMs: number): Promise<unknown>;
+    set(key: string, value: string, mode: 'PX', ttlMs: number, condition: 'NX'): Promise<unknown>;
+    eval(script: string, numberOfKeys: number, ...args: Array<string | number>): Promise<unknown>;
     del(key: string): Promise<number>;
     incr(key: string): Promise<number>;
     pexpire(key: string, ttlMs: number): Promise<number>;
@@ -41,6 +43,23 @@ export function redisConnection(client: RedisClient, onError: (error: unknown) =
         set: async (key, value, ttlMs) => {
             await client.set(key, value, 'PX', ttlMs);
         },
+        setIfAbsent: async (key, value, ttlMs) => (await client.set(key, value, 'PX', ttlMs, 'NX')) === 'OK',
+        compareSet: async (key, expected, value, ttlMs) =>
+            (await client.eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3]); return 1 else return 0 end",
+                1,
+                key,
+                expected,
+                value,
+                ttlMs
+            )) === 1,
+        compareDelete: async (key, expected) =>
+            (await client.eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+                1,
+                key,
+                expected
+            )) === 1,
         del: key => client.del(key),
         incr: key => client.incr(key),
         pexpire: async (key, ttlMs) => {

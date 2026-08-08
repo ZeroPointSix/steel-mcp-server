@@ -484,12 +484,18 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
                 'Target.getTargets',
                 'Target.attachToTarget',
                 'Page.enable',
+                'DOM.enable',
+                'Runtime.enable',
+                'Page.setInterceptFileChooserDialog',
                 'Page.startScreencast',
             ]);
-            const [getTargets, attach, enable, start] = cdp.received;
+            const [getTargets, attach, enable, dom, runtime, chooser, start] = cdp.received;
             expect(getTargets!.sessionId, 'the first command has no session to run in yet').toBeUndefined();
             expect(attach!.params).toEqual({ targetId: 'page-1', flatten: true });
             expect(enable!.sessionId).toBe('page-session-1');
+            expect(dom!.sessionId).toBe('page-session-1');
+            expect(runtime!.sessionId).toBe('page-session-1');
+            expect(chooser!.params).toEqual({ enabled: true });
             expect(start!.sessionId).toBe('page-session-1');
             expect(start!.params).toMatchObject({ format: 'jpeg', everyNthFrame: 1 });
             // The fake endpoint refuses any page-scoped command that arrives without the session id.
@@ -826,6 +832,36 @@ describe.skipIf(!available)('the session viewer in a real browser', () => {
             await viewer.handBack();
             expect(await viewer.driving()).toBe(false);
             expect(await viewer.modeLabel()).toBe('Watching (read-only)');
+            expect(viewer.page.appExceptions).toEqual([]);
+        });
+
+        it('moves a user-picked local file directly into the remote file input without an MCP payload', async () => {
+            const { cdp, viewer } = await painting();
+            await viewer.takeControl();
+            cdp.sendFileChooser(42);
+            await until(
+                'the trusted local file control to appear',
+                () => viewer.fileControl(),
+                shown => !shown.hidden
+            );
+
+            await viewer.selectLocalFile('cv.pdf', 'hello', 'application/pdf');
+            const [install] = await cdp.waitFor('Runtime.callFunctionOn');
+            expect(install!.params.objectId).toBe('remote-file-input-1');
+            expect(install!.params.arguments).toEqual([
+                { value: 'aGVsbG8=' },
+                { value: 'cv.pdf' },
+                { value: 'application/pdf' },
+            ]);
+            await until(
+                'the local file control to close',
+                () => viewer.fileControl(),
+                shown => shown.hidden
+            );
+
+            const bridge = JSON.stringify((await viewer.log()).messages);
+            expect(bridge).not.toContain('cv.pdf');
+            expect(bridge).not.toContain('aGVsbG8=');
             expect(viewer.page.appExceptions).toEqual([]);
         });
 

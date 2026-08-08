@@ -35,8 +35,8 @@ export interface SteelConfig {
     inactivityTimeoutMs: number;
     /**
      * Hard session cap, in ms. Clamped at runtime to the plan maximum when `GET /v1/details` reports
-     * one — it does not always, so this value governs on its own and stays below the smallest plan
-     * cap rather than assuming the API will correct it.
+     * one. The API does not always report a maximum, so this remains a requested default rather than
+     * being treated as an invented ceiling; Steel is authoritative for account validation.
      */
     sessionTimeoutMs: number;
     /**
@@ -62,7 +62,9 @@ const CLOUD_CONNECT_URL = 'wss://connect.steel.dev';
 const LOCAL_BASE_URL = 'http://localhost:3000';
 const CLOUD_HOSTNAME = 'steel.dev';
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
-const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
+// Human review, MFA, long-form input and local file selection need real runway. The independent
+// inactivity timeout still reclaims an abandoned browser after two quiet minutes.
+const DEFAULT_SESSION_TIMEOUT_MS = 900_000;
 
 /**
  * Resolves the request-state HMAC key.

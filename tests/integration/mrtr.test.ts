@@ -167,6 +167,53 @@ function expectedLoginError(url = 'https://app.test/login') {
     );
 }
 
+describe('explicit session handoff', () => {
+    it('can pause an ordinary page for review without waiting for a detector', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: plainPage }), autoFulfill: false });
+        const handle = await newSession(harness);
+        const result = (await harness.client.callTool(
+            { name: 'steel_session_handoff', arguments: { session_id: handle, reason: 'review' } },
+            { allowInputRequired: true }
+        )) as unknown as {
+            resultType?: string;
+            requestState?: string;
+            inputRequests?: Record<string, { method: string; params: UrlElicitation }>;
+        };
+
+        expect(result.resultType).toBe('input_required');
+        expect(result.requestState).toBeTypeOf('string');
+        expect(result.inputRequests?.[HANDOFF_KEY]?.params.message).toMatch(/review the page/i);
+        expect(result.inputRequests?.[HANDOFF_KEY]?.params.url).toContain('/player');
+    });
+
+    it('returns to the agent only after the person accepts the handoff round', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: plainPage }) });
+        const handle = await newSession(harness);
+        const result = await harness.client.callTool({
+            name: 'steel_session_handoff',
+            arguments: { session_id: handle, reason: 'manual_step' },
+        });
+
+        expect(result.isError).not.toBe(true);
+        expect(textOf(result)).toContain('handed the browser back');
+        expect(harness.elicited).toHaveLength(1);
+        await expect(harness.deps.registry.resolveForAgent(handle, harness.deps.principal)).resolves.toBeTruthy();
+    });
+
+    it('does not pin a session when the client offers no usable human-control route', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: plainPage }), capabilities: {} });
+        const handle = await newSession(harness);
+        const result = await harness.client.callTool({
+            name: 'steel_session_handoff',
+            arguments: { session_id: handle, reason: 'review' },
+        });
+
+        expect(result.isError).toBe(true);
+        const record = await harness.deps.registry.resolve(handle, harness.deps.principal);
+        expect(record.awaitingInputUntil).toBeUndefined();
+    });
+});
+
 describe('input_required for a login wall', () => {
     it('returns a URL elicitation pointing at the session player, with opaque state', async () => {
         const harness = await connectModern({ deps: testDeps({ page: loginWallPage }), autoFulfill: false });

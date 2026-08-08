@@ -44,7 +44,7 @@
         "steel_profile": {
             "type": "string",
             "title": "Tool profile",
-            "description": "\"browse\" exposes all fourteen tools. \"scrape\" exposes only the three stateless read tools, which never start a billed browser session.",
+            "description": "\"browse\" exposes all fifteen tools. \"scrape\" exposes only the three stateless read tools, which never start a billed browser session.",
             "required": false,
             "default": "browse"
         }
@@ -94,6 +94,10 @@
         {
             "name": "steel_session_diagnostics",
             "description": "Read timestamped activity from a live or finished browser session without starting a new one."
+        },
+        {
+            "name": "steel_session_handoff",
+            "description": "Pause while a person takes exclusive control of the same live browser, then resume after hand-back."
         },
         {
             "name": "steel_session_replay",

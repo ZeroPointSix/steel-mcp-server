@@ -216,6 +216,18 @@ export class FakeCdpServer {
         return sessionId;
     }
 
+    /** Tells the controlling viewer that the remote page opened an input[type=file]. */
+    sendFileChooser(backendNodeId = 42): void {
+        if (this.socket === null) throw new Error('no app is connected, so no file chooser can be sent');
+        this.socket.send(
+            JSON.stringify({
+                method: 'Page.fileChooserOpened',
+                sessionId: this.attachedSessionId,
+                params: { mode: 'selectSingle', backendNodeId },
+            })
+        );
+    }
+
     /**
      * Sends a payload straight down the socket, bypassing the CDP shape entirely.
      *
@@ -278,6 +290,18 @@ export class FakeCdpServer {
         if (command.method === 'Target.attachToTarget') {
             if (command.params.flatten !== true) this.violations.push('Target.attachToTarget without flatten: true');
             this.reply(socket, command, this.attachedSessionId === null ? {} : { sessionId: this.attachedSessionId });
+            return;
+        }
+        if (command.method === 'DOM.resolveNode') {
+            this.reply(socket, command, { object: { type: 'object', objectId: 'remote-file-input-1' } });
+            return;
+        }
+        if (command.method === 'Runtime.evaluate') {
+            this.reply(socket, command, { result: { type: 'string', value: 'https://example.com' } });
+            return;
+        }
+        if (command.method === 'Runtime.callFunctionOn') {
+            this.reply(socket, command, { result: { type: 'boolean', value: true } });
             return;
         }
         if (command.method === 'Page.screencastFrameAck' && !Number.isInteger(command.params.sessionId)) {

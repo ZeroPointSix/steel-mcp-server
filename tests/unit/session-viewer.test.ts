@@ -19,6 +19,8 @@ import {
     readAttachedSessionId,
     readBridgeResponse,
     readCdpReply,
+    readControlLease,
+    readFileChooserTarget,
     readLiveView,
     readScreencastFrame,
     readSessionIdFromToolResult,
@@ -133,6 +135,7 @@ describe('readSessionIdFromToolResult', () => {
 describe('readLiveView', () => {
     const result = {
         structuredContent: {
+            session_id: SESSION_ID,
             cdp_url: CDP_URL,
             viewport: { width: 1280, height: 800 },
             expires_at: '2026-07-31T12:00:00.000Z',
@@ -141,6 +144,7 @@ describe('readLiveView', () => {
 
     it('reads the connection details the live-view tool returns', () => {
         expect(readLiveView(result)).toEqual({
+            sessionId: SESSION_ID,
             cdpUrl: CDP_URL,
             width: 1280,
             height: 800,
@@ -150,16 +154,26 @@ describe('readLiveView', () => {
 
     it('accepts an expiry given as epoch milliseconds or seconds', () => {
         const at = Date.parse('2026-07-31T12:00:00.000Z');
-        expect(readLiveView({ structuredContent: { cdp_url: CDP_URL, expires_at: at } })?.expiresAt).toBe(at);
-        expect(readLiveView({ structuredContent: { cdp_url: CDP_URL, expires_at: at / 1000 } })?.expiresAt).toBe(at);
+        expect(
+            readLiveView({ structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL, expires_at: at } })?.expiresAt
+        ).toBe(at);
+        expect(
+            readLiveView({ structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL, expires_at: at / 1000 } })
+                ?.expiresAt
+        ).toBe(at);
     });
 
     it('reports an unknown viewport and an unknown expiry rather than inventing one', () => {
-        const bare = readLiveView({ structuredContent: { cdp_url: CDP_URL } });
-        expect(bare).toEqual({ cdpUrl: CDP_URL, width: 0, height: 0, expiresAt: null });
-        expect(readLiveView({ structuredContent: { cdp_url: CDP_URL, expires_at: 'soon' } })?.expiresAt).toBe(null);
+        const bare = readLiveView({ structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL } });
+        expect(bare).toEqual({ sessionId: SESSION_ID, cdpUrl: CDP_URL, width: 0, height: 0, expiresAt: null });
         expect(
-            readLiveView({ structuredContent: { cdp_url: CDP_URL, viewport: { width: -5, height: 0 } } })?.width
+            readLiveView({ structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL, expires_at: 'soon' } })
+                ?.expiresAt
+        ).toBe(null);
+        expect(
+            readLiveView({
+                structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL, viewport: { width: -5, height: 0 } },
+            })?.width
         ).toBe(0);
     });
 
@@ -168,6 +182,33 @@ describe('readLiveView', () => {
         expect(readLiveView({ structuredContent: { viewport: { width: 1280, height: 800 } } })).toBe(null);
         expect(readLiveView({ structuredContent: { cdp_url: '' } })).toBe(null);
         expect(readLiveView(undefined)).toBe(null);
+    });
+});
+
+describe('viewer control and file-selection messages', () => {
+    it('accepts only a complete human control lease', () => {
+        const result = {
+            structuredContent: {
+                control: { state: 'human', token: 'ctl_abc', lease_expires_at: '2026-08-08T12:00:00.000Z' },
+            },
+        };
+        expect(readControlLease(result)).toEqual({
+            token: 'ctl_abc',
+            leaseExpiresAt: Date.parse('2026-08-08T12:00:00.000Z'),
+        });
+        expect(readControlLease({ structuredContent: { control: { state: 'agent' } } })).toBe(null);
+        expect(readControlLease({ structuredContent: { control: { state: 'human', token: 'ctl_x' } } })).toBe(null);
+    });
+
+    it('accepts only Chrome file chooser events with a backend node id', () => {
+        expect(
+            readFileChooserTarget({
+                method: 'Page.fileChooserOpened',
+                params: { backendNodeId: 42, mode: 'selectSingle' },
+            })
+        ).toEqual({ backendNodeId: 42 });
+        expect(readFileChooserTarget({ method: 'Page.fileChooserOpened', params: { backendNodeId: -1 } })).toBe(null);
+        expect(readFileChooserTarget({ method: 'Page.loadEventFired', params: { backendNodeId: 42 } })).toBe(null);
     });
 });
 
@@ -922,10 +963,23 @@ describe('SESSION_VIEWER_HTML', () => {
         expect(isolate(readSessionIdFromToolResult)({ structuredContent: { session_id: SESSION_ID } })).toBe(
             SESSION_ID
         );
-        expect(isolate(readLiveView)({ structuredContent: { cdp_url: CDP_URL } })?.cdpUrl).toBe(CDP_URL);
+        expect(isolate(readLiveView)({ structuredContent: { session_id: SESSION_ID, cdp_url: CDP_URL } })?.cdpUrl).toBe(
+            CDP_URL
+        );
         expect(isolate(readToolErrorText)({ isError: true, content: [{ type: 'text', text: 'no' }] })).toBe('no');
         expect(isolate(parseSocketMessage)('{"id":1,"result":{}}')).toEqual({ id: 1, result: {} });
         expect(isolate(readCdpReply)({ id: 1, result: {} })?.id).toBe(1);
+        expect(
+            isolate(readControlLease)({
+                structuredContent: {
+                    control: { state: 'human', token: 'ctl_x', lease_expires_at: '2026-08-08T12:00:00Z' },
+                },
+            })?.token
+        ).toBe('ctl_x');
+        expect(
+            isolate(readFileChooserTarget)({ method: 'Page.fileChooserOpened', params: { backendNodeId: 9 } })
+                ?.backendNodeId
+        ).toBe(9);
         expect(
             isolate(readScreencastFrame)({
                 method: 'Page.screencastFrame',
@@ -990,6 +1044,6 @@ describe('SESSION_VIEWER_HTML', () => {
         // its aspect ratio needs and offers the host's full-screen mode. The resource is static and
         // publicly cacheable, so a host pays it once rather than per call. This is still a ceiling:
         // a doubling means something was inlined that should not have been.
-        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(33_280);
+        expect(Buffer.byteLength(SESSION_VIEWER_HTML, 'utf8')).toBeLessThan(48_000);
     });
 });

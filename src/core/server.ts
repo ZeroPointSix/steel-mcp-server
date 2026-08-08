@@ -49,7 +49,7 @@ function registerSessionViewer(server: McpServer, config: SteelConfig): void {
         SESSION_VIEWER_URI,
         {
             title: 'Live browser session',
-            description: 'Watches the browser a Steel session is driving, inline in the conversation.',
+            description: 'Watches and securely takes control of the same live browser, inline in the conversation.',
             mimeType: SESSION_VIEWER_MIME_TYPE,
             _meta: { ui },
             cacheHint: { ttlMs: PUBLIC_CACHE_TTL_MS, cacheScope: 'public' },

@@ -53,9 +53,13 @@ describe('the tool weight table', () => {
         expect(toolCost('steel_session_release')).toBe(0);
     });
 
-    it('charges the inline viewer no more than a stateless read, since it drives no browser', () => {
-        expect(toolCost('steel_session_live_view')).toBe(toolCost('steel_scrape'));
+    it('does not charge app control heartbeats against the model budget', () => {
+        expect(toolCost('steel_session_live_view')).toBe(0);
         expect(toolCost('steel_session_live_view')).toBeLessThan(toolCost('steel_navigate'));
+    });
+
+    it('charges a handoff like a stateless coordination call', () => {
+        expect(toolCost('steel_session_handoff')).toBe(toolCost('steel_scrape'));
     });
 
     it('charges finished replay like a stateless read, since it starts no browser', () => {

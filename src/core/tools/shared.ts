@@ -86,7 +86,7 @@ export async function withPage(
     work: (page: BrowserPage, record: HandleRecord) => Promise<ToolOutcome>
 ): Promise<ToolOutcome> {
     return guard(deps, toolName, request, async () => {
-        const record = await deps.registry.resolve(sessionId, deps.principal);
+        const record = await deps.registry.resolveForAgent(sessionId, deps.principal);
         await deps.registry.touch(sessionId);
         const page = await deps.pool.page(record.steelSessionId, request.signal);
         return work(page, record);

@@ -38,6 +38,23 @@ export class FakeRedis implements RedisCommands {
         this.values.set(key, { value, expiresAtMs: this.nowMs() + ttlMs });
     }
 
+    async setIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean> {
+        if ((await this.get(key)) !== null) return false;
+        await this.set(key, value, ttlMs);
+        return true;
+    }
+
+    async compareSet(key: string, expected: string, value: string, ttlMs: number): Promise<boolean> {
+        if ((await this.get(key)) !== expected) return false;
+        await this.set(key, value, ttlMs);
+        return true;
+    }
+
+    async compareDelete(key: string, expected: string): Promise<boolean> {
+        if ((await this.get(key)) !== expected) return false;
+        return (await this.del(key)) > 0;
+    }
+
     async del(key: string): Promise<number> {
         return this.values.delete(key) ? 1 : 0;
     }
@@ -153,6 +170,18 @@ export class GatedRedis implements RedisCommands {
         return this.gated(() => this.inner.set(key, value, ttlMs));
     }
 
+    async setIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean> {
+        return this.gated(() => this.inner.setIfAbsent(key, value, ttlMs));
+    }
+
+    async compareSet(key: string, expected: string, value: string, ttlMs: number): Promise<boolean> {
+        return this.gated(() => this.inner.compareSet(key, expected, value, ttlMs));
+    }
+
+    async compareDelete(key: string, expected: string): Promise<boolean> {
+        return this.gated(() => this.inner.compareDelete(key, expected));
+    }
+
     async del(key: string): Promise<number> {
         return this.gated(() => this.inner.del(key));
     }
@@ -183,6 +212,8 @@ export interface RecordingRedisClientReplies {
     del?: number;
     incr?: number;
     smembers?: string[];
+    set?: unknown;
+    eval?: unknown;
 }
 
 /** Records the calls the ioredis adapter makes, so argument shapes can be asserted without a server. */
@@ -201,9 +232,14 @@ export class RecordingRedisClient implements RedisClient {
         return this.replies.get ?? null;
     }
 
-    async set(key: string, value: string, mode: 'PX', ttlMs: number): Promise<unknown> {
-        this.record('set', [key, value, mode, ttlMs]);
-        return 'OK';
+    async set(key: string, value: string, mode: 'PX', ttlMs: number, condition?: 'NX'): Promise<unknown> {
+        this.record('set', condition ? [key, value, mode, ttlMs, condition] : [key, value, mode, ttlMs]);
+        return this.replies.set ?? 'OK';
+    }
+
+    async eval(script: string, numberOfKeys: number, ...args: Array<string | number>): Promise<unknown> {
+        this.record('eval', [script, numberOfKeys, ...args]);
+        return this.replies.eval ?? 1;
     }
 
     async del(key: string): Promise<number> {

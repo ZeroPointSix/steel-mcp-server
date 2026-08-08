@@ -14,7 +14,8 @@ describe('toolsForProfile', () => {
     });
 
     it('gives browse the full default surface', () => {
-        expect(toolsForProfile('browse')).toHaveLength(14);
+        expect(toolsForProfile('browse')).toHaveLength(15);
+        expect(toolsForProfile('browse').map(tool => tool.name)).toContain('steel_session_handoff');
         expect(toolsForProfile('browse').map(tool => tool.name)).toContain('steel_session_replay');
     });
 

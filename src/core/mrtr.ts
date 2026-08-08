@@ -57,7 +57,7 @@ export const HANDOFF_GRACE_MS = 600_000;
 export interface HandoffState {
     handle: string;
     tool: string;
-    block: InteractiveBlockKind;
+    block: InteractiveBlockKind | 'sensitive_input' | 'file_upload' | 'review' | 'manual_step';
     /** The origin the dialog named, which is all of the blocked page's URL a person was shown. */
     origin: string;
     round: number;

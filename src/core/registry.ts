@@ -7,6 +7,14 @@ import { SteelToolError } from './errors.js';
 /** How a session came to be released. The Steel-backstop count is the leak metric. */
 export type ReleasePath = 'explicit' | 'stream_close' | 'reaper';
 
+/** Exclusive, short-lived authority for a person to drive the remote browser. */
+export interface HumanControlLease {
+    /** Opaque fencing token. Only the viewer that acquired it may renew or release it. */
+    token: string;
+    /** Lease deadline. It never extends the session's immutable hard expiry. */
+    leaseUntil: number;
+}
+
 export interface HandleRecord {
     /** Opaque, CSPRNG-derived, never a capability on its own. */
     handle: string;
@@ -35,6 +43,10 @@ export interface HandleRecord {
      * for a bounded window, so a person who walks away still frees the slot.
      */
     awaitingInputUntil?: number | undefined;
+    /** Present only while an authenticated viewer owns exclusive browser control. */
+    humanControl?: HumanControlLease | undefined;
+    /** Release fencing: once true, no new agent or viewer ownership may begin. */
+    releasing?: boolean | undefined;
     /**
      * How many human-in-the-loop handoffs this handle has already been offered.
      *
@@ -66,6 +78,11 @@ export interface HandleRegistry {
     create(input: CreateHandleInput): Promise<HandleRecord>;
     resolve(handle: string, principal: string): Promise<HandleRecord>;
     touch(handle: string): Promise<void>;
+    /** Resolve a handle for a model page operation, refusing it while a person owns control. */
+    resolveForAgent(handle: string, principal: string): Promise<HandleRecord>;
+    acquireHumanControl(handle: string, principal: string, leaseMs: number): Promise<HumanControlLease>;
+    renewHumanControl(handle: string, principal: string, token: string, leaseMs: number): Promise<HumanControlLease>;
+    releaseHumanControl(handle: string, principal: string, token: string): Promise<void>;
     /** Suspends idle reclamation until `untilMs` while a person finishes a step in the live session. */
     awaitInput(handle: string, untilMs: number): Promise<void>;
     /**
@@ -133,6 +150,26 @@ export function mintHandle(): string {
     return `sess_${randomBytes(16).toString('base64url')}`;
 }
 
+export function mintControlToken(): string {
+    return `ctl_${randomBytes(16).toString('base64url')}`;
+}
+
+export function humanControlError(leaseUntil?: number): SteelToolError {
+    return new SteelToolError(
+        'A person currently has exclusive control of this browser. Wait for them to choose Hand back, then take a fresh snapshot before continuing.',
+        {
+            code: 'human_control_active',
+            details: leaseUntil === undefined ? undefined : { control_expires_at: new Date(leaseUntil).toISOString() },
+        }
+    );
+}
+
+export function sessionReleasingError(): SteelToolError {
+    return new SteelToolError('This browser session is already being released; no new action or takeover can start.', {
+        code: 'session_releasing',
+    });
+}
+
 /** In-memory handle registry. One process, one replica; the hosted deployment swaps the backend. */
 export class InMemoryHandleRegistry implements HandleRegistry {
     private readonly records = new Map<string, HandleRecord>();
@@ -180,6 +217,50 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         record.awaitingInputUntil = undefined;
     }
 
+    async resolveForAgent(handle: string, principal: string): Promise<HandleRecord> {
+        const record = await this.resolve(handle, principal);
+        if (record.humanControl && record.humanControl.leaseUntil <= Date.now()) record.humanControl = undefined;
+        if (record.releasing) throw sessionReleasingError();
+        if (record.humanControl) throw humanControlError(record.humanControl.leaseUntil);
+        return record;
+    }
+
+    async acquireHumanControl(handle: string, principal: string, leaseMs: number): Promise<HumanControlLease> {
+        const record = await this.resolve(handle, principal);
+        const now = Date.now();
+        if (record.releasing) throw sessionReleasingError();
+        if (record.humanControl && record.humanControl.leaseUntil > now) {
+            throw humanControlError(record.humanControl.leaseUntil);
+        }
+        const lease = { token: mintControlToken(), leaseUntil: Math.min(now + leaseMs, record.expiresAt) };
+        record.humanControl = lease;
+        return lease;
+    }
+
+    async renewHumanControl(
+        handle: string,
+        principal: string,
+        token: string,
+        leaseMs: number
+    ): Promise<HumanControlLease> {
+        const record = await this.resolve(handle, principal);
+        const now = Date.now();
+        if (!record.humanControl || record.humanControl.token !== token || record.humanControl.leaseUntil <= now) {
+            throw humanControlError(record.humanControl?.leaseUntil);
+        }
+        const lease = { token, leaseUntil: Math.min(now + leaseMs, record.expiresAt) };
+        record.humanControl = lease;
+        return lease;
+    }
+
+    async releaseHumanControl(handle: string, principal: string, token: string): Promise<void> {
+        const record = await this.resolve(handle, principal);
+        if (!record.humanControl || record.humanControl.token !== token) throw humanControlError();
+        record.humanControl = undefined;
+        record.awaitingInputUntil = undefined;
+        record.lastUsedAt = Date.now();
+    }
+
     async awaitInput(handle: string, untilMs: number): Promise<void> {
         const record = this.records.get(handle);
         if (record) record.awaitingInputUntil = untilMs;
@@ -205,7 +286,17 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         if (record.principal !== principal) {
             throw handleNotFoundError();
         }
-        await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
+        if (record.releasing) return null;
+        if (record.humanControl && record.humanControl.leaseUntil > Date.now()) {
+            throw humanControlError(record.humanControl.leaseUntil);
+        }
+        record.releasing = true;
+        try {
+            await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
+        } catch (error) {
+            record.releasing = false;
+            throw error;
+        }
         this.records.delete(handle);
         this.counts[path] += 1;
         return record;
@@ -223,17 +314,21 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         const now = Date.now();
         let reaped = 0;
         for (const record of [...this.records.values()]) {
-            const awaitingHuman = (record.awaitingInputUntil ?? 0) > now;
+            const awaitingHuman =
+                (record.awaitingInputUntil ?? 0) > now || (record.humanControl?.leaseUntil ?? 0) > now;
             const idle = !awaitingHuman && now - record.lastUsedAt >= options.idleMs;
             const expired = record.expiresAt <= now;
             if (!idle && !expired) continue;
 
             try {
+                if (record.releasing) continue;
+                record.releasing = true;
                 await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
                 this.records.delete(record.handle);
                 this.counts.reaper += 1;
                 reaped += 1;
             } catch (error) {
+                record.releasing = false;
                 // The record stays so the next sweep tries again. Dropping it here would leave the
                 // browser running with nothing in this process aware that it exists.
                 this.deps.onReapError?.(error);

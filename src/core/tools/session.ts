@@ -41,6 +41,9 @@ interface CreateArgs {
     timeout_ms?: number | undefined;
 }
 
+/** Short enough to recover from a vanished viewer, long enough to survive one missed heartbeat. */
+export const HUMAN_CONTROL_LEASE_MS = 60_000;
+
 export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
     host.registerTool(
         'steel_session_create',
@@ -48,8 +51,8 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
             title: 'Start a browser session',
             description:
                 'Start a billed browser for interaction. It occupies a concurrency slot until ' +
-                'steel_session_release; call that as soon as you finish. Steel also releases it after two idle ' +
-                'minutes or the plan limit. Prefer steel_scrape for reads.',
+                'steel_session_release; call that as soon as you finish. It also ends at its configured inactivity ' +
+                'window or immutable expiry. Prefer steel_scrape for reads.',
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
             inputSchema: z.object({
                 region: z.string().optional().describe('Region to run the browser in, e.g. lax, iad, fra.'),
@@ -81,8 +84,9 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     .number()
                     .int()
                     .positive()
+                    .max(86_400_000)
                     .optional()
-                    .describe('Hard session lifetime. Clamped to your plan maximum.'),
+                    .describe('Immutable hard lifetime, up to 24 hours and your plan maximum.'),
             }),
             // A host that supports MCP Apps renders the live viewer beside this result. A host that
             // does not ignores the key and shows the text below, which is unchanged either way.
@@ -110,8 +114,12 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                 }
 
                 const details: AccountDetails = await deps.api.getDetails(ctx.mcpReq.signal).catch(() => ({}));
-                const planMax = details.maxSessionDuration ?? deps.config.sessionTimeoutMs;
-                const timeout = Math.min(args.timeout_ms ?? deps.config.sessionTimeoutMs, planMax);
+                const requestedTimeout = args.timeout_ms ?? deps.config.sessionTimeoutMs;
+                // A missing plan maximum means unknown, not "the configured default is the maximum".
+                // Steel remains authoritative and rejects a lifetime the account cannot use.
+                const planMax = details.maxSessionDuration;
+                const timeout = planMax === undefined ? requestedTimeout : Math.min(requestedTimeout, planMax);
+                const inactivityTimeout = resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout);
 
                 const steelSessionId = mintSteelSessionId(deps);
                 let session: SteelSession;
@@ -120,7 +128,7 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         {
                             sessionId: steelSessionId,
                             timeout,
-                            inactivityTimeout: resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout),
+                            inactivityTimeout,
                             region: args.region,
                             useProxy: args.use_proxy,
                             solveCaptcha: args.solve_captcha,
@@ -188,16 +196,29 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         result:
                             `Started a browser session. Pass session_id="${record.handle}" to the other browser tools, ` +
                             'and call steel_session_release when you are finished with it.',
-                        pageState: session.sessionViewerUrl ? `Watch it live: ${session.sessionViewerUrl}` : undefined,
+                        pageState: session.sessionViewerUrl
+                            ? `Watch or take control in the live browser: ${session.sessionViewerUrl}`
+                            : undefined,
                         notes: [
-                            `Hard limit ${Math.round(timeout / 60_000)} minutes (expires ${expiresAt.toISOString()}).`,
-                            'Steel releases the session by itself after two minutes with no activity.',
+                            `This session expires at ${expiresAt.toISOString()}; its lifetime cannot be extended after creation.`,
+                            inactivityTimeout === undefined
+                                ? 'No separate inactivity timeout fits inside this short session lifetime.'
+                                : `Steel releases it after ${Math.round(inactivityTimeout / 1_000)} seconds without browser activity; active human input resets that clock.`,
                         ],
                     },
                     {
                         session_id: record.handle,
                         viewer_url: session.sessionViewerUrl,
                         expires_at: expiresAt.toISOString(),
+                        remaining_ms: timeout,
+                        inactivity_timeout_ms: inactivityTimeout,
+                        hard_timeout_mutable: false,
+                        takeover: {
+                            inline_viewer: true,
+                            external_player: Boolean(session.debugUrl),
+                            exclusive_control: true,
+                        },
+                        files: { local_upload: 'inline_viewer', model_can_read_bytes: false },
                         plan_limits: {
                             max_session_ms: planMax,
                             max_concurrent_sessions: details.concurrencyLimit ?? deps.config.maxConcurrentSessions,
@@ -235,7 +256,10 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_release', ctx.mcpReq, async () => {
-                const record = await deps.registry.resolve(args.session_id, deps.principal).catch(() => null);
+                const record = await deps.registry.resolveForAgent(args.session_id, deps.principal).catch(error => {
+                    if (error instanceof SteelToolError && error.code === 'human_control_active') throw error;
+                    return null;
+                });
 
                 if (!record) {
                     return successResult(
@@ -317,10 +341,8 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
         'steel_session_live_view',
         {
             title: 'Live view connection',
-            description:
-                'Connection details the inline session viewer needs to stream this browser session. ' +
-                'Returns no page content.',
-            annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+            description: 'App-only live-view connection and exclusive human-control lease. Returns no page content.',
+            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
             inputSchema: z.object({
                 session_id: sessionIdSchema
                     .optional()
@@ -328,11 +350,64 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
                         'Omit to stream the newest live session this credential owns, which is what a ' +
                             'viewer that never received the session does.'
                     ),
+                action: z.enum(['connect', 'acquire', 'renew', 'release']).optional(),
+                control_token: z.string().optional(),
             }),
             _meta: { ui: { visibility: ['app'] } },
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_live_view', ctx.mcpReq, async () => {
+                const action = args.action ?? 'connect';
+                if (action !== 'connect') {
+                    if (!args.session_id) {
+                        throw new SteelToolError('session_id is required for a human-control lease.', {
+                            code: 'invalid_argument',
+                        });
+                    }
+                    if ((action === 'renew' || action === 'release') && !args.control_token) {
+                        throw new SteelToolError(`control_token is required to ${action} human control.`, {
+                            code: 'invalid_argument',
+                        });
+                    }
+
+                    if (action === 'release') {
+                        await deps.registry.releaseHumanControl(
+                            args.session_id,
+                            deps.principal,
+                            args.control_token as string
+                        );
+                        return successResult(
+                            { result: 'Human control returned to the agent.' },
+                            { session_id: args.session_id, control: { state: 'agent' } }
+                        );
+                    }
+
+                    const lease =
+                        action === 'acquire'
+                            ? await deps.registry.acquireHumanControl(
+                                  args.session_id,
+                                  deps.principal,
+                                  HUMAN_CONTROL_LEASE_MS
+                              )
+                            : await deps.registry.renewHumanControl(
+                                  args.session_id,
+                                  deps.principal,
+                                  args.control_token as string,
+                                  HUMAN_CONTROL_LEASE_MS
+                              );
+                    return successResult(
+                        { result: action === 'acquire' ? 'Human control acquired.' : 'Human control renewed.' },
+                        {
+                            session_id: args.session_id,
+                            control: {
+                                state: 'human',
+                                token: lease.token,
+                                lease_expires_at: new Date(lease.leaseUntil).toISOString(),
+                            },
+                        }
+                    );
+                }
+
                 // The host pushes the tool result to a rendered app exactly once, when the call
                 // completes, and the MCP Apps spec has neither a replay nor a way to ask for it
                 // again. A viewer rendered while the create call is still running can therefore
@@ -342,10 +417,6 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
                 const record = args.session_id
                     ? await deps.registry.resolve(args.session_id, deps.principal)
                     : await newestLiveSession(deps);
-                // A rendered viewer is a session in use, and a person watching it is exactly who the
-                // idle sweep must not reclaim the slot from underneath.
-                await deps.registry.touch(record.handle);
-
                 let session: SteelSession;
                 try {
                     // Read fresh every time: Steel re-mints the token on each read, and an expiring

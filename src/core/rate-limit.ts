@@ -54,8 +54,10 @@ export const TOOL_COSTS: Readonly<Record<string, number>> = {
     steel_scrape: 1,
     steel_screenshot: 1,
     steel_pdf: 1,
+    steel_session_handoff: 1,
     steel_session_replay: 1,
-    steel_session_live_view: 1,
+    // App control heartbeats must not consume the model's browser budget.
+    steel_session_live_view: 0,
     steel_session_release: 0,
 };
 

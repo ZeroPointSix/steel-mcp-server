@@ -15,8 +15,11 @@ export type SteelErrorCode =
     | 'stale_ref'
     | 'ref_not_found'
     | 'click_blocked'
+    | 'client_capability_missing'
+    | 'human_control_active'
     | 'self_host_unsupported'
     | 'session_expired'
+    | 'session_releasing'
     | 'invalid_argument'
     | 'timeout'
     | 'steel_error';
