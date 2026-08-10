@@ -365,10 +365,10 @@ protocol machinery.
    token instead, and MRTR falls back to the player URL only for a client with no viewer rendered.
 6. Tests: unit (resource registration, `_meta`, no dynamic interpolation), integration
    (`server/discover` advertises the extension, `resources/read` MIME and cache hints), budget (the
-   `_meta.ui` bytes are priced — 14 tools, 15.9KB of the 16KB budget), and `npm run test:browser`,
-   which runs the shell in a real Chrome against a fake CDP server. That last suite exists because
-   unit tests asserting the shell's *source* passed while two runtime bugs made it unusable
-   (NOTES §6).
+   `_meta.ui` bytes are priced — 15 tools, 16,814 bytes of the 17,000-byte budget), and
+   `npm run test:browser`, which runs the shell in a real Chrome against a fake CDP server. That last
+   suite exists because unit tests asserting the shell's *source* passed while two runtime bugs made
+   it unusable (NOTES §6).
 
 ### 14.B Tasks (`io.modelcontextprotocol/tasks`) — durable handles for long operations
 

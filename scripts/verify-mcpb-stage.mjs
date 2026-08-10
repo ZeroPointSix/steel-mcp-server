@@ -10,7 +10,7 @@ if (!stage) {
     exit(2);
 }
 
-const EXPECTED_TOOL_COUNT = 14;
+const EXPECTED_TOOL_COUNT = 15;
 const TIMEOUT_MS = 20_000;
 
 const child = spawn('node', [`${stage}/dist/stdio.js`], {
@@ -82,7 +82,7 @@ if (tools.length !== EXPECTED_TOOL_COUNT) {
     fail(`expected ${EXPECTED_TOOL_COUNT} tools, the staged server listed ${tools.length}`);
 }
 const replay = tools.find(tool => tool.name === 'steel_session_replay');
-if (!replay) fail('the staged server omitted steel_session_replay from the fourteen-tool contract');
+if (!replay) fail('the staged server omitted steel_session_replay from the fifteen-tool contract');
 if (replay._meta?.ui?.resourceUri) fail('dashboard-only replay unexpectedly declares an app resource');
 
 const resources = await send(3, 'resources/list');

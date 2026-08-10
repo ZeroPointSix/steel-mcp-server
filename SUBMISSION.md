@@ -43,9 +43,9 @@ Policy 2B requires descriptions to match actual functionality, and a reviewer re
 
 - ~~README documented `vision` and `full` as aliases of `browse`~~ — both are now refused rather
   than aliased (`PROFILE_NAMES` is `scrape`, `browse`), and the README documents only those two.
-- ~~README said "twelve tools"~~ — it says fourteen and lists both replay and `steel_session_live_view`,
-  noting that hosts hide the latter via `_meta.ui.visibility: ['app']`. A test now asserts the
-  README mentions every entry in `TOOL_TABLE`.
+- ~~README said "twelve tools"~~ — it says fifteen and lists replay, `steel_session_handoff`, and
+  `steel_session_live_view`, noting that hosts hide the latter via
+  `_meta.ui.visibility: ['app']`. A test now asserts the README mentions every entry in `TOOL_TABLE`.
 - ~~`repository.url` and `bugs` pointed at `steel-dev/mcp-server` and 404ed~~ — both now name
   `steel-dev/steel-mcp-server`, asserted against the real remote.
 
@@ -96,7 +96,7 @@ the README links the same privacy policy the manifest declares.
 
 The release-candidate bundle is packed at `build/steel-mcp-2.0.0-rc.1.mcpb` and its staged server
 verified over JSON-RPC.
-Installing it into Claude for macOS, running all 14 tools against a real Steel key, and confirming the
+Installing it into Claude for macOS, running all 15 tools against a real Steel key, and confirming the
 live viewer and finished-session replay render is **yours** — see 2.7.
 
 ---
@@ -150,9 +150,9 @@ Steel's behalf:
   address you gave me rather than guessing at one that might bounce.
 - Whether those response windows are ones Steel wants to be held to.
 
-### 2.7 Install the bundle and run all 14 tools
+### 2.7 Install the bundle and run all 15 tools
 
-`build/steel-mcp-2.0.0-rc.1.mcpb`. Its staged server is verified over JSON-RPC and lists 14 tools, but
+`build/steel-mcp-2.0.0-rc.1.mcpb`. Its staged server is verified over JSON-RPC and lists 15 tools, but
 that proves it starts, not that a real Steel key drives a real browser through Desktop's own Node.
 Install it, run each tool, and confirm the live viewer renders. Finished-session replay is
 dashboard-only in rc.1, so verify that its safe dashboard link opens and that no replay app resource
