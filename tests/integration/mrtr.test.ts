@@ -183,6 +183,8 @@ describe('explicit session handoff', () => {
         expect(result.resultType).toBe('input_required');
         expect(result.requestState).toBeTypeOf('string');
         expect(result.inputRequests?.[HANDOFF_KEY]?.params.message).toMatch(/review the page/i);
+        expect(result.inputRequests?.[HANDOFF_KEY]?.params.message).toMatch(/Hand back/i);
+        expect(result.inputRequests?.[HANDOFF_KEY]?.params.message).toMatch(/accept the pending handoff prompt/i);
         expect(result.inputRequests?.[HANDOFF_KEY]?.params.url).toContain('/player');
     });
 
@@ -234,6 +236,8 @@ describe('input_required for a login wall', () => {
         expect(embedded?.params.mode).toBe('url');
         expect(embedded?.params.url).toMatch(/^https:\/\/api\.steel\.dev\/v1\/sessions\/[0-9a-f-]+\/player$/);
         expect(embedded?.params.message).toMatch(/sign in/i);
+        expect(embedded?.params.message).toMatch(/Hand back/i);
+        expect(embedded?.params.message).toMatch(/accept the pending handoff prompt/i);
         expect(result.requestState).toBeTypeOf('string');
     });
 
@@ -637,6 +641,8 @@ describe('inline viewer handoff (UI extension)', () => {
         expect(params?.url).toBeUndefined();
         expect(params?.requestedSchema).toBeDefined();
         expect(params?.message).toMatch(/live browser viewer above/i);
+        expect(params?.message).toMatch(/Hand back/i);
+        expect(params?.message).toMatch(/accept the pending handoff prompt/i);
         expect(result.requestState).toBeTypeOf('string');
     });
 

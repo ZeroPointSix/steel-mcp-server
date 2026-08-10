@@ -7,7 +7,6 @@ import {
     type ServerContext,
 } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { SESSION_VIEWER_URI } from '../apps/session-viewer.js';
 import type { ServerDeps, ToolHost } from '../context.js';
 import { SteelToolError } from '../errors.js';
 import {
@@ -62,7 +61,6 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 session_id: sessionIdSchema,
                 reason: z.enum(reasons).describe('Why a person needs control.'),
             }),
-            _meta: { ui: { resourceUri: SESSION_VIEWER_URI } },
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_handoff', ctx.mcpReq, async () => {
@@ -104,11 +102,12 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 };
                 const requestState = await deps.handoffState.mint(state, ctx);
                 const until = Math.min(deps.now().getTime() + HANDOFF_GRACE_MS, record.expiresAt);
-                const message =
-                    `A person needs to ${REASON_TEXT[args.reason]}${origin ? ` on ${origin}` : ''}. ` +
-                    'Take control of the live browser, choose Hand back when finished, then continue; the agent will re-read the page.';
+                const reason = `A person needs to ${REASON_TEXT[args.reason]}${origin ? ` on ${origin}` : ''}.`;
 
                 if (supportsInlineViewer(serverCtx) && supportsElicitation(serverCtx)) {
+                    const message =
+                        `${reason} Use the existing live browser viewer and finish this step by hand. ` +
+                        'When finished, choose Hand back in the viewer, then accept the pending handoff prompt so the agent can re-read the page and continue.';
                     await deps.registry.awaitInput(args.session_id, until);
                     return inputRequired({
                         requestState,
@@ -126,6 +125,9 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 ) {
                     const url = handoffViewerUrl(record.debugUrl);
                     if (!url) throw noHandoffRoute();
+                    const message =
+                        `${reason} Open the linked live browser and finish this step by hand. When finished, ` +
+                        'choose Hand back in the viewer, then return here and accept the pending handoff prompt so the agent can re-read the page and continue.';
                     await deps.registry.awaitInput(args.session_id, until);
                     return inputRequired({
                         requestState,
@@ -134,6 +136,9 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 }
 
                 if (supportsInlineViewer(serverCtx)) {
+                    const message =
+                        `${reason} Use the existing live browser viewer and finish this step by hand. ` +
+                        'When finished, choose Hand back in the viewer, then tell the agent to continue.';
                     await deps.registry.awaitInput(args.session_id, until);
                     return successResult(
                         {

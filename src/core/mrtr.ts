@@ -304,8 +304,9 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
                 [HANDOFF_KEY]: inputRequired.elicit({
                     message:
                         `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Take control ` +
-                        'in the live browser viewer above and finish this step by hand, then tell me to continue — ' +
-                        'I will re-read the page and carry on only if the way is actually clear.',
+                        'in the live browser viewer above and finish this step by hand. When finished, choose Hand back ' +
+                        'in the viewer, then accept the pending handoff prompt. I will re-read the page and carry on ' +
+                        'only if the way is actually clear.',
                     // No fields: the person signals "done" with the elicitation's accept action, and
                     // the retried call re-reads the page itself, so no structured input is needed.
                     requestedSchema: { type: 'object', properties: {} },
@@ -336,8 +337,9 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
             [HANDOFF_KEY]: inputRequired.elicitUrl({
                 message:
                     `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Open the live ` +
-                    'browser and finish this step by hand, then let the tool run again — it re-reads the page and ' +
-                    'carries on only if the way is actually clear.',
+                    'browser and finish this step by hand. When finished, choose Hand back in the viewer, then return ' +
+                    'here and accept the pending handoff prompt. The tool re-reads the page and carries on only if ' +
+                    'the way is actually clear.',
                 url,
             }),
         },

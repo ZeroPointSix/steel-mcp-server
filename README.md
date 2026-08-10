@@ -58,7 +58,8 @@ On a host that supports MCP Apps — Claude among them — `steel_session_create
 browser inline in the conversation. Frames are painted to a canvas from the session's own CDP
 screencast. **Take control** acquires a renewable exclusive lease before clicks, typing or scrolling
 go back to the page, so the agent and a person cannot drive at the same time. **Hand back** returns
-ownership; the agent then re-reads the page before continuing.
+ownership. During a `steel_session_handoff`, accept the pending handoff prompt afterward; the agent
+then re-reads the page before continuing.
 Chat hosts size an inline view for a card rather than a browser, so the view asks for the height its
 page needs and offers **Full screen** — on a host that grants it; the control removes itself on one
 that does not.
@@ -274,7 +275,8 @@ dashboard, or no id to inspect the most recent released session. It never starts
 clicks, scrolling and typing performed through the live viewer travel over CDP and may be absent
 from its agent-trace timeline; hidden counts refer only to routine browser network Request/Response logs.
 
-To take over the browser, ask the agent to call `steel_session_handoff`; use **Hand back** when done.
+To take over the browser, ask the agent to call `steel_session_handoff`; use **Hand back** when done,
+then accept the pending handoff prompt so the agent can continue.
 To watch a cloud browser outside an MCP Apps host, open the `viewer_url` returned by `steel_session_create`.
 Active sessions also appear in the [Steel dashboard](https://app.steel.dev).
 

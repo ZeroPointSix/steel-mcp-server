@@ -1,5 +1,5 @@
 // ABOUTME: Integration tests for the MCP Apps surface: the ui:// session-viewer resource, the
-// ABOUTME: resourceUri on session_create, and the app-only live-view tool's authorization and secrecy.
+// ABOUTME: the single resourceUri on session_create, and the app-only live-view tool's authorization and secrecy.
 import { Client } from '@modelcontextprotocol/client';
 import {
     CLIENT_CAPABILITIES_META_KEY,
@@ -236,12 +236,17 @@ describe('the retired session-replay resource', () => {
 });
 
 describe('steel_session_create', () => {
-    it('points a supporting host at the viewer, and returns exactly what it always did', async () => {
+    it('is the only tool that points a supporting host at the session viewer', async () => {
         const harness = await connect();
         const { tools } = await harness.client.listTools();
-        const create = tools.find(tool => tool.name === 'steel_session_create');
-        expect(uiMetaOf(create)?.resourceUri).toBe(SESSION_VIEWER_URI);
+        const viewerTools = tools
+            .filter(tool => uiMetaOf(tool)?.resourceUri === SESSION_VIEWER_URI)
+            .map(tool => tool.name);
+        expect(viewerTools).toEqual(['steel_session_create']);
+    });
 
+    it('returns exactly what it always did', async () => {
+        const harness = await connect();
         const result = await harness.client.callTool({ name: 'steel_session_create', arguments: {} });
         expect(textOf(result)).toContain('Started a browser session.');
         expect(textOf(result)).toContain('Pass session_id="sess_');
