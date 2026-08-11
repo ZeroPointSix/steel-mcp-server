@@ -10,7 +10,7 @@ through interactive sites by clicking, typing, and filling forms.
 Unlike v1's screenshot-and-numbered-box loop, v2 reads pages as markdown or accessibility trees,
 shows small screenshots through MCP image blocks without using pixels for interaction, and makes browser sessions explicit.
 
-> **Status:** `2.0.0-rc.1`. Run the server locally over stdio, or run the hosted endpoint
+> **Status:** `2.0.0-rc.2`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
 
 <a href="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server"><img width="380" height="200" src="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server/badge" alt="Steel MCP Server listing on Glama" /></a>
@@ -46,7 +46,7 @@ The default `browse` profile is fifteen tools:
 | `steel_session_diagnostics` | Read a live or finished session's timestamped activity without starting a browser |
 | `steel_session_handoff` | Pause while you take exclusive control of the same browser, then return it to the agent |
 | `steel_session_replay` | On an explicit watch/replay request, return a finished session's safe dashboard link |
-| `steel_batch` | Run several steps in one call, with one page read at the end |
+| `steel_batch` | Run known reversible steps in one call; hand off before login, payment or final confirmation |
 | `steel_session_live_view` | Feeds the inline viewer its connection details. Hosts hide it from the model |
 
 Set `STEEL_PROFILE=scrape` to expose only the three stateless read tools. They never start a browser
@@ -93,8 +93,11 @@ git clone https://github.com/steel-dev/steel-mcp-server.git
 cd steel-mcp-server
 npm install
 npm run pack:mcpb
-open build/steel-mcp-*.mcpb    # on Windows, double-click it
+open "build/steel-mcp-$(node -p 'require("./package.json").version').mcpb"    # Windows: double-click it
 ```
+
+When replacing an installed bundle, fully quit and reopen Claude after the installer finishes, then
+start a new conversation so Claude reads the new tool catalog instead of reusing an older one.
 
 ### Steel Cloud
 

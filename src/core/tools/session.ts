@@ -61,7 +61,10 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                 profile_id: z
                     .string()
                     .optional()
-                    .describe('Reuse a saved browser identity so cookies and fingerprint persist across visits.'),
+                    .describe(
+                        'Load an existing saved browser profile. Stored cookies and fingerprint are reused, but ' +
+                            'this server does not write session changes back to the profile.'
+                    ),
                 namespace: z
                     .string()
                     .optional()
@@ -248,9 +251,9 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Release a browser session',
             description:
-                'Shut down a browser session and stop the meter. Safe to call twice. Anything the page held — ' +
-                'logins, cookies, the current URL — is gone afterwards, so read what you need first. This tool ' +
-                'reports the final URL and page title before releasing.',
+                'Shut down the current browser and stop the meter. Safe to call twice. Its current URL and ' +
+                'session-only page state are gone afterwards. A loaded saved profile remains stored but is not ' +
+                'updated by this server. Read what you need first; this reports the final URL and title.',
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
             inputSchema: z.object({ session_id: sessionIdSchema }),
         },

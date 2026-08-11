@@ -94,7 +94,7 @@ the README links the same privacy policy the manifest declares.
 
 ### 1.6 Install and exercise the bundle locally
 
-The release-candidate bundle is packed at `build/steel-mcp-2.0.0-rc.1.mcpb` and its staged server
+The release-candidate bundle is packed at `build/steel-mcp-2.0.0-rc.2.mcpb` and its staged server
 verified over JSON-RPC.
 Installing it into Claude for macOS, running all 15 tools against a real Steel key, and confirming the
 live viewer and finished-session replay render is **yours** — see 2.7.
@@ -114,7 +114,7 @@ which asks for *your* GitHub profile.
 
 ### 2.2 The release version — settled
 
-`2.0.0-rc.1`. `package.json`, `SERVER_VERSION`, `manifest.json` and the README's Status line all say
+`2.0.0-rc.2`. `package.json`, `SERVER_VERSION`, `manifest.json` and the README's Status line all say
 so, and tests hold them together. Promote the same code to `2.0.0` after the release-candidate checks
 pass.
 
@@ -152,11 +152,13 @@ Steel's behalf:
 
 ### 2.7 Install the bundle and run all 15 tools
 
-`build/steel-mcp-2.0.0-rc.1.mcpb`. Its staged server is verified over JSON-RPC and lists 15 tools, but
+`build/steel-mcp-2.0.0-rc.2.mcpb`. Its staged server is verified over JSON-RPC and lists 15 tools, but
 that proves it starts, not that a real Steel key drives a real browser through Desktop's own Node.
-Install it, run each tool, and confirm the live viewer renders. Finished-session replay is
-dashboard-only in rc.1, so verify that its safe dashboard link opens and that no replay app resource
-is registered or bundled.
+Install it, fully restart Claude, and open a new conversation. Confirm the installed server reports
+`2.0.0-rc.2`, lists 15 tools including `steel_session_handoff`, and defaults to a 15-minute session.
+Run each tool, confirm the live viewer renders, and exercise Take control → Hand back → Continue on
+the same session. Finished-session replay is dashboard-only in this release candidate, so verify
+that its safe dashboard link opens and that no replay app resource is registered or bundled.
 
 ### 2.8 Submit the form
 

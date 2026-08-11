@@ -31,10 +31,10 @@ export function registerBatch(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Run several browser steps at once',
             description:
-                'Run a short sequence of navigate, act and wait_for steps against one session in a single call, ' +
-                'with at most one page read at the end. Use it for anything you already know the shape of — ' +
-                'filling a form, stepping through a checkout, following a known path. It stops at the first step ' +
-                'that fails and tells you which one, so nothing runs against an unexpected page.',
+                'Run known, reversible navigate, act and wait_for steps against one session in one call, with at ' +
+                'most one page read at the end. In checkout, stop before login, payment or final confirmation and ' +
+                'use steel_session_handoff for review or control. It stops at the first failed step and skips ' +
+                'the rest.',
             annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
             inputSchema: z.object({
                 session_id: sessionIdSchema,

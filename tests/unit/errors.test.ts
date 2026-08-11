@@ -395,13 +395,14 @@ describe('interactiveBlockError', () => {
         expect(err.message).toMatch(/never put a password in a tool argument/i);
     });
 
-    it('says the saved identity is not signed in when the session already reuses a profile', () => {
+    it('says a loaded profile is not signed in and will not receive new login cookies', () => {
         const err = interactiveBlockError(
             { kind: 'login_wall', vendor: 'credentials', marker: 'password_field' },
             'https://app.test/login',
             { profileId: 'p1' }
         );
-        expect(err.message).toMatch(/already reuses a browser profile/i);
+        expect(err.message).toMatch(/loaded a saved browser profile/i);
+        expect(err.message).toMatch(/does not write new login cookies back/i);
     });
 });
 

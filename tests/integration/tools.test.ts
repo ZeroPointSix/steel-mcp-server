@@ -142,6 +142,8 @@ describe('server instructions', () => {
         expect(instructions).toMatch(/viewer input.*may be absent/i);
         expect(instructions).toMatch(/session_handoff.*sensitive.*local file/i);
         expect(instructions).toMatch(/do not act or release.*human control/i);
+        expect(instructions).toMatch(/steel_batch.*known.*reversible.*checkout/i);
+        expect(instructions).toMatch(/stop before.*payment.*final confirmation.*session_handoff/i);
         expect(instructions).toMatch(/never create.*old activity/i);
     });
 });
@@ -618,6 +620,15 @@ describe('steel_session_create', () => {
         expect(textOf(result)).toContain('cannot be extended');
     });
 
+    it('says a loaded profile is reused but not updated', async () => {
+        const { tools } = await harness.client.listTools();
+        const create = tools.find(tool => tool.name === 'steel_session_create');
+        const schema = create?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined;
+        expect(schema?.properties?.profile_id?.description).toMatch(
+            /stored cookies.*reused.*does not write.*back to the profile/i
+        );
+    });
+
     it('returns an opaque handle that is not the Steel session id', async () => {
         const handle = await newSession();
         expect(handle.startsWith('sess_')).toBe(true);
@@ -665,6 +676,13 @@ describe('steel_session_create', () => {
 });
 
 describe('steel_session_release', () => {
+    it('distinguishes the discarded browser from a retained saved profile', async () => {
+        const { tools } = await harness.client.listTools();
+        const release = tools.find(tool => tool.name === 'steel_session_release');
+        expect(release?.description).toMatch(/current URL.*session-only page state.*gone/i);
+        expect(release?.description).toMatch(/loaded saved profile.*remains stored.*not updated/i);
+    });
+
     it('captures the session context before releasing it', async () => {
         const handle = await newSession();
         await harness.client.callTool({
@@ -1407,6 +1425,14 @@ describe('steel_session_diagnostics', () => {
 });
 
 describe('steel_batch', () => {
+    it('limits batching to known reversible checkout steps before handoff boundaries', async () => {
+        const { tools } = await harness.client.listTools();
+        const batch = tools.find(tool => tool.name === 'steel_batch');
+        expect(batch?.description).toMatch(
+            /known, reversible.*checkout.*payment.*final confirmation.*steel_session_handoff/i
+        );
+    });
+
     it('runs several steps in one call and returns one snapshot at the end', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({

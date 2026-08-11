@@ -13,8 +13,8 @@ between packages in exchange for nothing.
 | Artifact | Built from | For | Published by |
 |---|---|---|---|
 | **MCPB bundle** `steel-mcp-<version>.mcpb` | `dist/stdio.js` | Claude for macOS and Windows | `release.yml`, attached to the GitHub release |
-| **npm package** `steel-mcp` | `bin` → `dist/stdio.js`, plus `exports` for embedding | `npx`, CLI hosts, anyone importing the core | Not published by the rc.1 workflow |
-| **Container image** | `dist/stdio.js` by default, `docker run <image> dist/hosted.js` for the HTTP endpoint | Self-hosters | Built as a gate; not published by the rc.1 workflow |
+| **npm package** `steel-mcp` | `bin` → `dist/stdio.js`, plus `exports` for embedding | `npx`, CLI hosts, anyone importing the core | Not published by the release-candidate workflow |
+| **Container image** | `dist/stdio.js` by default, `docker run <image> dist/hosted.js` for the HTTP endpoint | Self-hosters | Built as a gate; not published by the release-candidate workflow |
 | **`mcp.steel.dev`** | `dist/hosted.js` | Steel's own hosted service | Not wired up here; deployed from the image |
 
 The entrypoints, since three of them have similar names:
@@ -43,7 +43,7 @@ installs `optionalDependencies` by default, which is why the exporter stack reac
 `peerDependenciesMeta.<name>.optional` actually keeps a package out of a default install.
 
 All four are also in `devDependencies`, so this repository builds, typechecks and tests against them.
-The dashboard-only rc.1 replay path has no Hls.js dependency or staged player asset.
+The dashboard-only release-candidate replay path has no Hls.js dependency or staged player asset.
 Consequences to remember:
 
 - **A self-hoster running `dist/hosted.js` must install them.** The README's hosted section says so.
@@ -104,9 +104,9 @@ local MCPB or publish without redoing the checksum and Desktop gates.
 
 ### When package.json already states the version you want to release
 
-`npm version 2.0.0-rc.1` fails with `Version not changed` when `package.json` already has that value,
-so the flow above cannot produce that tag. This release candidate was set during preparation rather
-than by running the version lifecycle.
+`npm version <current-version>` fails with `Version not changed` when `package.json` already has that
+value, so the flow above cannot produce that tag. The release candidate may already have been set
+during preparation rather than by running the version lifecycle.
 
 Do not tag it locally. Confirm the version surfaces and dispatch the protected workflow after merge:
 
@@ -114,13 +114,14 @@ Do not tag it locally. Confirm the version surfaces and dispatch the protected w
 npm run sync:version -- --check   # the generated version surfaces agree
 ```
 
-The protected publish job creates `v2.0.0-rc.1` only after approval and marks its GitHub release as a
-prerelease that is not Latest. If anything is wrong after publication, prepare rc.2; never move rc.1.
+The protected publish job creates `v<current-version>` only after approval and marks its GitHub
+release as a prerelease that is not Latest. If anything is wrong after publication, prepare the next
+prerelease; never move an existing tag.
 
 ## Before the first release
 
 - [ ] Protect the GitHub `release` environment with a required reviewer.
-- [ ] Decide npm and GHCR ownership and prerelease tagging separately; rc.1 intentionally publishes neither.
+- [ ] Decide npm and GHCR ownership and prerelease tagging separately; this workflow publishes neither.
 - [ ] The MCPB directory submission has its own checklist in [SUBMISSION.md](SUBMISSION.md).
 - [ ] The registry record, the DNS verification ticket, and the rest of distribution are in
       [RESEARCH.md §8](RESEARCH.md#8-distribution-checklist).

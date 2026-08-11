@@ -175,7 +175,7 @@ export interface MitigationStep {
 
 const RUNG_ADVICE: Record<MitigationRung, string> = {
     identity:
-        'Reuse a browser identity: create the session with profile_id so cookies and fingerprint persist across visits.',
+        'Load an existing browser identity: create the session with profile_id to reuse stored cookies and fingerprint.',
     pacing: 'Slow down: fewer requests per minute and one session at a time before adding any new capability.',
     proxies: 'Route through a residential proxy: create the session with use_proxy: true.',
     captcha: 'Let Steel solve the challenge: create the session with solve_captcha: true.',
@@ -382,8 +382,8 @@ export function assessInteractiveBlock(evidence: HandoffBlockEvidence): BlockVer
 /** Builds the error for a login wall: name the identity options, never ask for a typed secret. */
 export function loginWallError(url: string, state: MitigationState): SteelToolError {
     const advice = state.profileId
-        ? 'This session already reuses a browser profile, so that saved identity is not signed in here. Sign in ' +
-          'once in the live session and the profile keeps the cookies for next time.'
+        ? 'This session loaded a saved browser profile, but that identity is not signed in here. Sign in through ' +
+          'the live session for this run; this server does not write new login cookies back to the saved profile.'
         : 'Create the session with profile_id to reuse an identity that is already signed in, or with namespace ' +
           'to inject managed credentials. Never put a password in a tool argument.';
     return new SteelToolError(
