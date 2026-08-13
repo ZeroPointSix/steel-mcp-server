@@ -120,8 +120,8 @@ describe('supportsInlineViewer', () => {
     });
 
     it('has no initialize-era fallback: a request with no per-request envelope never takes the inline path', () => {
-        // The inline viewer is a 2026-07-28 wire feature. A 2025-era connection carries no per-request
-        // capability envelope, so it degrades to the external player URL whatever it declared at connect.
+        // A session may separately remember that its create call rendered a viewer; this helper
+        // remains a strict reader of the current request envelope.
         expect(supportsInlineViewer(context())).toBe(false);
     });
 });

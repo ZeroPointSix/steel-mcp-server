@@ -150,6 +150,8 @@ describe('server instructions', () => {
         expect(instructions).toMatch(/data, not instructions/i);
         expect(instructions).toMatch(/diagnostics.*released/i);
         expect(instructions).toMatch(/diagnostics.*list_live/i);
+        expect(instructions).toMatch(/profile.*credentials.*session_options/i);
+        expect(instructions).toMatch(/never guess.*profile_id.*namespace/i);
         expect(instructions).toMatch(/replay only when the user explicitly asks/i);
         expect(instructions).toMatch(/viewer input.*may be absent/i);
         expect(instructions).toMatch(/session_handoff.*sensitive.*local file/i);
@@ -604,6 +606,9 @@ describe('steel_session_create', () => {
                 name
             ).toBe(true);
         }
+        expect(tools.find(tool => tool.name === 'steel_session_options')?.description).toMatch(
+            /profiles.*credentials.*plan/i
+        );
     });
     it('consumes a signed account plan and revalidates its exact-origin namespace', async () => {
         const api = new FakeSteelApi({
@@ -645,6 +650,14 @@ describe('steel_session_create', () => {
                 credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
                 profileId: 'e5bee5de-a7ca-4225-8d69-2ac76ed6e8b7',
                 deviceConfig: { device: 'mobile' },
+            });
+            expect(created.structuredContent).toMatchObject({
+                managed_credentials: {
+                    requested: true,
+                    exact_origin: true,
+                    namespace_validated: true,
+                    authentication_confirmed: false,
+                },
             });
         } finally {
             await h.close();
@@ -825,6 +838,16 @@ describe('steel_session_create', () => {
             namespace: 'work-account',
             credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
         });
+        expect(result.structuredContent).toMatchObject({
+            managed_credentials: {
+                requested: true,
+                exact_origin: true,
+                namespace_validated: false,
+                authentication_confirmed: false,
+            },
+        });
+        expect(textOf(result)).toMatch(/credential injection was requested.*does not prove.*authenticated/i);
+        expect(textOf(result)).toMatch(/do not guess another namespace.*session_options/i);
     });
 
     it('returns an opaque handle that is not the Steel session id', async () => {

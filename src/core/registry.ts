@@ -27,6 +27,8 @@ export interface HandleRecord {
     /** Hard deadline; past this the handle is refused even if Steel has not reclaimed it yet. */
     expiresAt: number;
     viewerUrl?: string | undefined;
+    /** The create request proved this client rendered the session's inline viewer. */
+    inlineViewer?: boolean | undefined;
     /**
      * The self-contained live player for this session — the URL a person is handed to finish a
      * step by hand. Unauthenticated, and whoever holds it can drive the browser.
@@ -64,6 +66,7 @@ export interface CreateHandleInput {
     steelSessionId: string;
     expiresAt: number;
     viewerUrl?: string | undefined;
+    inlineViewer?: boolean | undefined;
     debugUrl?: string | undefined;
     mitigation?: MitigationState | undefined;
 }
@@ -212,6 +215,7 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             lastUsedAt: now,
             expiresAt: input.expiresAt,
             viewerUrl: input.viewerUrl,
+            inlineViewer: input.inlineViewer,
             debugUrl: input.debugUrl,
             handoffRounds: 0,
             mitigation: input.mitigation ?? {},

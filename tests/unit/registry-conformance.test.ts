@@ -77,6 +77,7 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
                 steelSessionId: 'steel-1',
                 expiresAt: Date.now() + 600_000,
                 viewerUrl: 'https://app.steel.dev/sessions/steel-1',
+                inlineViewer: true,
                 debugUrl: 'https://api.steel.dev/v1/sessions/steel-1/player',
                 mitigation: { useProxy: true, profileId: 'profile-1' },
             });
@@ -88,6 +89,7 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
                 lastUsedAt: START_MS,
                 expiresAt: START_MS + 600_000,
                 viewerUrl: 'https://app.steel.dev/sessions/steel-1',
+                inlineViewer: true,
                 debugUrl: 'https://api.steel.dev/v1/sessions/steel-1/player',
                 mitigation: { useProxy: true, profileId: 'profile-1' },
                 handoffRounds: 0,

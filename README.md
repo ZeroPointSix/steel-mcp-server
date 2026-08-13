@@ -10,7 +10,7 @@ through interactive sites by clicking, typing, and filling forms.
 Unlike v1's screenshot-and-numbered-box loop, v2 reads pages as markdown or accessibility trees,
 shows small screenshots through MCP image blocks without using pixels for interaction, and makes browser sessions explicit.
 
-> **Status:** `2.0.0-rc.6`. Run the server locally over stdio, or run the hosted endpoint
+> **Status:** `2.0.0-rc.7`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
 
 <a href="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server"><img width="380" height="200" src="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server/badge" alt="Steel MCP Server listing on Glama" /></a>
@@ -59,6 +59,8 @@ Call `steel_session_options` with an absolute target URL, a `read`, `interact`, 
 and only the needs the task explicitly requires. Plain reads still recommend `steel_scrape`.
 Non-default plans return a short-lived signed `configuration` for `steel_session_create`; the token
 is bound to this Steel credential and expires after ten minutes.
+When a request says "my profile", "saved login", or "Steel credentials", discover the account
+options first; never guess a profile UUID or credential namespace.
 
 ```json
 {

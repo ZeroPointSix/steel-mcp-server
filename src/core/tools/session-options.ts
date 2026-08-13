@@ -20,8 +20,8 @@ const optionsSchema = z
             .array(z.enum(NEEDS))
             .max(6)
             .optional()
-            .describe('Unique; protected_text=read,human_captcha!=read/protected_text;persist_profile=account.'),
-        minutes: z.number().int().min(1).max(1440).optional().describe('long_running minutes.'),
+            .describe('Unique;protected_text=read;captcha!=read/protected_text;persist_profile=account.'),
+        minutes: z.number().int().min(1).max(1440).optional().describe('long_running min.'),
         country: z
             .string()
             .regex(/^[A-Z]{2}$/)
@@ -112,7 +112,7 @@ export function registerSessionOptions(host: ToolHost, deps: ServerDeps): void {
         'steel_session_options',
         {
             title: 'Plan session',
-            description: 'Plan browser session setup.',
+            description: 'Find profiles/credentials; plan setup.',
             annotations: { readOnlyHint: true, openWorldHint: true },
             inputSchema: optionsSchema,
         },

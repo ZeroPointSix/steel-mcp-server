@@ -262,6 +262,24 @@ describe('explicit session handoff', () => {
         const record = await harness.deps.registry.resolve(handle, harness.deps.principal);
         expect(record.awaitingInputUntil).toBeUndefined();
     });
+
+    it('waits on the rendered viewer instead of leaking a raw link when formal elicitation is unavailable', async () => {
+        const harness = await connectModern({
+            deps: testDeps({ page: plainPage }),
+            capabilities: { extensions: { [UI_EXTENSION_NAME]: {} } },
+        });
+        const handle = await newSession(harness);
+        const result = await harness.client.callTool({
+            name: 'steel_session_handoff',
+            arguments: { session_id: handle, reason: 'sensitive_input' },
+        });
+
+        expect(result.isError).not.toBe(true);
+        expect(textOf(result)).toMatch(/existing live browser viewer/i);
+        expect(textOf(result)).toMatch(/tell the agent to continue/i);
+        expect(textOf(result)).not.toContain('/player');
+        expect(result.structuredContent).toMatchObject({ handoff: { status: 'awaiting_human', mode: 'inline' } });
+    });
 });
 
 describe('input_required for a login wall', () => {
@@ -909,8 +927,8 @@ describe('the inline path falls back to the external player', () => {
     });
 
     it('degrades to the external player on the 2025 wire even if the UI extension was declared at connect', async () => {
-        // The inline viewer rides the per-request capability envelope, which a 2025-era connection
-        // does not carry. So a legacy client is handed the external player URL whatever it declared.
+        // The legacy client cannot complete the modern inline handoff contract, so URL elicitation
+        // remains its compatible pause route.
         let harness: Harness;
         harness = await connectLegacy({
             deps: testDeps({ page: loginWallPage }),

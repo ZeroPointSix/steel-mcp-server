@@ -316,8 +316,8 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     const now = deps.now().getTime();
     if (record.handoffRounds >= MAX_HANDOFF_ROUNDS) fail();
 
-    // When the client has the inline session viewer rendered (the MCP-Apps UI extension, declared
-    // per request on the modern wire), point the person at that viewer instead of handing out the
+    // When the create request proved the client rendered the inline session viewer, or this request
+    // declares the MCP-Apps UI extension, point the person at that viewer instead of handing out the
     // external player URL. The viewer reaches the same browser through the scoped CDP token the app
     // already holds, so the unauthenticated player URL — a drive-capable bearer capability — never
     // leaves the server on this path. The retried call re-reads the page itself, exactly as the
@@ -326,7 +326,7 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     // elicitation: a client that declared the viewer but not elicitation cannot receive the form the
     // inline path returns, so it degrades to the external player URL below rather than getting a
     // result shape it never said it could handle.
-    if (supportsInlineViewer(ctx) && supportsElicitation(ctx)) {
+    if ((record.inlineViewer || supportsInlineViewer(ctx)) && supportsElicitation(ctx)) {
         const round = await deps.registry.recordHandoff(handle);
         const origin = handoffOrigin(inspection.finalUrl);
         const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };

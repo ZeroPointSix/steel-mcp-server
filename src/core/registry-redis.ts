@@ -260,6 +260,7 @@ export class RedisHandleRegistry implements HandleRegistry {
             createdAt: now,
             expiresAt: input.expiresAt,
             viewerUrl: input.viewerUrl,
+            inlineViewer: input.inlineViewer,
             // The live-player URL the human-in-the-loop handoff hands a person. Without it every
             // login wall and CAPTCHA degrades to an error no one can act on.
             debugUrl: input.debugUrl,

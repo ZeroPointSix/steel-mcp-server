@@ -106,8 +106,10 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 const until = Math.min(deps.now().getTime() + HANDOFF_GRACE_MS, record.expiresAt);
                 const reason = `A person needs to ${REASON_TEXT[args.reason]}${origin ? ` on ${origin}` : ''}.`;
                 const deadline = ` Finish before ${new Date(record.expiresAt).toISOString()}; handoff cannot extend it.`;
+                const declaredAtConnect = () => host.server.getClientCapabilities() as ClientCapabilities;
+                const inlineViewer = record.inlineViewer || supportsInlineViewer(serverCtx);
 
-                if (supportsInlineViewer(serverCtx) && supportsElicitation(serverCtx)) {
+                if (inlineViewer && supportsElicitation(serverCtx)) {
                     const message =
                         `${reason} Use the existing live browser viewer and finish this step by hand. ` +
                         'When finished, choose Hand back in the viewer, then accept the pending handoff prompt so the agent can re-read the page and continue.' +
@@ -124,9 +126,7 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                     });
                 }
 
-                if (
-                    supportsUrlElicitation(serverCtx, () => host.server.getClientCapabilities() as ClientCapabilities)
-                ) {
+                if (supportsUrlElicitation(serverCtx, declaredAtConnect)) {
                     const url = handoffViewerUrl(record.debugUrl);
                     if (!url) throw noHandoffRoute();
                     const message =
@@ -140,7 +140,7 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                     });
                 }
 
-                if (supportsInlineViewer(serverCtx)) {
+                if (inlineViewer) {
                     const message =
                         `${reason} Use the existing live browser viewer and finish this step by hand. ` +
                         'When finished, choose Hand back in the viewer, then tell the agent to continue.' +

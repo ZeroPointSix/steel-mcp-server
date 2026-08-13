@@ -11,7 +11,7 @@ export const SERVER_INSTRUCTIONS = `Steel gives you cloud Chrome for JavaScript 
 
 Start with steel_scrape while it supplies the evidence; it starts no billed browser. At the first necessary stateful interaction, create one session sized for the whole remaining active task and expected handoff, then preserve it through comparison and cart. expires_at is immutable and replacement sessions do not inherit page/cart state. Release promptly.
 
-For non-default setup, call steel_session_options with the target and explicit needs, then pass its configuration to create.
+For saved login/profile/credentials or other setup, call steel_session_options for the target; pass its configuration to create. Never guess profile_id/namespace.
 
 Use the returned session_id with steel_navigate, steel_snapshot, steel_find and steel_act. Read before acting and target @eN refs; elements without one cannot be clicked. After no change, take a fresh snapshot instead of repeating.
 

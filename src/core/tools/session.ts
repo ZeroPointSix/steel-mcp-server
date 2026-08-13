@@ -1,10 +1,12 @@
 // ABOUTME: Session lifecycle tools: explicit create with both Steel timeouts set, a release that
 // ABOUTME: captures context first, live-or-finished diagnostics, and the app-only live-view endpoint.
+import type { ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { SESSION_VIEWER_URI } from '../apps/session-viewer.js';
 import { resolveInactivityTimeout } from '../config.js';
 import { mintSteelSessionId, type ServerDeps, type ToolHost } from '../context.js';
 import { type SelfHostCapability, SteelToolError, selfHostUnsupportedError } from '../errors.js';
+import { supportsInlineViewer } from '../mrtr.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
 import {
@@ -55,8 +57,8 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     configuration: z.string().optional().describe('Signed options token.'),
                     use_proxy: z.boolean().optional().describe('Proxy.'),
                     solve_captcha: z.boolean().optional().describe('Solve CAPTCHA.'),
-                    profile_id: z.string().optional().describe('READY profile UUID; not secret.'),
-                    namespace: z.string().optional().describe('Credential label; not secret.'),
+                    profile_id: z.string().optional().describe('READY UUID from options; not secret.'),
+                    namespace: z.string().optional().describe('Options credential; not secret.'),
                     block_ads: z.boolean().optional().describe('Block ads.'),
                     device: z.enum(['desktop', 'mobile']).optional().describe('Device class.'),
                     viewport: z
@@ -210,6 +212,7 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         steelSessionId,
                         expiresAt: expiresAt.getTime(),
                         viewerUrl: session.sessionViewerUrl,
+                        inlineViewer: supportsInlineViewer(ctx as ServerContext),
                         // Kept for the human-in-the-loop handoff, which needs the self-contained
                         // player rather than the dashboard: a person with no Steel login can open
                         // the player, and the dashboard would show them a sign-in page instead.
@@ -266,6 +269,11 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             inactivityTimeout === undefined
                                 ? 'No separate inactivity timeout fits inside this short session lifetime.'
                                 : `Steel releases it after ${Math.round(inactivityTimeout / 1_000)} seconds without browser activity; active human input resets that clock.`,
+                            ...(args.namespace
+                                ? [
+                                      'Managed credential injection was requested; this does not prove the site authenticated. Verify the page. If sign-in remains, do not guess another namespace: use steel_session_options before creating a replacement, or hand off this session. Never request or type a password.',
+                                  ]
+                                : []),
                         ],
                     },
                     {
@@ -287,6 +295,12 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         },
                         profile_id: session.profileId ?? args.profile_id,
                         persist_profile: Boolean(settings.persistProfile),
+                        managed_credentials: {
+                            requested: Boolean(args.namespace),
+                            exact_origin: Boolean(args.namespace),
+                            namespace_validated: Boolean(args.namespace && planned?.accountContext),
+                            authentication_confirmed: false,
+                        },
                     }
                 );
                 if (signal && releaseOnAbort) {
