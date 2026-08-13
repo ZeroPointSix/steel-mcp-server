@@ -351,7 +351,7 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
 
             await registry.release(first.handle, ORG_A, 'explicit');
             await registry.release(second.handle, ORG_A, 'stream_close');
-            expect(registry.releaseCounts()).toEqual({ explicit: 1, stream_close: 1, reaper: 0 });
+            expect(registry.releaseCounts()).toEqual({ explicit: 1, stream_close: 1, idle: 0, hard_expiry: 0 });
         });
     });
 
@@ -418,7 +418,7 @@ describe.each(BACKENDS)('$name conformance', ({ build }) => {
             expect(await registry.reap({ idleMs: 1 })).toBe(0);
             releaseFails = () => false;
             expect(await registry.reap({ idleMs: 1 })).toBe(1);
-            expect(registry.releaseCounts().reaper).toBe(1);
+            expect(registry.releaseCounts().hard_expiry).toBe(1);
             expect(await registry.countLive(ORG_A)).toBe(0);
         });
     });

@@ -72,10 +72,17 @@ const BROWSER_TOOL_LIMIT_TEXT =
 const CONCURRENCY_LIMIT_TEXT =
     'You are at the concurrent session cap for this plan (10 on Launch, 100 on Scale). Release a session with steel_session_release before creating another.';
 
+const ACCOUNT_LIMIT_TEXT =
+    'The Steel account API is rate limited; this is separate from Browser Tools and session concurrency.';
+
 function rateLimitMessage(body: SteelErrorBody, context: MapErrorContext): string {
     const saysConcurrency = /concurren|session limit/i.test(body.message ?? '');
     const base =
-        saysConcurrency || context.operation === 'session_create' ? CONCURRENCY_LIMIT_TEXT : BROWSER_TOOL_LIMIT_TEXT;
+        context.operation === 'account'
+            ? ACCOUNT_LIMIT_TEXT
+            : saysConcurrency || context.operation === 'session_create'
+              ? CONCURRENCY_LIMIT_TEXT
+              : BROWSER_TOOL_LIMIT_TEXT;
     const retry =
         context.retryAfterSeconds === undefined
             ? 'Retry after a short pause.'
@@ -164,6 +171,8 @@ export interface MitigationState {
     paced?: boolean | undefined;
     useProxy?: boolean | undefined;
     solveCaptcha?: boolean | undefined;
+    managedCredentials?: boolean | undefined;
+    persistProfile?: boolean | undefined;
 }
 
 export type MitigationRung = 'identity' | 'pacing' | 'proxies' | 'captcha' | 'stealth';
@@ -179,7 +188,7 @@ const RUNG_ADVICE: Record<MitigationRung, string> = {
     pacing: 'Slow down: fewer requests per minute and one session at a time before adding any new capability.',
     proxies: 'Route through a residential proxy: create the session with use_proxy: true.',
     captcha: 'Let Steel solve the challenge: create the session with solve_captcha: true.',
-    stealth: 'Tune the session fingerprint (device, viewport, region) to match the audience the site expects.',
+    stealth: 'Tune the session fingerprint (device and viewport) to match the audience the site expects.',
 };
 
 /** Returns the single next rung on the mitigation ladder given what is already in use. */
@@ -400,6 +409,40 @@ export function interactiveBlockError(block: InteractiveBlock, url: string, stat
         : botDetectionError({ vendor: block.vendor, marker: block.marker }, url, state);
 }
 
+export interface BatchBoundaryContext {
+    completedSteps: number;
+    nextStep: number | null;
+    remainingSteps: number;
+    clearableByPerson: boolean;
+}
+
+/** Stops a batch after a detected boundary without replaying already completed mutations. */
+export function batchInteractiveBlockError(
+    block: InteractiveBlock,
+    url: string,
+    state: MitigationState,
+    context: BatchBoundaryContext
+): SteelToolError {
+    const base = interactiveBlockError(block, url, state);
+    const accounting =
+        `${context.completedSteps} step(s) completed; ${context.remainingSteps} step(s) remain. ` +
+        'Do not rerun completed steps.';
+    const next = context.nextStep === null ? 'No batch step remains.' : `Resume at step ${context.nextStep}.`;
+    const guidance = context.clearableByPerson
+        ? 'Call steel_session_handoff with this same session_id, then submit only the unrun steps in a new batch.'
+        : 'Follow the mitigation advice above, then submit only the unrun steps; human handoff is not offered for this block.';
+    return new SteelToolError(`${base.message} ${accounting} ${next} ${guidance}`, {
+        code: base.code,
+        details: {
+            ...base.details,
+            completed_steps: context.completedSteps,
+            next_step: context.nextStep,
+            remaining_steps: context.remainingSteps,
+            ...(context.clearableByPerson ? { handoff_required: true } : {}),
+        },
+    });
+}
+
 /** CDP error texts that mean the proxy, not the site, refused the connection. */
 const PROXY_ERROR_TEXTS = /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY|ERR_NO_SUPPORTED_PROXIES/i;
 
@@ -472,23 +515,63 @@ export function staleRefError(ref: string, context: StaleRefContext): SteelToolE
 }
 
 /** Builds the blocked-click error naming the element that intercepted the pointer. */
-export function clickBlockedError(ref: string, coveringDescription: string): SteelToolError {
+export function clickBlockedError(
+    ref: string,
+    coveringDescription: string,
+    repeated = false,
+    episodeExhausted = false
+): SteelToolError {
+    const recovery = episodeExhausted
+        ? 'Related controls are still blocked after multiple safe recovery attempts. Stop trying click variants; ' +
+          'change path, try another candidate, or call steel_session_handoff for manual control.'
+        : repeated
+          ? 'This control is still blocked after a recovery attempt. Do not retry it again; change strategy, ' +
+            'try another candidate, or call steel_session_handoff for manual control.'
+          : 'Run steel_act with action "dismiss_overlays", or scroll the target into a clear area, then use ' +
+            'steel_find or steel_snapshot to reacquire it and retry once. If it is still blocked, change strategy ' +
+            'or call steel_session_handoff instead of repeating the same loop.';
     return new SteelToolError(
-        `Click on ${ref} did not reach the element: ${coveringDescription} is on top of it at that point. ` +
-            'Run steel_act with action "dismiss_overlays", or scroll the target into a clear area, then retry.',
-        { code: 'click_blocked', details: { ref, covering: coveringDescription } }
+        `Click on ${ref} did not reach the element: ${coveringDescription} is on top of it at that point. ${recovery}`,
+        {
+            code: 'click_blocked',
+            details: {
+                ref,
+                covering: coveringDescription,
+                ...(episodeExhausted ? { reason: 'click_recovery_exhausted' } : {}),
+            },
+        }
     );
 }
 
+/** Builds the safe fallback when a moving page yields no hit-testable node after one layout refresh. */
+export function clickHitTestUnstableError(ref: string, repeated = false): SteelToolError {
+    const recovery = repeated
+        ? 'Hit-testing this control is still unstable after a fresh recovery. Do not retry it again; change ' +
+          'strategy, try another candidate, or call steel_session_handoff for manual control.'
+        : 'Use steel_find or steel_snapshot to relocate it, then retry once. If that also fails, change strategy ' +
+          'or call steel_session_handoff instead of repeating the same loop.';
+    return new SteelToolError(
+        `Could not safely click ${ref}: Chrome found no page node at any point inside it after re-reading its ` +
+            `layout. The control may be moving or outside the viewport. ${recovery}`,
+        { code: 'click_blocked', details: { ref, reason: 'no_node_at_location' } }
+    );
+}
+
+/** Builds the hidden/collapsed-target error, with stronger guidance after the same node fails twice. */
+export function clickLayoutUnavailableError(ref: string, repeated = false): SteelToolError {
+    const recovery = repeated
+        ? 'This control still has no clickable layout after a recovery attempt. Do not retry it again; change ' +
+          'strategy, try another candidate, or call steel_session_handoff for manual control.'
+        : 'It may be hidden or collapsed. Use steel_find or steel_snapshot to relocate it and retry once. If it ' +
+          'still has no layout, change strategy or call steel_session_handoff instead of repeating the same loop.';
+    return new SteelToolError(`Could not safely click ${ref}: the target has no layout box. ${recovery}`, {
+        code: 'click_blocked',
+        details: { ref, reason: 'no_layout_box' },
+    });
+}
+
 /** Capabilities the self-hosted steel-browser image does not have. */
-export type SelfHostCapability =
-    | 'concurrency'
-    | 'use_proxy'
-    | 'solve_captcha'
-    | 'region'
-    | 'profile_id'
-    | 'credentials'
-    | 'files';
+export type SelfHostCapability = 'concurrency' | 'use_proxy' | 'solve_captcha' | 'profile_id' | 'credentials' | 'files';
 
 const SELF_HOST_TEXT: Record<SelfHostCapability, string> = {
     concurrency:
@@ -497,7 +580,6 @@ const SELF_HOST_TEXT: Record<SelfHostCapability, string> = {
         'Steel-managed proxies are a cloud capability; the self-hosted image has none. Remove use_proxy, or point STEEL_BASE_URL at Steel Cloud.',
     solve_captcha:
         'CAPTCHA solving is a cloud capability; the self-hosted image cannot solve challenges. Remove solve_captcha, or drive the challenge manually through the session viewer.',
-    region: 'Session region selection is a cloud capability; the self-hosted image runs wherever you deployed it. Remove region.',
     profile_id:
         'Browser profiles are a cloud capability; the self-hosted image has no profile store. Remove profile_id.',
     credentials:

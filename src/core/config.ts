@@ -1,6 +1,7 @@
 // ABOUTME: Reads Steel credentials and deployment settings from the environment and derives the
 // ABOUTME: CDP connect URL, which must always carry a sessionId or Steel starts an untracked session.
 import { randomBytes } from 'node:crypto';
+import { DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_SESSION_TIMEOUT_MS } from './lifecycle.js';
 
 /**
  * The named tool presets a connection can select.
@@ -61,10 +62,6 @@ const CLOUD_CONNECT_URL = 'wss://connect.steel.dev';
 /** Where a self-hosted steel-browser listens by default, matching the image's own default. */
 const LOCAL_BASE_URL = 'http://localhost:3000';
 const CLOUD_HOSTNAME = 'steel.dev';
-const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
-// Human review, MFA, long-form input and local file selection need real runway. The independent
-// inactivity timeout still reclaims an abandoned browser after two quiet minutes.
-const DEFAULT_SESSION_TIMEOUT_MS = 900_000;
 
 /**
  * Resolves the request-state HMAC key.
@@ -214,12 +211,6 @@ export function loadRegistryConfig(env: Record<string, string | undefined>): Reg
 }
 
 /**
- * The smallest idle timeout worth sending. Below this a session would be reclaimed faster than a
- * model can take its next turn, so the hard timeout is left to do the work on its own.
- */
-const MIN_USEFUL_INACTIVITY_TIMEOUT_MS = 1_000;
-
-/**
  * Picks the idle timeout to send with a session, always strictly below the hard timeout.
  *
  * Steel ignores `inactivityTimeout` entirely when it is greater than or equal to `timeout`. Sending
@@ -229,8 +220,7 @@ const MIN_USEFUL_INACTIVITY_TIMEOUT_MS = 1_000;
  */
 export function resolveInactivityTimeout(configuredMs: number, hardTimeoutMs: number): number | undefined {
     if (configuredMs < hardTimeoutMs) return configuredMs;
-    const halved = Math.floor(hardTimeoutMs / 2);
-    return halved >= MIN_USEFUL_INACTIVITY_TIMEOUT_MS ? halved : undefined;
+    return undefined;
 }
 
 /** The subset of configuration a CDP URL is built from. */

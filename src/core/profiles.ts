@@ -12,6 +12,7 @@ import {
     registerSessionLiveView,
     registerSessionRelease,
 } from './tools/session.js';
+import { registerSessionOptions } from './tools/session-options.js';
 import { registerPdf, registerScrape, registerScreenshot } from './tools/stateless.js';
 
 export interface ToolDefinition {
@@ -45,6 +46,7 @@ export const TOOL_TABLE: ToolDefinition[] = [
     { name: 'steel_session_handoff', profiles: BROWSE_AND_UP, register: registerSessionHandoff },
     { name: 'steel_session_replay', profiles: BROWSE_AND_UP, register: registerSessionReplay },
     { name: 'steel_batch', profiles: BROWSE_AND_UP, register: registerBatch },
+    { name: 'steel_session_options', profiles: BROWSE_AND_UP, register: registerSessionOptions },
     // Last on purpose. A host filters this one out of the list it shows the model, and appending
     // rather than inserting keeps the prefix every other tool sits in byte-identical.
     { name: 'steel_session_live_view', profiles: BROWSE_AND_UP, register: registerSessionLiveView },

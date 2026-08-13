@@ -85,6 +85,18 @@ describe.skipIf(!available)(`browsing the adversarial fixture site (${reason})`,
         expect(after.text).toContain('Added to basket');
     });
 
+    it('uses a clear inset when only the centre of a real button is covered', async () => {
+        const page = await openSession();
+        await page.navigate(`${FIXTURE_BASE_URL}/centre-covered-button`);
+        await page.snapshot({});
+        const [target] = await page.find({ text: 'Add sensible item', interactiveOnly: true });
+
+        const outcome = await page.act({ action: 'click', target: target!.ref! });
+
+        expect(outcome.change.domMutated).toBe(true);
+        expect((await page.snapshot({})).text).toContain('Item added safely');
+    });
+
     it('synthesises names for icon-only buttons and marks them inferred', async () => {
         const page = await openSession();
         await page.navigate(`${FIXTURE_BASE_URL}/unnamed-buttons`);

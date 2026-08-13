@@ -5,10 +5,15 @@ import { z } from 'zod';
 import type { ServerDeps, ToolHost } from '../context.js';
 import { botDetectionError, detectBotBlock, SteelToolError } from '../errors.js';
 import type { ScrapeFormat } from '../steel/types.js';
-import { fenceUntrusted, type Provenance, stripHtmlComments, stripInvisible } from '../untrusted.js';
+import { type Provenance, stripHtmlComments, stripInvisible } from '../untrusted.js';
 import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult, withPage } from './shared.js';
 
 const FORMATS = ['markdown', 'html', 'cleaned_html', 'readability'] as const;
+const MAX_SCRAPE_LINKS = 25;
+const MAX_LINK_TEXT_CHARS = 512;
+const MAX_LINK_URL_CHARS = 2_048;
+const MAX_METADATA_FIELDS = 25;
+const MAX_METADATA_VALUE_CHARS = 1_024;
 
 export const MAX_INLINE_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 
@@ -98,7 +103,7 @@ function renderContent(content: Partial<Record<ScrapeFormat, unknown>>, formats:
 function renderLinksAndMetadata(
     links: Array<{ url: string; text?: string }>,
     metadata: Record<string, unknown>,
-    provenance: Provenance
+    totalLinks: number
 ): string {
     const linkLines = links
         .slice(0, 100)
@@ -111,13 +116,15 @@ function renderLinksAndMetadata(
         .join('\n');
 
     const body = [
-        linkLines ? `Links (${links.length}):\n${linkLines}` : 'Links: none on this page.',
+        linkLines
+            ? `Links (${totalLinks}${totalLinks > links.length ? `, showing ${links.length}` : ''}):\n${linkLines}`
+            : 'Links: none on this page.',
         metadataLines ? `Metadata:\n${metadataLines}` : '',
     ]
         .filter(Boolean)
         .join('\n\n');
 
-    return fenceUntrusted(body, provenance);
+    return body;
 }
 
 /** Removes smuggling characters from the machine-readable copy a host may render directly. */
@@ -132,6 +139,25 @@ function sanitizeStructured<T>(value: T): T {
     return value;
 }
 
+function boundedLinks(links: Array<{ url: string; text?: string }>): Array<{ url: string; text?: string }> {
+    return links.slice(0, MAX_SCRAPE_LINKS).map(link => ({
+        url: stripInvisible(link.url).slice(0, MAX_LINK_URL_CHARS),
+        ...(link.text === undefined ? {} : { text: stripInvisible(link.text).slice(0, MAX_LINK_TEXT_CHARS) }),
+    }));
+}
+
+function boundedMetadata(metadata: Record<string, unknown>): Record<string, string | number> {
+    return Object.fromEntries(
+        Object.entries(metadata)
+            .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+            .slice(0, MAX_METADATA_FIELDS)
+            .map(([key, value]) => [
+                stripInvisible(key).slice(0, 128),
+                typeof value === 'number' ? value : stripInvisible(String(value)).slice(0, MAX_METADATA_VALUE_CHARS),
+            ])
+    );
+}
+
 export function registerScrape(host: ToolHost, deps: ServerDeps): void {
     host.registerTool(
         'steel_scrape',
@@ -144,20 +170,22 @@ export function registerScrape(host: ToolHost, deps: ServerDeps): void {
                 'Use this first for anything you only need to read; reach for steel_session_create only when you ' +
                 'need to click, type or move through several pages.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-            inputSchema: z.object({
-                url: z.url().describe('The page to read.'),
-                format: z
-                    .array(z.enum(FORMATS))
-                    .optional()
-                    .describe('Content formats to return. Defaults to markdown, which is the cheapest to read.'),
-                use_proxy: z
-                    .boolean()
-                    .optional()
-                    .describe('Route through a Steel-managed residential proxy. Needs a verified paid balance.'),
-                delay_ms: z.number().int().min(0).max(30_000).optional().describe('Wait this long after load.'),
-                max_tokens: maxTokensSchema,
-                cursor: cursorSchema,
-            }),
+            inputSchema: z
+                .object({
+                    url: z.url().describe('The page to read.'),
+                    format: z
+                        .array(z.enum(FORMATS))
+                        .optional()
+                        .describe('Formats to return. Each extra format repeats the page inside the shared budget.'),
+                    use_proxy: z
+                        .boolean()
+                        .optional()
+                        .describe('Route through a Steel-managed residential proxy. Needs a verified paid balance.'),
+                    delay_ms: z.number().int().min(0).max(30_000).optional().describe('Wait this long after load.'),
+                    max_tokens: maxTokensSchema,
+                    cursor: cursorSchema,
+                })
+                .strict(),
         },
         async (args, ctx) =>
             guard(deps, 'steel_scrape', ctx.mcpReq, async () => {
@@ -185,7 +213,12 @@ export function registerScrape(host: ToolHost, deps: ServerDeps): void {
                 }
 
                 const provenance: Provenance = { finalUrl, fetchedAt: deps.now().toISOString() };
-                const { text, pagination } = fencedSection(body, provenance, {
+                const links = boundedLinks(response.links);
+                const metadata = boundedMetadata(response.metadata);
+                const pageOutput = [body, renderLinksAndMetadata(links, metadata, response.links.length)]
+                    .filter(Boolean)
+                    .join('\n\n');
+                const { text, pagination } = fencedSection(pageOutput, provenance, {
                     maxTokens: args.max_tokens,
                     cursor: args.cursor,
                 });
@@ -194,7 +227,6 @@ export function registerScrape(host: ToolHost, deps: ServerDeps): void {
                     {
                         result: `Read ${finalUrl} (HTTP ${response.metadata.statusCode ?? 'unknown'}).`,
                         snapshot: text,
-                        links: renderLinksAndMetadata(response.links, response.metadata, provenance),
                         pagination,
                         notes: block
                             ? [`This page carries ${block.vendor} anti-bot markers; content may be partial.`]
@@ -202,8 +234,9 @@ export function registerScrape(host: ToolHost, deps: ServerDeps): void {
                     },
                     {
                         final_url: finalUrl,
-                        metadata: sanitizeStructured(response.metadata),
-                        links: sanitizeStructured(response.links),
+                        metadata: sanitizeStructured(metadata),
+                        links: sanitizeStructured(links),
+                        total_links: response.links.length,
                     }
                 );
             })
@@ -216,23 +249,36 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
         {
             title: 'Screenshot a web page',
             description:
-                'Capture a PNG of a page and show it inline, with a download link as fallback. Screenshots are ' +
-                'for showing a person what a page looks like; you cannot act on pixels, so use steel_snapshot ' +
-                'when you need to click or type. Pass a url to capture without starting a session, or a session_id ' +
-                'to capture the page a browser session is currently on.',
+                'Capture a page image. URL captures are user-facing PNG artifacts; session captures are model-visible ' +
+                'JPEG evidence. Pixels are not action targets, so use steel_snapshot to click or type.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-            inputSchema: z.object({
-                url: z.url().optional().describe('Page to capture. Starts no browser session.'),
-                session_id: z
-                    .string()
-                    .optional()
-                    .describe('Capture the current page of this session instead. Returns the image inline.'),
-                full_page: z.boolean().optional().describe('Capture the whole scrollable page, not just the viewport.'),
-                inline: z
-                    .boolean()
-                    .optional()
-                    .describe('Embed the image for inline display. Defaults to true; false returns only a link.'),
-            }),
+            inputSchema: z
+                .object({
+                    url: z.url().optional().describe('Page to capture. Starts no browser session.'),
+                    session_id: z
+                        .string()
+                        .optional()
+                        .describe('Capture the current page of this session instead. Returns the image inline.'),
+                    full_page: z
+                        .boolean()
+                        .optional()
+                        .describe('Capture the whole scrollable page, not just the viewport.'),
+                    use_proxy: z.boolean().optional().describe('Use a Steel residential proxy for a URL capture.'),
+                    inline: z
+                        .boolean()
+                        .optional()
+                        .describe('For URL captures only: false returns just a link. Defaults to true.'),
+                })
+                .strict()
+                .refine(args => Boolean(args.url) !== Boolean(args.session_id), {
+                    message: 'Pass exactly one of url or session_id.',
+                })
+                .refine(args => !(args.session_id && args.inline === false), {
+                    message: 'inline=false is available only for URL captures.',
+                })
+                .refine(args => !(args.session_id && args.use_proxy !== undefined), {
+                    message: 'use_proxy is available only for URL captures.',
+                }),
         },
         async (args, ctx) => {
             if (args.session_id && args.inline === false) {
@@ -267,7 +313,7 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                 }
 
                 const artifact = await deps.api.screenshot(
-                    { url: args.url, fullPage: args.full_page },
+                    { url: args.url, fullPage: args.full_page, useProxy: args.use_proxy },
                     ctx.mcpReq.signal
                 );
                 const inline = args.inline ?? true;
@@ -318,14 +364,20 @@ export function registerPdf(host: ToolHost, deps: ServerDeps): void {
                 'Render a page to PDF and return a link to the file. Starts no browser session. Use steel_scrape ' +
                 'if you want to read the text — the PDF link is for handing a document to a person.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-            inputSchema: z.object({
-                url: z.url().describe('The page to render.'),
-                delay_ms: z.number().int().min(0).max(30_000).optional().describe('Wait this long after load.'),
-            }),
+            inputSchema: z
+                .object({
+                    url: z.url().describe('The page to render.'),
+                    delay_ms: z.number().int().min(0).max(30_000).optional().describe('Wait this long after load.'),
+                    use_proxy: z.boolean().optional().describe('Use a Steel residential proxy.'),
+                })
+                .strict(),
         },
         async (args, ctx) =>
             guard(deps, 'steel_pdf', ctx.mcpReq, async () => {
-                const artifact = await deps.api.pdf({ url: args.url, delay: args.delay_ms }, ctx.mcpReq.signal);
+                const artifact = await deps.api.pdf(
+                    { url: args.url, delay: args.delay_ms, useProxy: args.use_proxy },
+                    ctx.mcpReq.signal
+                );
                 const content: ContentBlock[] = [
                     {
                         type: 'resource_link',

@@ -17,6 +17,7 @@ import {
     trace,
 } from '@opentelemetry/api';
 import { SteelToolError } from './errors.js';
+import type { ReleasePath } from './registry.js';
 import { SERVER_VERSION } from './version.js';
 
 /** The instrumentation scope every span this server produces is recorded under. */
@@ -34,6 +35,25 @@ const TOOL_CALL_METHOD = 'tools/call';
  */
 export function resolveTracer(tracer?: Tracer | undefined): Tracer {
     return tracer ?? trace.getTracer(TRACER_NAME, SERVER_VERSION);
+}
+
+export interface SessionReleaseSpanTarget {
+    cause: ReleasePath;
+    deployment: 'cloud' | 'self_hosted';
+    registryBackend: 'memory' | 'redis';
+}
+
+/** Emits one low-cardinality internal lifecycle span with no session or caller identity. */
+export function recordSessionReleased(tracer: Tracer, target: SessionReleaseSpanTarget): void {
+    const span = tracer.startSpan('steel session released', {
+        kind: SpanKind.INTERNAL,
+        attributes: {
+            'steel.session.release_cause': target.cause,
+            'steel.deployment': target.deployment,
+            'steel.registry.backend': target.registryBackend,
+        },
+    });
+    span.end();
 }
 
 /** `version-traceid-spanid-flags`, the only shape the W3C spec allows on the wire. */

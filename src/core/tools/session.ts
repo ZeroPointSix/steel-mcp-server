@@ -18,19 +18,18 @@ import {
 } from '../steel/diagnostics.js';
 import type { AccountDetails, AgentTraceTimeline, SessionLogTimeline, SteelSession } from '../steel/types.js';
 import { fenceUntrusted } from '../untrusted.js';
-import { cursorSchema, guard, maxTokensSchema, sessionIdSchema, successResult } from './shared.js';
+import { cursorSchema, guard, maxTokensSchema, sessionIdSchema, successResult, uuidSchema } from './shared.js';
 
 /** Session-creation options the self-hosted image cannot honour, mapped to their named errors. */
 const CLOUD_ONLY_OPTIONS: Array<[keyof CreateArgs, SelfHostCapability]> = [
     ['use_proxy', 'use_proxy'],
     ['solve_captcha', 'solve_captcha'],
-    ['region', 'region'],
     ['profile_id', 'profile_id'],
     ['namespace', 'credentials'],
 ];
 
 interface CreateArgs {
-    region?: string | undefined;
+    configuration?: string | undefined;
     use_proxy?: boolean | undefined;
     solve_captcha?: boolean | undefined;
     profile_id?: string | undefined;
@@ -48,60 +47,88 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
     host.registerTool(
         'steel_session_create',
         {
-            title: 'Start a browser session',
-            description:
-                'Start a billed browser for interaction. It occupies a concurrency slot until ' +
-                'steel_session_release; call that as soon as you finish. It also ends at its configured inactivity ' +
-                'window or immutable expiry. Prefer steel_scrape for reads.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                region: z.string().optional().describe('Region to run the browser in, e.g. lax, iad, fra.'),
-                use_proxy: z.boolean().optional().describe('Route through a Steel-managed residential proxy.'),
-                solve_captcha: z.boolean().optional().describe('Let Steel solve CAPTCHA challenges automatically.'),
-                profile_id: z
-                    .string()
-                    .optional()
-                    .describe(
-                        'Load an existing saved browser profile. Stored cookies and fingerprint are reused, but ' +
-                            'this server does not write session changes back to the profile.'
-                    ),
-                namespace: z
-                    .string()
-                    .optional()
-                    .describe('Credential namespace to inject. Never put secrets in tool arguments.'),
-                block_ads: z.boolean().optional().describe('Block advertising and tracking requests.'),
-                device: z
-                    .enum(['desktop', 'mobile'])
-                    .optional()
-                    .describe(
-                        'Browser device mode. Use mobile for a mobile fingerprint, user agent, viewport and touch support.'
-                    ),
-                viewport: z
-                    .object({ width: z.number().int().positive(), height: z.number().int().positive() })
-                    .optional()
-                    .describe(
-                        'Desktop viewport size in CSS pixels; desktop defaults to 1280x720. For a genuine mobile ' +
-                            'fingerprint, user agent and touch environment, use device=mobile instead of only resizing.'
-                    ),
-                timeout_ms: z
-                    .number()
-                    .int()
-                    .positive()
-                    .max(86_400_000)
-                    .optional()
-                    .describe('Immutable hard lifetime, up to 24 hours and your plan maximum.'),
-            }),
+            title: 'Start session',
+            description: 'Start billed browser; release promptly.',
+            annotations: { destructiveHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    configuration: z.string().optional().describe('Signed options token.'),
+                    use_proxy: z.boolean().optional().describe('Proxy.'),
+                    solve_captcha: z.boolean().optional().describe('Solve CAPTCHA.'),
+                    profile_id: z.string().optional().describe('READY profile UUID; not secret.'),
+                    namespace: z.string().optional().describe('Credential label; not secret.'),
+                    block_ads: z.boolean().optional().describe('Block ads.'),
+                    device: z.enum(['desktop', 'mobile']).optional().describe('Device class.'),
+                    viewport: z
+                        .object({
+                            width: z.number().int().min(1).max(10_000),
+                            height: z.number().int().min(1).max(10_000),
+                        })
+                        .optional()
+                        .describe('CSS viewport.'),
+                    timeout_ms: z
+                        .number()
+                        .int()
+                        .positive()
+                        .max(86_400_000)
+                        .optional()
+                        .describe('Immutable lifetime ms; may clamp.'),
+                })
+                .strict(),
             // A host that supports MCP Apps renders the live viewer beside this result. A host that
             // does not ignores the key and shows the text below, which is unchanged either way.
             _meta: { ui: { resourceUri: SESSION_VIEWER_URI } },
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_create', ctx.mcpReq, async () => {
+                let planned: import('../session-plan.js').SessionPlanState | undefined;
+                if (args.configuration) {
+                    try {
+                        planned = await deps.sessionPlanState.verify(args.configuration, ctx);
+                    } catch {
+                        throw new SteelToolError('configuration is invalid, expired, or belongs to another caller.', {
+                            code: 'invalid_argument',
+                        });
+                    }
+                }
+                const settings = planned?.settings ?? {};
+                const conflicts = [
+                    args.use_proxy !== undefined && settings.useProxy !== undefined ? 'use_proxy' : undefined,
+                    args.solve_captcha !== undefined && settings.solveCaptcha !== undefined
+                        ? 'solve_captcha'
+                        : undefined,
+                    args.device !== undefined && settings.deviceConfig !== undefined ? 'device' : undefined,
+                    args.timeout_ms !== undefined && settings.timeout !== undefined ? 'timeout_ms' : undefined,
+                ].filter(Boolean);
+                if (conflicts.length)
+                    throw new SteelToolError(`Direct options conflict with configuration: ${conflicts.join(', ')}.`, {
+                        code: 'invalid_argument',
+                    });
+
                 if (deps.config.deployment === 'self_hosted') {
                     for (const [option, capability] of CLOUD_ONLY_OPTIONS) {
                         if (args[option] !== undefined && args[option] !== false) {
                             throw selfHostUnsupportedError(capability);
                         }
+                    }
+                }
+
+                if (args.profile_id) {
+                    const profile = await deps.api.getProfile(args.profile_id, ctx.mcpReq.signal);
+                    if (profile.status !== 'READY')
+                        throw new SteelToolError('profile_id must refer to a READY profile.', {
+                            code: 'invalid_argument',
+                        });
+                }
+                if (planned?.accountContext && args.namespace) {
+                    const matches = await deps.api.listCredentials(
+                        { origin: planned.origin, namespace: args.namespace },
+                        ctx.mcpReq.signal
+                    );
+                    if (!matches.some(item => item.origin === planned?.origin && item.namespace === args.namespace)) {
+                        throw new SteelToolError('namespace does not match the signed target origin.', {
+                            code: 'invalid_argument',
+                        });
                     }
                 }
 
@@ -117,7 +144,7 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                 }
 
                 const details: AccountDetails = await deps.api.getDetails(ctx.mcpReq.signal).catch(() => ({}));
-                const requestedTimeout = args.timeout_ms ?? deps.config.sessionTimeoutMs;
+                const requestedTimeout = args.timeout_ms ?? settings.timeout ?? deps.config.sessionTimeoutMs;
                 // A missing plan maximum means unknown, not "the configured default is the maximum".
                 // Steel remains authoritative and rejects a lifetime the account cannot use.
                 const planMax = details.maxSessionDuration;
@@ -125,6 +152,21 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                 const inactivityTimeout = resolveInactivityTimeout(deps.config.inactivityTimeoutMs, timeout);
 
                 const steelSessionId = mintSteelSessionId(deps);
+                const expiresAt = new Date(deps.now().getTime() + timeout);
+                let profileWriterReserved = false;
+                if (settings.persistProfile && args.profile_id) {
+                    profileWriterReserved = await deps.registry.reserveProfileWriter(
+                        deps.principal,
+                        args.profile_id,
+                        steelSessionId,
+                        expiresAt.getTime()
+                    );
+                    if (!profileWriterReserved)
+                        throw new SteelToolError(
+                            'That profile already has a persistent writer. Use it read-only or wait for the other session to end.',
+                            { code: 'invalid_argument' }
+                        );
+                }
                 let session: SteelSession;
                 try {
                     session = await deps.api.createSession(
@@ -132,13 +174,18 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             sessionId: steelSessionId,
                             timeout,
                             inactivityTimeout,
-                            region: args.region,
-                            useProxy: args.use_proxy,
-                            solveCaptcha: args.solve_captcha,
+                            useProxy: args.use_proxy ?? settings.useProxy,
+                            solveCaptcha: args.solve_captcha ?? settings.solveCaptcha,
+                            stealthConfig: settings.stealthConfig,
+                            optimizeBandwidth: settings.optimizeBandwidth,
                             profileId: args.profile_id,
+                            persistProfile: settings.persistProfile,
                             namespace: args.namespace,
+                            credentials: args.namespace
+                                ? { autoSubmit: true, blurFields: true, exactOrigin: true }
+                                : undefined,
                             blockAds: args.block_ads,
-                            deviceConfig: args.device ? { device: args.device } : undefined,
+                            deviceConfig: args.device ? { device: args.device } : settings.deviceConfig,
                             dimensions: args.viewport,
                         },
                         ctx.mcpReq.signal
@@ -148,10 +195,14 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     // accepted the create can be reclaimed instead of becoming an unknown session.
                     await deps.pool.close(steelSessionId).catch(() => undefined);
                     await deps.api.releaseSession(steelSessionId).catch(() => undefined);
+                    if (profileWriterReserved && args.profile_id) {
+                        await deps.registry
+                            .releaseProfileWriter(deps.principal, args.profile_id, steelSessionId)
+                            .catch(() => undefined);
+                    }
                     throw error;
                 }
 
-                const expiresAt = new Date(deps.now().getTime() + timeout);
                 let record: HandleRecord;
                 try {
                     record = await deps.registry.create({
@@ -164,14 +215,21 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                         // the player, and the dashboard would show them a sign-in page instead.
                         debugUrl: session.debugUrl,
                         mitigation: {
-                            profileId: args.profile_id,
-                            useProxy: args.use_proxy,
-                            solveCaptcha: args.solve_captcha,
+                            profileId: session.profileId ?? args.profile_id,
+                            useProxy: Boolean(args.use_proxy ?? settings.useProxy),
+                            solveCaptcha: args.solve_captcha ?? settings.solveCaptcha,
+                            managedCredentials: Boolean(args.namespace),
+                            persistProfile: settings.persistProfile,
                         },
                     });
                 } catch (error) {
                     await deps.pool.close(steelSessionId).catch(() => undefined);
                     await deps.api.releaseSession(steelSessionId).catch(() => undefined);
+                    if (profileWriterReserved && args.profile_id) {
+                        await deps.registry
+                            .releaseProfileWriter(deps.principal, args.profile_id, steelSessionId)
+                            .catch(() => undefined);
+                    }
                     throw error;
                 }
 
@@ -198,7 +256,8 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                     {
                         result:
                             `Started a browser session. Pass session_id="${record.handle}" to the other browser tools, ` +
-                            'and call steel_session_release when you are finished with it.',
+                            'and call steel_session_release when finished. Keep this handle for the task: page/cart ' +
+                            'state does not transfer to a replacement session.',
                         pageState: session.sessionViewerUrl
                             ? `Watch or take control in the live browser: ${session.sessionViewerUrl}`
                             : undefined,
@@ -226,6 +285,8 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             max_session_ms: planMax,
                             max_concurrent_sessions: details.concurrencyLimit ?? deps.config.maxConcurrentSessions,
                         },
+                        profile_id: session.profileId ?? args.profile_id,
+                        persist_profile: Boolean(settings.persistProfile),
                     }
                 );
                 if (signal && releaseOnAbort) {
@@ -252,10 +313,10 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
             title: 'Release a browser session',
             description:
                 'Shut down the current browser and stop the meter. Safe to call twice. Its current URL and ' +
-                'session-only page state are gone afterwards. A loaded saved profile remains stored but is not ' +
-                'updated by this server. Read what you need first; this reports the final URL and title.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-            inputSchema: z.object({ session_id: sessionIdSchema }),
+                'session-only page state are gone afterwards. A profile is saved only when persistence was requested. ' +
+                'Read what you need first; this reports the final URL and title.',
+            annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
+            inputSchema: z.object({ session_id: sessionIdSchema }).strict(),
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_release', ctx.mcpReq, async () => {
@@ -281,9 +342,9 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
                 let title = '';
                 try {
                     const page = await deps.pool.page(record.steelSessionId);
-                    const snapshot = await page.snapshot({});
-                    finalUrl = snapshot.url;
-                    title = snapshot.title;
+                    const summary = await page.pageSummary();
+                    finalUrl = summary.url;
+                    title = summary.title;
                 } catch {
                     // A session whose browser already went away still needs releasing at the API.
                 }
@@ -294,9 +355,23 @@ export function registerSessionRelease(host: ToolHost, deps: ServerDeps): void {
                     {
                         result: 'Released the browser session and stopped the meter.',
                         pageState: finalUrl ? `${finalUrl}${title ? ` — ${title}` : ''}` : undefined,
-                        notes: record.viewerUrl ? [`Steel dashboard: ${record.viewerUrl}`] : undefined,
+                        notes: [
+                            ...(record.viewerUrl ? [`Steel dashboard: ${record.viewerUrl}`] : []),
+                            ...(record.mitigation.persistProfile
+                                ? [
+                                      'Profile persistence was requested; it may remain UPLOADING before it becomes READY.',
+                                  ]
+                                : []),
+                        ],
                     },
-                    { session_id: args.session_id, released: true, final_url: finalUrl, title }
+                    {
+                        session_id: args.session_id,
+                        released: true,
+                        final_url: finalUrl,
+                        title,
+                        profile_id: record.mitigation.profileId,
+                        persist_profile: Boolean(record.mitigation.persistProfile),
+                    }
                 );
             })
     );
@@ -344,18 +419,20 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
         'steel_session_live_view',
         {
             title: 'Live view connection',
-            description: 'App-only live-view connection and exclusive human-control lease. Returns no page content.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema
-                    .optional()
-                    .describe(
-                        'Omit to stream the newest live session this credential owns, which is what a ' +
-                            'viewer that never received the session does.'
-                    ),
-                action: z.enum(['connect', 'acquire', 'renew', 'release']).optional(),
-                control_token: z.string().optional(),
-            }),
+            description: 'App-only viewer and control lease; no page content.',
+            annotations: { destructiveHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema
+                        .optional()
+                        .describe(
+                            'Omit to stream the newest live session this credential owns, which is what a ' +
+                                'viewer that never received the session does.'
+                        ),
+                    action: z.enum(['connect', 'acquire', 'renew', 'release']).optional(),
+                    control_token: z.string().optional(),
+                })
+                .strict(),
             _meta: { ui: { visibility: ['app'] } },
         },
         async (args, ctx) =>
@@ -468,15 +545,57 @@ export function registerSessionLiveView(host: ToolHost, deps: ServerDeps): void 
 const diagnosticsInputSchema = z
     .object({
         session_id: sessionIdSchema.optional().describe('Live id from steel_session_create.'),
-        steel_session_id: z.string().uuid().optional().describe('Finished Steel dashboard UUID.'),
+        steel_session_id: uuidSchema.optional().describe('Finished Steel dashboard UUID.'),
+        list_live: z.boolean().optional().describe("List this credential's recoverable live session handles."),
         since: z.string().optional().describe('Only events at or after this ISO-8601 time.'),
         max_tokens: maxTokensSchema,
         cursor: cursorSchema,
     })
+    .strict()
     .refine(args => !(args.session_id && args.steel_session_id), {
         message: 'Pass session_id or steel_session_id, not both.',
         path: ['steel_session_id'],
-    });
+    })
+    .refine(
+        args =>
+            !args.list_live ||
+            (!args.session_id &&
+                !args.steel_session_id &&
+                !args.since &&
+                !args.cursor &&
+                args.max_tokens === undefined),
+        {
+            message: 'list_live cannot be combined with session ids, since, cursor or max_tokens.',
+            path: ['list_live'],
+        }
+    );
+
+function liveSessionResult(deps: ServerDeps, records: HandleRecord[]) {
+    const live = records
+        .filter(record => record.expiresAt > deps.now().getTime() && !record.releasing)
+        .sort((left, right) => right.createdAt - left.createdAt)
+        .map(record => ({
+            session_id: record.handle,
+            created_at: new Date(record.createdAt).toISOString(),
+            expires_at: new Date(record.expiresAt).toISOString(),
+            control: (record.humanControl?.leaseUntil ?? 0) > deps.now().getTime() ? 'human' : 'agent',
+            awaiting_handoff: (record.awaitingInputUntil ?? 0) > deps.now().getTime(),
+            persist_profile: Boolean(record.mitigation.persistProfile),
+        }));
+    return successResult(
+        {
+            result: live.length
+                ? `${live.length} recoverable live browser session${live.length === 1 ? '' : 's'}.`
+                : 'No recoverable live browser sessions for this credential.',
+            notes: live.map(
+                item =>
+                    `${item.session_id} — expires ${item.expires_at}; control=${item.control}; ` +
+                    `awaiting_handoff=${item.awaiting_handoff}`
+            ),
+        },
+        { live_sessions: live }
+    );
+}
 
 interface DiagnosticsTarget {
     /** The id safe to echo back: an opaque live handle, or an already-supplied finished-session id. */
@@ -545,14 +664,13 @@ export function registerSessionDiagnostics(host: ToolHost, deps: ServerDeps): vo
         'steel_session_diagnostics',
         {
             title: 'Explain what a browser session did',
-            description:
-                'Read live or finished session activity; never starts a browser. Use session_id for live, ' +
-                'steel_session_id for a dashboard UUID, or neither for latest released.',
+            description: 'Read live/released activity or list live handles; never starts a browser.',
             annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
             inputSchema: diagnosticsInputSchema,
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_diagnostics', ctx.mcpReq, async () => {
+                if (args.list_live) return liveSessionResult(deps, await deps.registry.list(deps.principal));
                 const target = await resolveDiagnosticsTarget(deps, args, ctx.mcpReq.signal);
                 const [timelineRead, logsRead] = await Promise.allSettled([
                     deps.api.getAgentTraces(target.steelSessionId, ctx.mcpReq.signal),

@@ -14,9 +14,11 @@ describe('toolsForProfile', () => {
     });
 
     it('gives browse the full default surface', () => {
-        expect(toolsForProfile('browse')).toHaveLength(15);
+        expect(toolsForProfile('browse')).toHaveLength(16);
         expect(toolsForProfile('browse').map(tool => tool.name)).toContain('steel_session_handoff');
         expect(toolsForProfile('browse').map(tool => tool.name)).toContain('steel_session_replay');
+        expect(toolsForProfile('browse').at(-2)?.name).toBe('steel_session_options');
+        expect(toolsForProfile('browse').at(-1)?.name).toBe('steel_session_live_view');
     });
 
     it('resolves every declared profile name', () => {

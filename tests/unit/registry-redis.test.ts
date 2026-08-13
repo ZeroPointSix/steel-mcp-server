@@ -451,7 +451,7 @@ describe('RedisHandleRegistry.reap', () => {
         await registry.release(a.handle, ORG_A, 'explicit');
         await registry.release(b.handle, ORG_A, 'stream_close');
 
-        expect(registry.releaseCounts()).toMatchObject({ explicit: 1, stream_close: 1, reaper: 0 });
+        expect(registry.releaseCounts()).toMatchObject({ explicit: 1, stream_close: 1, idle: 0, hard_expiry: 0 });
     });
 
     it('keeps releasing after one release fails, and reports the failure', async () => {
@@ -486,7 +486,7 @@ describe('RedisHandleRegistry.reap', () => {
 
         expect(await registry.reap({ idleMs: 1 })).toBe(1);
         expect(await registry.countLive(ORG_A)).toBe(0);
-        expect(registry.releaseCounts().reaper).toBe(1);
+        expect(registry.releaseCounts().hard_expiry).toBe(1);
     });
 
     it('sweeps a member no registry wrote, instead of carrying it through every future sweep', async () => {
@@ -700,7 +700,7 @@ describe('RedisHandleRegistry across replicas', () => {
             'the two sweeps did not overlap, so the race was never exercised'
         ).toEqual(['steel-1', 'steel-1']);
         expect(reapedByFirst + reapedBySecond, 'the same handle was reaped twice').toBe(1);
-        const counts = first.registry.releaseCounts().reaper + second.registry.releaseCounts().reaper;
+        const counts = first.registry.releaseCounts().idle + second.registry.releaseCounts().idle;
         expect(counts, 'two replicas both counted the one release').toBe(1);
         expect(store.valueKeys()).toEqual([]);
         expect(store.setMembers()).toEqual({});
@@ -725,7 +725,7 @@ describe('RedisHandleRegistry across replicas', () => {
         // which is why concurrent sweeps need no coordination.
         expect(swept[0] + swept[1]).toBe(4);
         expect([...new Set([...first.released, ...second.released])].sort()).toEqual(['s1', 's2', 's3', 's4']);
-        expect(first.registry.releaseCounts().reaper + second.registry.releaseCounts().reaper).toBe(4);
+        expect(first.registry.releaseCounts().idle + second.registry.releaseCounts().idle).toBe(4);
         expect(store.valueKeys()).toEqual([]);
         expect(store.setMembers()).toEqual({});
     });

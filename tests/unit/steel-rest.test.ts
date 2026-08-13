@@ -137,11 +137,27 @@ describe('SteelRestClient.createSession', () => {
         expect(calls[0]!.body).toMatchObject({ deviceConfig: { device: 'mobile' } });
     });
 
+    it('retains advanced region placement at the internal REST boundary', async () => {
+        const { api, calls } = client([{ body: { id: 'regional-1', status: 'live' } }]);
+        await api.createSession({ sessionId: 'regional-1', timeout: 900_000, region: 'lax' });
+
+        expect(calls[0]!.body).toMatchObject({ region: 'lax' });
+    });
+
     it('never sends a metadata field, which the sessions endpoint does not have', async () => {
         const { api, calls } = client([{ body: { id: 'mine-1', status: 'live' } }]);
-        await api.createSession({ sessionId: 'mine-1', timeout: 1000, inactivityTimeout: 500, namespace: 'ns' });
+        await api.createSession({
+            sessionId: 'mine-1',
+            timeout: 1000,
+            inactivityTimeout: 500,
+            namespace: 'ns',
+            credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
+        });
         expect(calls[0]!.body).not.toHaveProperty('metadata');
-        expect(calls[0]!.body).toMatchObject({ namespace: 'ns' });
+        expect(calls[0]!.body).toMatchObject({
+            namespace: 'ns',
+            credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
+        });
     });
 
     it('omits keys the caller did not set instead of sending nulls', async () => {
@@ -395,5 +411,72 @@ describe('SteelRestClient session replay', () => {
 
         expect(error.code).toBe('not_found');
         expect(error.message).toBe('Recording is not ready');
+    });
+});
+
+describe('SteelRestClient safe account catalogs', () => {
+    it('projects profile metadata and drops every rich upstream field', async () => {
+        const { api, calls } = client([
+            {
+                body: {
+                    profiles: [
+                        {
+                            id: 'p1',
+                            status: 'READY',
+                            createdAt: 'c',
+                            updatedAt: 'u',
+                            fingerprint: { secret: true },
+                            proxyUrl: 'private',
+                            credentialsConfig: { value: 'secret' },
+                        },
+                        { id: 4 },
+                    ],
+                },
+            },
+        ]);
+        await expect(api.listProfiles()).resolves.toEqual([
+            { id: 'p1', status: 'READY', createdAt: 'c', updatedAt: 'u' },
+        ]);
+        expect(calls[0]?.url).toBe('https://api.steel.dev/v1/profiles');
+    });
+
+    it('encodes profile ids and projects one profile', async () => {
+        const { api, calls } = client([
+            { body: { id: 'p/1', status: 'UPLOADING', createdAt: 'c', updatedAt: 'u', sourceSessionId: 'secret' } },
+        ]);
+        await expect(api.getProfile('p/1')).resolves.toEqual({
+            id: 'p/1',
+            status: 'UPLOADING',
+            createdAt: 'c',
+            updatedAt: 'u',
+        });
+        expect(calls[0]?.url).toBe('https://api.steel.dev/v1/profiles/p%2F1');
+    });
+
+    it('encodes credential filters and never returns labels or values', async () => {
+        const { api, calls } = client([
+            {
+                body: {
+                    credentials: [
+                        {
+                            namespace: 'n&x',
+                            origin: 'https://example.com',
+                            createdAt: 'c',
+                            updatedAt: 'u',
+                            label: 'free text',
+                            value: 'secret',
+                            username: 'private',
+                            totpSecret: 'private',
+                        },
+                    ],
+                },
+            },
+        ]);
+        await expect(api.listCredentials({ origin: 'https://example.com', namespace: 'n&x' })).resolves.toEqual([
+            { namespace: 'n&x', origin: 'https://example.com', createdAt: 'c', updatedAt: 'u' },
+        ]);
+        expect(calls[0]?.url).toBe(
+            'https://api.steel.dev/v1/credentials?origin=https%3A%2F%2Fexample.com&namespace=n%26x'
+        );
     });
 });

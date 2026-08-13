@@ -37,7 +37,7 @@ cloud('Steel Cloud contract', () => {
             // Release is idempotent, and leaving a billed browser running is the one outcome this
             // whole design exists to prevent.
             await api.releaseSession(id).catch(error => {
-                process.stderr.write(`[smoke] could not release ${id}: ${String(error)}\n`);
+                process.stderr.write(`[smoke] could not release a test session: ${String(error)}\n`);
             });
         }
     });
@@ -121,4 +121,23 @@ cloud('Steel Cloud contract', () => {
         // Release is idempotent: the reaper and an explicit call can both land on the same session.
         await expect(api.releaseSession(sessionId)).resolves.not.toThrow();
     });
+
+    const retention = process.env.STEEL_SMOKE_RETENTION === 'true' ? it : it.skip;
+    retention(
+        'keeps a quiet session beyond the old two-minute idle window',
+        async () => {
+            const details = await api.getDetails();
+            const hard = Math.min(900_000, details.maxSessionDuration ?? 900_000);
+            expect(hard, 'account hard maximum cannot prove the approved retention window').toBeGreaterThan(600_000);
+            const sessionId = crypto.randomUUID();
+            created.push(sessionId);
+            await api.createSession({ sessionId, timeout: hard, inactivityTimeout: 600_000 });
+            await new Promise(resolve => setTimeout(resolve, 540_000));
+            const session = await api.getSession(sessionId);
+            expect(session.status).toBe('live');
+            await api.releaseSession(sessionId);
+            created.splice(created.indexOf(sessionId), 1);
+        },
+        600_000
+    );
 });

@@ -4,14 +4,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { loadConfig } from './core/config.js';
+import { REAPER_INTERVAL_MS, resolveRegistryIdleMs } from './core/lifecycle.js';
+import { recordSessionReleased, resolveTracer } from './core/telemetry.js';
 import { SERVER_VERSION } from './core/version.js';
 import { createHandleRegistryBackend, HostedRuntime, type HostedRuntimeOptions } from './hosted-runtime.js';
 import { createSteelHttpHandler } from './http.js';
 import { startTracing } from './tracing.js';
-
-/** How often the reaper sweeps, and how idle a handle must be before it reclaims the slot. */
-const REAPER_INTERVAL_MS = 30_000;
-const REAPER_IDLE_MS = 150_000;
 
 const DEFAULT_PORT = 8080;
 /** Every interface, because a container's port is only reachable from outside if it binds one. */
@@ -109,6 +107,18 @@ export async function startHostedServer(options: HostedServerOptions): Promise<H
         configForCredential: credential => loadConfig({ ...env, STEEL_API_KEY: credential }),
         createRegistry: backend.createRegistry,
         onReapError: error => log('error', 'reaper failed to release a session', { error: String(error) }),
+        onReleased: (cause, registryBackend) => {
+            log('info', 'browser session released', {
+                cause,
+                deployment: template.deployment,
+                registry_backend: registryBackend,
+            });
+            recordSessionReleased(resolveTracer(), {
+                cause,
+                deployment: template.deployment,
+                registryBackend,
+            });
+        },
         ...options.runtime,
     });
 
@@ -135,7 +145,7 @@ export async function startHostedServer(options: HostedServerOptions): Promise<H
     });
 
     const reaper = setInterval(() => {
-        void runtime.registry.reap({ idleMs: REAPER_IDLE_MS }).catch(error => {
+        void runtime.registry.reap({ idleMs: resolveRegistryIdleMs(template.inactivityTimeoutMs) }).catch(error => {
             log('error', 'reaper sweep failed', { error: String(error) });
         });
     }, REAPER_INTERVAL_MS);
@@ -158,6 +168,7 @@ export async function startHostedServer(options: HostedServerOptions): Promise<H
         profile: template.profile,
         baseUrl: template.baseUrl,
         handleStore: env.REDIS_URL ? 'shared' : 'in-process',
+        server_version: SERVER_VERSION,
     });
 
     let closed = false;

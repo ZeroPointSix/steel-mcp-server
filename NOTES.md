@@ -317,6 +317,14 @@ Dockerfile. Every one of these produced a successful `docker build`.
 - **No lockfile is committed** (`package-lock.json` is gitignored), and it has already caused
   observable drift: `biome.json` pins schema 2.5.5 while `^2.5.5` installs 2.5.6.
 
+### Continuation retention decision (2026-08-13)
+
+The maintainer approved a 600,000ms Steel inactivity default and a local cleanup threshold one
+30-second sweep later. This can raise abandoned-browser billing from roughly two to ten minutes,
+local slot retention to about 10.5–11 minutes, and explicitly short sessions to their full hard
+deadline instead of half. The immutable 900,000ms default hard lifetime is unchanged and always
+wins. Approval was given directly in the implementation session; no external issue was created.
+
 ## 9. Connecting a client to the hosted endpoint
 
 Measured 2026-08-04 against Claude Desktop **1.24012.11** and `mcp-remote@0.1.38`, over a real

@@ -188,9 +188,45 @@ describe('explicit session handoff', () => {
         expect(result.inputRequests?.[HANDOFF_KEY]?.params.url).toContain('/player');
     });
 
-    it('returns to the agent only after the person accepts the handoff round', async () => {
-        const harness = await connectModern({ deps: testDeps({ page: plainPage }) });
+    it('preserves one cart session through handoff, hand back and explicit release', async () => {
+        const cartPage = (reviewed = false) => {
+            const page = plainPage();
+            page.root.children = [
+                ...(page.root.children ?? []),
+                {
+                    tag: 'DIV',
+                    backendNodeId: 12,
+                    role: 'StaticText',
+                    name: 'Cart contains one Mario Kart bundle',
+                    bounds: [100, 300, 320, 24],
+                },
+                ...(reviewed
+                    ? [
+                          {
+                              tag: 'DIV',
+                              backendNodeId: 13,
+                              role: 'StaticText',
+                              name: 'Pickup confirmed by the person',
+                              bounds: [100, 340, 320, 24] as [number, number, number, number],
+                          },
+                      ]
+                    : []),
+            ];
+            return page;
+        };
+        let harness: Harness;
+        harness = await connectModern({
+            deps: testDeps({ page: cartPage }),
+            onElicit: () => setPage(harness, cartPage(true)),
+        });
         const handle = await newSession(harness);
+        const steelSessionId = harness.deps.api.created[0]!.sessionId;
+        const before = await harness.client.callTool({
+            name: 'steel_snapshot',
+            arguments: { session_id: handle },
+        });
+        expect(textOf(before)).toContain('Cart contains one Mario Kart bundle');
+
         const result = await harness.client.callTool({
             name: 'steel_session_handoff',
             arguments: { session_id: handle, reason: 'manual_step' },
@@ -200,6 +236,18 @@ describe('explicit session handoff', () => {
         expect(textOf(result)).toContain('handed the browser back');
         expect(harness.elicited).toHaveLength(1);
         await expect(harness.deps.registry.resolveForAgent(handle, harness.deps.principal)).resolves.toBeTruthy();
+
+        const after = await harness.client.callTool({
+            name: 'steel_snapshot',
+            arguments: { session_id: handle },
+        });
+        expect(textOf(after)).toContain('Cart contains one Mario Kart bundle');
+        expect(textOf(after)).toContain('Pickup confirmed by the person');
+        expect(harness.deps.api.created).toHaveLength(1);
+
+        await harness.client.callTool({ name: 'steel_session_release', arguments: { session_id: handle } });
+        expect(harness.deps.api.released).toEqual([steelSessionId]);
+        expect(harness.deps.pool.closed).toEqual([steelSessionId]);
     });
 
     it('does not pin a session when the client offers no usable human-control route', async () => {
@@ -442,6 +490,31 @@ function cartPage(withChallenge: boolean): FixturePage {
 }
 
 describe('the tools that can hit a wall', () => {
+    it('waits once for managed credential injection before handing off a remaining login wall', async () => {
+        let harness: Harness;
+        let graceCalls = 0;
+        const deps = testDeps({ page: loginWallPage });
+        deps.credentialGrace = async () => {
+            graceCalls += 1;
+        };
+        harness = await connectModern({
+            deps,
+            onElicit: () => setPage(harness, plainPage()),
+        });
+        const created = await harness.client.callTool({
+            name: 'steel_session_create',
+            arguments: { namespace: 'managed' },
+        });
+        const handle = (created as { structuredContent?: { session_id?: string } }).structuredContent?.session_id;
+        const result = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://app.test/login' },
+        });
+        expect(graceCalls).toBe(1);
+        expect(harness.elicited).toHaveLength(1);
+        expect(result.isError).toBeFalsy();
+    });
+
     it('hands off a challenge a navigation landed on, naming the widget and not the page text', async () => {
         let harness: Harness;
         harness = await connectModern({
@@ -538,6 +611,79 @@ describe('the tools that can hit a wall', () => {
 
         expect(harness.elicited).toHaveLength(0);
         expect(result.isError).toBeFalsy();
+    });
+});
+
+describe('steel_batch handoff boundaries', () => {
+    it('stops after a completed navigation and resumes only the unrun work after explicit handoff', async () => {
+        let harness: Harness;
+        harness = await connectModern({
+            deps: testDeps({ page: loginWallPage }),
+            onElicit: () => setPage(harness, plainPage()),
+        });
+        const handle = await newSession(harness);
+
+        const blocked = await harness.client.callTool({
+            name: 'steel_batch',
+            arguments: {
+                session_id: handle,
+                steps: [
+                    { tool: 'steel_navigate', arguments: { url: 'https://app.test/login' } },
+                    { tool: 'steel_act', arguments: { action: 'scroll', value: '100' } },
+                ],
+            },
+        });
+        const error = (blocked.structuredContent as { error?: { details?: Record<string, unknown> } })?.error;
+        expect(blocked.isError).toBe(true);
+        expect(error?.details).toMatchObject({
+            completed_steps: 1,
+            next_step: 2,
+            remaining_steps: 1,
+            handoff_required: true,
+        });
+        expect(textOf(blocked)).toMatch(/do not rerun completed steps/i);
+        expect(textOf(blocked)).toMatch(/steel_session_handoff.*same session_id/i);
+        expect(harness.elicited).toHaveLength(0);
+
+        const handedBack = await harness.client.callTool({
+            name: 'steel_session_handoff',
+            arguments: { session_id: handle, reason: 'manual_step' },
+        });
+        expect(handedBack.isError).toBeFalsy();
+        expect(harness.elicited).toHaveLength(1);
+
+        const resumed = await harness.client.callTool({
+            name: 'steel_batch',
+            arguments: {
+                session_id: handle,
+                steps: [{ tool: 'steel_act', arguments: { action: 'scroll', value: '100' } }],
+            },
+        });
+        expect(resumed.isError).toBeFalsy();
+        expect(harness.deps.api.created).toHaveLength(1);
+    });
+
+    it('does not offer handoff for a recognized block without an operable control', async () => {
+        const blockedPage = () => {
+            const page = loginWallPage();
+            page.root.children = page.root.children?.filter(node => node.role !== 'button');
+            return page;
+        };
+        const harness = await connectModern({ deps: testDeps({ page: blockedPage }) });
+        const handle = await newSession(harness);
+
+        const result = await harness.client.callTool({
+            name: 'steel_batch',
+            arguments: {
+                session_id: handle,
+                steps: [{ tool: 'steel_navigate', arguments: { url: 'https://app.test/login' } }],
+            },
+        });
+        const error = (result.structuredContent as { error?: { details?: Record<string, unknown> } })?.error;
+        expect(result.isError).toBe(true);
+        expect(error?.details).toMatchObject({ completed_steps: 1, next_step: null, remaining_steps: 0 });
+        expect(error?.details).not.toHaveProperty('handoff_required');
+        expect(textOf(result)).toMatch(/human handoff is not offered/i);
     });
 });
 

@@ -58,7 +58,7 @@ export async function snapshotSection(
         pageState: pageStateLine(snapshot),
         snapshot: fenceUntrusted(paged.text, { finalUrl: snapshot.url, fetchedAt: deps.now().toISOString() }),
         pagination: paged.truncated
-            ? `The page is larger than the budget. Continue with cursor="${paged.nextCursor}", ` +
+            ? `The page is larger than the budget. Call steel_snapshot with the same session_id and cursor="${paged.nextCursor}", ` +
               'or use steel_find to jump straight to the element you need.'
             : snapshot.truncated
               ? 'The page has more nodes than this tool renders. Use steel_find to locate a specific element.'
@@ -75,16 +75,18 @@ export function registerNavigate(host: ToolHost, deps: ServerDeps): void {
             description:
                 'Navigate a live session and wait for it to settle. Reports the final URL and changes; set ' +
                 'include_snapshot to also read the page.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                url: z.url().describe('Where to go.'),
-                include_snapshot: z
-                    .boolean()
-                    .optional()
-                    .describe('Also return the accessibility snapshot. Off by default because it is expensive.'),
-                max_tokens: maxTokensSchema,
-            }),
+            annotations: { destructiveHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    url: z.url().describe('Where to go.'),
+                    include_snapshot: z
+                        .boolean()
+                        .optional()
+                        .describe('Also return the accessibility snapshot. Off by default because it is expensive.'),
+                    max_tokens: maxTokensSchema,
+                })
+                .strict(),
         },
         async (args, ctx) =>
             withPage(deps, 'steel_navigate', ctx.mcpReq, args.session_id, async (page, record) => {
@@ -125,16 +127,18 @@ export function registerSnapshot(host: ToolHost, deps: ServerDeps): void {
                 'Return the page as a compact accessibility tree with a @eN reference on every element you can ' +
                 'click or type into. This is the read to use before acting. Elements with no reference cannot be ' +
                 'targeted. If you already know what you are looking for, steel_find is much cheaper.',
-            annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                interactive_only: z
-                    .boolean()
-                    .optional()
-                    .describe('Skip purely structural containers. On by default; turn off for the full tree.'),
-                max_tokens: maxTokensSchema,
-                cursor: cursorSchema,
-            }),
+            annotations: { readOnlyHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    interactive_only: z
+                        .boolean()
+                        .optional()
+                        .describe('Skip purely structural containers. On by default; turn off for the full tree.'),
+                    max_tokens: maxTokensSchema,
+                    cursor: cursorSchema,
+                })
+                .strict(),
         },
         async (args, ctx) =>
             withPage(deps, 'steel_snapshot', ctx.mcpReq, args.session_id, async page => {
@@ -166,26 +170,34 @@ export function registerFind(host: ToolHost, deps: ServerDeps): void {
         'steel_find',
         {
             title: 'Find an element on the page',
-            description:
-                'Search the current page for elements whose label matches a word, phrase or pattern, and return ' +
-                'just those with their @eN references. Much cheaper than reading the whole page when you only ' +
-                'need one button, link or field.',
-            annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                text: z.string().optional().describe('Case-insensitive substring of the element label.'),
-                regex: z.string().optional().describe('Regular expression matched against the element label.'),
-                role: z.string().optional().describe('Only return elements with this role, e.g. button or link.'),
-                interactive_only: z
-                    .boolean()
-                    .optional()
-                    .describe('Only return elements that can actually be clicked or typed into.'),
-                max_results: z.number().int().positive().max(200).optional().describe('Cap on matches returned.'),
-            }),
+            description: 'Find labelled elements by text, safe regex or role and return their @eN refs.',
+            annotations: { readOnlyHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    text: z.string().optional().describe('Case-insensitive substring of the element label.'),
+                    regex: z
+                        .string()
+                        .max(256)
+                        .optional()
+                        .describe('Safe regular expression matched against the element label.'),
+                    role: z.string().optional().describe('Only return elements with this role, e.g. button or link.'),
+                    interactive_only: z
+                        .boolean()
+                        .optional()
+                        .describe('Only return elements that can actually be clicked or typed into.'),
+                    max_results: z.number().int().positive().max(200).optional().describe('Cap on matches returned.'),
+                    max_tokens: maxTokensSchema,
+                    cursor: cursorSchema,
+                })
+                .strict()
+                .refine(args => args.text !== undefined || args.regex !== undefined || args.role !== undefined, {
+                    message: 'Pass at least one of text, regex or role.',
+                }),
         },
         async (args, ctx) =>
             withPage(deps, 'steel_find', ctx.mcpReq, args.session_id, async page => {
-                await page.snapshot({});
+                if (args.cursor === undefined) await page.snapshot({});
                 const matches = await page.find({
                     text: args.text,
                     regex: args.regex,
@@ -207,20 +219,31 @@ export function registerFind(host: ToolHost, deps: ServerDeps): void {
                     );
                 }
 
+                const paged = paginate(renderMatches(limited), {
+                    maxTokens: args.max_tokens ?? DEFAULT_MAX_TOKENS,
+                    cursor: args.cursor,
+                });
                 return successResult(
                     {
                         result: `${matches.length} match${matches.length === 1 ? '' : 'es'}${
                             matches.length > limited.length ? `, showing the first ${limited.length}` : ''
                         }.`,
                         pageState: snapshot ? pageStateLine(snapshot) : undefined,
-                        snapshot: fenceUntrusted(renderMatches(limited), {
+                        snapshot: fenceUntrusted(paged.text, {
                             finalUrl: snapshot?.url ?? '',
                             fetchedAt: deps.now().toISOString(),
                         }),
+                        pagination: paged.truncated
+                            ? `Call steel_find again with the same arguments and cursor="${paged.nextCursor}".`
+                            : undefined,
                     },
                     {
                         match_count: matches.length,
-                        matches: limited.map(node => ({ ref: node.ref, role: node.role, name: node.name })),
+                        matches: limited.map(node => ({
+                            ref: node.ref,
+                            role: node.role.slice(0, 128),
+                            name: node.name.slice(0, 512),
+                        })),
                     }
                 );
             })
@@ -238,28 +261,32 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
                 'cookie or consent overlay. Target elements by the @eN reference from steel_snapshot or ' +
                 'steel_find, or by a CSS selector. Always reports what actually changed, and says so plainly when ' +
                 'nothing did.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                action: z.enum(ACTIONS).describe('What to do.'),
-                target: z
-                    .string()
-                    .optional()
-                    .describe('A @eN reference or a CSS selector. Not needed for scroll, press, go_back.'),
-                value: z
-                    .string()
-                    .optional()
-                    .describe('Text to type, option to select, key name to press, or scroll distance in pixels.'),
-                fields: z
-                    .array(z.object({ target: z.string(), value: z.string() }))
-                    .optional()
-                    .describe('For fill_form: the fields to fill, in order, in one round trip.'),
-                include_snapshot: z
-                    .boolean()
-                    .optional()
-                    .describe('Also return the page structure afterwards. Off by default.'),
-                max_tokens: maxTokensSchema,
-            }),
+            annotations: { destructiveHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    action: z.enum(ACTIONS).describe('What to do.'),
+                    target: z
+                        .string()
+                        .optional()
+                        .describe(
+                            'A @eN reference or a CSS selector. Not needed for scroll, press, go_back or dismiss_overlays.'
+                        ),
+                    value: z
+                        .string()
+                        .optional()
+                        .describe('Text to type, option to select, key name to press, or scroll distance in pixels.'),
+                    fields: z
+                        .array(z.object({ target: z.string(), value: z.string() }))
+                        .optional()
+                        .describe('For fill_form: the fields to fill, in order, in one round trip.'),
+                    include_snapshot: z
+                        .boolean()
+                        .optional()
+                        .describe('Also return the page structure afterwards. Off by default.'),
+                    max_tokens: maxTokensSchema,
+                })
+                .strict(),
         },
         async (args, ctx) =>
             withPage(deps, 'steel_act', ctx.mcpReq, args.session_id, async (page, record) => {
@@ -301,19 +328,26 @@ export function registerWaitFor(host: ToolHost, deps: ServerDeps): void {
         'steel_wait_for',
         {
             title: 'Wait for something on the page',
-            description:
-                'Wait until a piece of text appears, an element matches a CSS selector, or the URL contains a ' +
-                'string. Name what you are waiting for — there is no wait-until-quiet option, because that hides ' +
-                'why the page was slow. Most actions settle by themselves, so reach for this only when something ' +
-                'genuinely arrives later.',
-            annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                text: z.string().optional().describe('Wait for this text to appear on the page.'),
-                selector: z.string().optional().describe('Wait for an element matching this CSS selector.'),
-                url: z.string().optional().describe('Wait for the URL to contain this string.'),
-                timeout_ms: z.number().int().positive().max(120_000).optional().describe('Give up after this long.'),
-            }),
+            description: 'Wait for named text, a CSS selector or URL substring; pass at least one.',
+            annotations: { readOnlyHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    text: z.string().optional().describe('Wait for this text to appear on the page.'),
+                    selector: z.string().optional().describe('Wait for an element matching this CSS selector.'),
+                    url: z.string().optional().describe('Wait for the URL to contain this string.'),
+                    timeout_ms: z
+                        .number()
+                        .int()
+                        .positive()
+                        .max(120_000)
+                        .optional()
+                        .describe('Give up after this long.'),
+                })
+                .strict()
+                .refine(args => args.text !== undefined || args.selector !== undefined || args.url !== undefined, {
+                    message: 'Pass at least one of text, selector or url.',
+                }),
         },
         async (args, ctx) =>
             withPage(

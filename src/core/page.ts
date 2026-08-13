@@ -1,7 +1,13 @@
 // ABOUTME: The page controller: navigation, targeting, pointer and keyboard input, overlay
 // ABOUTME: dismissal and explicit waits, each returning what actually changed on the page.
 import { type ChangeSignal, describeChange } from './envelope.js';
-import { clickBlockedError, navigationFailedError, SteelToolError } from './errors.js';
+import {
+    clickBlockedError,
+    clickHitTestUnstableError,
+    clickLayoutUnavailableError,
+    navigationFailedError,
+    SteelToolError,
+} from './errors.js';
 import { readMutationCount, type SettleBudgets, type SettleWatch, watchForSettle } from './settle.js';
 import {
     type CaptureOptions,
@@ -104,13 +110,63 @@ const WAIT_POLL_INTERVAL_MS = 250;
 
 interface TargetHandle {
     backendNodeId: number;
+    loaderId: string;
     /** Present when the target came from a ref; used for the redaction and identity checks. */
     node?: SnapshotNode | undefined;
     describe: string;
 }
 
+interface Point {
+    x: number;
+    y: number;
+}
+
+type PointHit = { kind: 'reachable' } | { kind: 'blocked'; covering: string; blockerId: number } | { kind: 'no_node' };
+
+interface HitNodeCacheEntry {
+    reachesTarget: boolean;
+    covering?: string | undefined;
+}
+
+const CLICK_RECOVERY_EPISODE_LIMIT = 3;
+
+/** Centre first, then four points inset far enough to avoid borders and resize handles. */
+const CLICK_SAMPLE_POSITIONS: ReadonlyArray<readonly [number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.8, 0.8],
+    [0.2, 0.8],
+];
+
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isNoNodeAtLocationError(error: unknown): boolean {
+    return error instanceof Error && /DOM\.getNodeForLocation failed:.*\bNo node found\b/i.test(error.message);
+}
+
+/** Interpolates inside the real content quad, so transformed elements never get a bounding-box click. */
+function pointOnQuad(quad: readonly number[], horizontal: number, vertical: number): Point {
+    const [x00, y00, x10, y10, x11, y11, x01, y01] = quad as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+    ];
+    const topX = x00 + (x10 - x00) * horizontal;
+    const topY = y00 + (y10 - y00) * horizontal;
+    const bottomX = x01 + (x11 - x01) * horizontal;
+    const bottomY = y01 + (y11 - y01) * horizontal;
+    return {
+        x: Math.round(topX + (bottomX - topX) * vertical),
+        y: Math.round(topY + (bottomY - topY) * vertical),
+    };
 }
 
 /** Renders a CDP node description as the compact `tag#id.class` form used in error messages. */
@@ -149,6 +205,14 @@ export class BrowserPage {
 
     /** The main frame, learned on first use, so settle can ignore navigations in subframes. */
     private mainFrameId: string | undefined;
+
+    /** Consecutive click failures for one live node, used to stop an agent retry loop. */
+    private lastClickFailure: { nodeKey: string; failures: number } | undefined;
+
+    /** Related targets covered by the same node on one document share one bounded episode. */
+    private clickFailureEpisode: { loaderId: string; blockerId: number; failures: number } | undefined;
+
+    private clickFailureLoaderId: string | undefined;
 
     /** The page state, exposed so a tool can resolve refs and read the last snapshot. */
     get pageState(): PageState {
@@ -189,6 +253,18 @@ export class BrowserPage {
         return { id: frame?.id ?? '', url: frame?.url ?? '', loaderId: frame?.loaderId ?? '' };
     }
 
+    /** Reads release context without paying for a full accessibility and DOM snapshot. */
+    async pageSummary(): Promise<{ url: string; title: string }> {
+        const [frame, evaluated] = await Promise.all([
+            this.currentFrame(),
+            this.session.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+                expression: 'document.title',
+                returnByValue: true,
+            }),
+        ]);
+        return { url: frame.url, title: typeof evaluated.result?.value === 'string' ? evaluated.result.value : '' };
+    }
+
     private async readMainFrameId(): Promise<string | undefined> {
         try {
             return (await this.currentFrame()).id || undefined;
@@ -199,6 +275,7 @@ export class BrowserPage {
     }
 
     async navigate(url: string): Promise<NavigateOutcome> {
+        const beforeLoader = (await this.currentFrame()).loaderId;
         const baseline = await this.beginChange();
         const result = await this.session.send<{ errorText?: string }>('Page.navigate', { url });
         // errorText is CDP's only failure signal. The page still ends up on Chrome's error
@@ -207,6 +284,7 @@ export class BrowserPage {
 
         const { change, description } = await this.settleNow(baseline);
         const frame = await this.currentFrame();
+        if (frame.loaderId && frame.loaderId !== beforeLoader) this.clearClickFailures();
         return {
             // The frame tree is authoritative for the main frame; the settle signal is a fallback.
             finalUrl: frame.url || change.navigatedToUrl || url,
@@ -244,7 +322,9 @@ export class BrowserPage {
     }
 
     async snapshot(options: CaptureOptions): Promise<PageSnapshot> {
-        return this.state.capture(this.session, options);
+        const snapshot = await this.state.capture(this.session, options);
+        this.observeRecoveryLoader(snapshot.loaderId);
+        return snapshot;
     }
 
     async find(query: FindQuery, options: CaptureOptions = {}): Promise<SnapshotNode[]> {
@@ -280,7 +360,12 @@ export class BrowserPage {
             const live = await this.liveIdentity(resolved.backendNodeId);
             if (live) this.state.assertIdentityUnchanged(target, live);
             const node = this.state.lastSnapshot?.nodes.find(candidate => candidate.ref === target);
-            return { backendNodeId: resolved.backendNodeId, node, describe: `${target} (${resolved.role})` };
+            return {
+                backendNodeId: resolved.backendNodeId,
+                loaderId: resolved.loaderId,
+                node,
+                describe: `${target} (${resolved.role})`,
+            };
         }
 
         const { root } = await this.session.send<{ root: { nodeId: number } }>('DOM.getDocument', { depth: 0 });
@@ -306,7 +391,7 @@ export class BrowserPage {
         // Look the node up in the last snapshot so a selector target still carries its known
         // sensitivity; when it is not there, describeTyped fails safe and redacts.
         const node = this.state.lastSnapshot?.nodes.find(candidate => candidate.backendNodeId === backendNodeId);
-        return { backendNodeId, node, describe: `"${target}"` };
+        return { backendNodeId, loaderId: (await this.currentFrame()).loaderId, node, describe: `"${target}"` };
     }
 
     private requireTarget(request: ActRequest): string {
@@ -319,23 +404,27 @@ export class BrowserPage {
         return request.target;
     }
 
-    /** Returns the centre of the target after scrolling it into view. */
-    private async centreOf(backendNodeId: number): Promise<{ x: number; y: number }> {
+    /** Returns safe points inside the target's real content quad after scrolling it into view. */
+    private async candidatePoints(backendNodeId: number): Promise<Point[] | undefined> {
         await this.session.send('DOM.scrollIntoViewIfNeeded', { backendNodeId });
         const box = await this.session.send<{ model?: { content?: number[] } }>('DOM.getBoxModel', { backendNodeId });
         const quad = box.model?.content;
-        if (!quad || quad.length < 8) {
-            throw new SteelToolError(
-                'The target has no layout box, so it cannot be clicked. It may be hidden or collapsed; take a fresh snapshot.',
-                { code: 'click_blocked' }
-            );
+        if (!quad || quad.length < 8 || quad.slice(0, 8).some(coordinate => !Number.isFinite(coordinate))) {
+            return undefined;
         }
-        const xs = [quad[0] ?? 0, quad[2] ?? 0, quad[4] ?? 0, quad[6] ?? 0];
-        const ys = [quad[1] ?? 0, quad[3] ?? 0, quad[5] ?? 0, quad[7] ?? 0];
-        return {
-            x: (Math.min(...xs) + Math.max(...xs)) / 2,
-            y: (Math.min(...ys) + Math.max(...ys)) / 2,
-        };
+        const unique = new Map<string, Point>();
+        for (const [horizontal, vertical] of CLICK_SAMPLE_POSITIONS) {
+            const point = pointOnQuad(quad, horizontal, vertical);
+            unique.set(`${point.x}:${point.y}`, point);
+        }
+        return [...unique.values()];
+    }
+
+    /** Returns the centre for actions such as hover that intentionally have one pointer position. */
+    private async centreOf(handle: TargetHandle): Promise<Point> {
+        const point = (await this.candidatePoints(handle.backendNodeId))?.[0];
+        if (!point) throw clickLayoutUnavailableError(handle.describe);
+        return point;
     }
 
     /**
@@ -344,14 +433,32 @@ export class BrowserPage {
      * A click that lands on a cookie banner and reports success is the single most common
      * browsing dead-end; naming the covering element turns it into a self-correctable one.
      */
-    private async assertReachable(handle: TargetHandle, point: { x: number; y: number }): Promise<void> {
-        const hit = await this.session.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', {
-            x: Math.round(point.x),
-            y: Math.round(point.y),
-            includeUserAgentShadowDOM: false,
-        });
+    private async hitTestPoint(
+        handle: TargetHandle,
+        point: Point,
+        cache: Map<number, HitNodeCacheEntry>
+    ): Promise<PointHit> {
+        let hit: { backendNodeId?: number };
+        try {
+            hit = await this.session.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', {
+                x: point.x,
+                y: point.y,
+                includeUserAgentShadowDOM: false,
+            });
+        } catch (error) {
+            if (isNoNodeAtLocationError(error)) return { kind: 'no_node' };
+            throw error;
+        }
         const hitId = hit.backendNodeId;
-        if (hitId === undefined || hitId === handle.backendNodeId) return;
+        if (hitId === undefined) return { kind: 'no_node' };
+        if (hitId === handle.backendNodeId) return { kind: 'reachable' };
+
+        const cached = cache.get(hitId);
+        if (cached) {
+            return cached.reachesTarget
+                ? { kind: 'reachable' }
+                : { kind: 'blocked', covering: cached.covering ?? 'another element', blockerId: hitId };
+        }
 
         const [target, topmost] = await Promise.all([
             this.session.send<{ object?: { objectId?: string } }>('DOM.resolveNode', {
@@ -367,14 +474,86 @@ export class BrowserPage {
                 arguments: [{ objectId: topmost.object.objectId }],
                 returnByValue: true,
             });
-            if (contains.result?.value === true) return;
+            if (contains.result?.value === true) {
+                cache.set(hitId, { reachesTarget: true });
+                return { kind: 'reachable' };
+            }
         }
 
         const described = await this.session.send<{ node?: { nodeName?: string; attributes?: string[] } }>(
             'DOM.describeNode',
             { backendNodeId: hitId }
         );
-        throw clickBlockedError(handle.describe, describeCdpNode(described.node));
+        const covering = describeCdpNode(described.node);
+        cache.set(hitId, { reachesTarget: false, covering });
+        return { kind: 'blocked', covering, blockerId: hitId };
+    }
+
+    private clearClickFailures(): void {
+        this.lastClickFailure = undefined;
+        this.clickFailureEpisode = undefined;
+        this.clickFailureLoaderId = undefined;
+    }
+
+    private observeRecoveryLoader(loaderId: string): void {
+        if (this.clickFailureLoaderId !== undefined && loaderId !== this.clickFailureLoaderId) {
+            this.clearClickFailures();
+        }
+    }
+
+    /** Records one failure and reports exact-node repetition plus a shared-blocker episode bound. */
+    private markClickFailure(
+        handle: TargetHandle,
+        blockerId?: number
+    ): { repeated: boolean; episodeExhausted: boolean } {
+        const nodeKey = `${handle.loaderId}:${handle.backendNodeId}`;
+        this.clickFailureLoaderId = handle.loaderId;
+        const failures = this.lastClickFailure?.nodeKey === nodeKey ? this.lastClickFailure.failures + 1 : 1;
+        this.lastClickFailure = { nodeKey, failures };
+        let episodeExhausted = false;
+        if (blockerId !== undefined) {
+            const episode = this.clickFailureEpisode;
+            const episodeFailures =
+                episode?.loaderId === handle.loaderId && episode.blockerId === blockerId ? episode.failures + 1 : 1;
+            this.clickFailureEpisode = { loaderId: handle.loaderId, blockerId, failures: episodeFailures };
+            episodeExhausted = episodeFailures >= CLICK_RECOVERY_EPISODE_LIMIT;
+        }
+        return { repeated: failures > 1, episodeExhausted };
+    }
+
+    /** Finds a verified clickable point, refreshing geometry once if the page moves under the hit test. */
+    private async reachablePoint(handle: TargetHandle): Promise<Point> {
+        for (let layoutAttempt = 0; layoutAttempt < 2; layoutAttempt += 1) {
+            const cache = new Map<number, HitNodeCacheEntry>();
+            const points = await this.candidatePoints(handle.backendNodeId);
+            if (!points) {
+                const failure = this.markClickFailure(handle);
+                throw clickLayoutUnavailableError(handle.describe, failure.repeated);
+            }
+            let firstBlocker: string | undefined;
+            let firstBlockerId: number | undefined;
+            let sawNoNode = false;
+
+            for (const point of points) {
+                const hit = await this.hitTestPoint(handle, point, cache);
+                if (hit.kind === 'reachable') {
+                    return point;
+                }
+                if (hit.kind === 'blocked') {
+                    firstBlocker ??= hit.covering;
+                    firstBlockerId ??= hit.blockerId;
+                } else sawNoNode = true;
+            }
+
+            if (sawNoNode && layoutAttempt === 0) continue;
+            if (firstBlocker) {
+                const failure = this.markClickFailure(handle, firstBlockerId);
+                throw clickBlockedError(handle.describe, firstBlocker, failure.repeated, failure.episodeExhausted);
+            }
+        }
+
+        const failure = this.markClickFailure(handle);
+        throw clickHitTestUnstableError(handle.describe, failure.repeated);
     }
 
     private async clickAt(point: { x: number; y: number }): Promise<void> {
@@ -455,16 +634,16 @@ export class BrowserPage {
             case 'click':
             case 'check': {
                 const handle = await this.resolveTarget(this.requireTarget(request));
-                const point = await this.centreOf(handle.backendNodeId);
-                await this.assertReachable(handle, point);
+                const point = await this.reachablePoint(handle);
                 const baseline = await this.beginChange();
                 await this.clickAt(point);
                 const { change, description } = await this.settleNow(baseline);
+                this.clearClickFailures();
                 return { summary: `Clicked ${handle.describe}.`, change, changeDescription: description };
             }
             case 'hover': {
                 const handle = await this.resolveTarget(this.requireTarget(request));
-                const point = await this.centreOf(handle.backendNodeId);
+                const point = await this.centreOf(handle);
                 const baseline = await this.beginChange();
                 await this.session.send('Input.dispatchMouseEvent', {
                     type: 'mouseMoved',
@@ -481,6 +660,7 @@ export class BrowserPage {
                 const baseline = await this.beginChange();
                 const handle = await this.typeInto(this.requireTarget(request), request.value);
                 const { change, description } = await this.settleNow(baseline, true);
+                this.clearClickFailures();
                 return { summary: this.describeTyped(handle, request.value), change, changeDescription: description };
             }
             case 'fill_form': {
@@ -496,6 +676,7 @@ export class BrowserPage {
                     summaries.push(this.describeTyped(handle, field.value));
                 }
                 const { change, description } = await this.settleNow(baseline, true);
+                this.clearClickFailures();
                 return { summary: summaries.join(' '), change, changeDescription: description };
             }
             case 'select': {
@@ -516,6 +697,7 @@ export class BrowserPage {
                     arguments: [{ value: request.value }],
                 });
                 const { change, description } = await this.settleNow(baseline);
+                this.clearClickFailures();
                 return {
                     summary: `Selected "${request.value}" in ${handle.describe}.`,
                     change,
@@ -557,9 +739,12 @@ export class BrowserPage {
                         code: 'invalid_argument',
                     });
                 }
+                const beforeLoader = (await this.currentFrame()).loaderId;
                 const baseline = await this.beginChange();
                 await this.session.send('Page.navigateToHistoryEntry', { entryId: previous.id });
                 const { change, description } = await this.settleNow(baseline);
+                const afterLoader = (await this.currentFrame()).loaderId;
+                if (afterLoader && afterLoader !== beforeLoader) this.clearClickFailures();
                 return { summary: 'Went back one page.', change, changeDescription: description };
             }
             case 'dismiss_overlays':
@@ -594,9 +779,10 @@ export class BrowserPage {
         }
 
         const handle = await this.resolveTarget(candidate.ref);
-        const point = await this.centreOf(handle.backendNodeId);
+        const point = await this.centreOf(handle);
         await this.clickAt(point);
         const { change, description } = await this.settleNow(baseline);
+        this.clearClickFailures();
         return {
             summary: `Pressed Escape and clicked "${candidate.name}".`,
             change,

@@ -1,5 +1,7 @@
 // ABOUTME: The accessibility snapshot pipeline: joins the AX tree with DOMSnapshot geometry, assigns
 // ABOUTME: @eN refs keyed on (loaderId, backendNodeId) and renders a budgeted, redacted page tree.
+
+import safeRegex from 'safe-regex2';
 import { type StaleRefReason, SteelToolError, staleRefError } from './errors.js';
 import type { CdpSession } from './steel/cdp.js';
 import { defangMarkdownLinks, isSensitiveField, redactSensitiveValue, stripInvisible } from './untrusted.js';
@@ -336,6 +338,12 @@ export function findInSnapshot(nodes: SnapshotNode[], query: FindQuery): Snapsho
             throw new SteelToolError(
                 `"${query.regex}" is not a valid regular expression: ${error instanceof Error ? error.message : String(error)}. ` +
                     'Use the text argument for a plain substring search.',
+                { code: 'invalid_argument' }
+            );
+        }
+        if (!safeRegex(pattern, { limit: 25 })) {
+            throw new SteelToolError(
+                'That regular expression may take too long to evaluate. Use a simpler pattern or the text argument.',
                 { code: 'invalid_argument' }
             );
         }

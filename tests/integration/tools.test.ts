@@ -84,6 +84,7 @@ describe('tools/list', () => {
             'steel_session_handoff',
             'steel_session_replay',
             'steel_batch',
+            'steel_session_options',
             // Listed, and last: the spec has the host filter an app-only tool out of what the model
             // sees, which means the server does list it.
             'steel_session_live_view',
@@ -110,6 +111,16 @@ describe('tools/list', () => {
                 `${tool.name} declares neither readOnlyHint nor destructiveHint`
             ).toBe(true);
             expect(annotations.openWorldHint, `${tool.name} is not marked open-world`).toBe(true);
+        }
+    });
+
+    it('rejects unknown top-level arguments on every public tool', async () => {
+        const { tools } = await harness.client.listTools();
+        for (const tool of tools) {
+            expect(
+                (tool.inputSchema as { additionalProperties?: boolean }).additionalProperties,
+                `${tool.name} silently drops unknown arguments`
+            ).toBe(false);
         }
     });
 
@@ -143,7 +154,8 @@ describe('server instructions', () => {
         expect(instructions).toMatch(/session_handoff.*sensitive.*local file/i);
         expect(instructions).toMatch(/do not act or release.*human control/i);
         expect(instructions).toMatch(/steel_batch.*known.*reversible.*checkout/i);
-        expect(instructions).toMatch(/stop before.*payment.*final confirmation.*session_handoff/i);
+        expect(instructions).toMatch(/stop before.*payment.*final confirmation/i);
+        expect(instructions).toMatch(/session_handoff.*take over/i);
         expect(instructions).toMatch(/never create.*old activity/i);
     });
 });
@@ -285,6 +297,35 @@ describe('steel_scrape', () => {
         }
     });
 
+    it('bounds links and metadata inside the same text budget', async () => {
+        const links = Array.from({ length: 200 }, (_, index) => ({
+            url: `https://example.com/${index}/${'x'.repeat(4_000)}`,
+            text: `Link ${index} ${'y'.repeat(2_000)}`,
+        }));
+        const api = new FakeSteelApi({
+            scrape: {
+                content: { markdown: 'body' },
+                links,
+                metadata: Object.fromEntries(
+                    Array.from({ length: 100 }, (_, index) => [`field-${index}`, 'z'.repeat(2_000)])
+                ),
+            },
+        });
+        const h = await connect(testDeps({ api }));
+        try {
+            const result = await h.client.callTool({
+                name: 'steel_scrape',
+                arguments: { url: 'https://example.com', max_tokens: 100 },
+            });
+            expect(textOf(result).length).toBeLessThan(5_000);
+            const structured = result.structuredContent as { links?: unknown[]; metadata?: Record<string, unknown> };
+            expect(structured.links).toHaveLength(25);
+            expect(Object.keys(structured.metadata ?? {})).toHaveLength(25);
+        } finally {
+            await h.close();
+        }
+    });
+
     it('reports a Steel failure as a tool error with actionable prose', async () => {
         const failing = new FakeSteelApi({
             scrape: async () => {
@@ -345,6 +386,18 @@ describe('steel_screenshot and steel_pdf', () => {
         const content = (result as { content: Array<{ type: string; uri?: string }> }).content;
         expect(content.some(block => block.type === 'resource')).toBe(false);
         expect(content.find(block => block.type === 'resource_link')?.uri).toMatch(/\.pdf$/);
+    });
+
+    it('forwards proxy selection for stateless screenshots and PDFs', async () => {
+        await harness.client.callTool({
+            name: 'steel_screenshot',
+            arguments: { url: 'https://example.com', use_proxy: true, inline: false },
+        });
+        await harness.client.callTool({
+            name: 'steel_pdf',
+            arguments: { url: 'https://example.com', use_proxy: true },
+        });
+        expect(harness.deps.api.artifacts.slice(-2)).toMatchObject([{ useProxy: true }, { useProxy: true }]);
     });
 
     it('can opt out without fetching the attachment', async () => {
@@ -502,7 +555,7 @@ describe('steel_screenshot and steel_pdf', () => {
                 arguments: { session_id: handle, inline: false },
             });
             expect(isError(result)).toBe(true);
-            expect(textOf(result)).toMatch(/no hosted download link/i);
+            expect(textOf(result)).toMatch(/inline=false.*URL/i);
             expect(touched).toEqual([]);
         } finally {
             await h.close();
@@ -534,16 +587,147 @@ describe('steel_screenshot and steel_pdf', () => {
         const { tools } = await harness.client.listTools();
         const screenshot = tools.find(tool => tool.name === 'steel_screenshot');
         expect(screenshot?.description).toMatch(/steel_snapshot/);
-        expect(screenshot?.description).toMatch(/cannot .*act|do not act|not for acting/i);
+        expect(screenshot?.description).toMatch(/not action targets/i);
     });
 });
 
 describe('steel_session_create', () => {
+    it('describes every setup input on the wire', async () => {
+        const { tools } = await harness.client.listTools();
+        for (const name of ['steel_session_create', 'steel_session_options']) {
+            const tool = tools.find(candidate => candidate.name === name);
+            const properties = (tool?.inputSchema as { properties?: Record<string, { description?: string }> })
+                ?.properties;
+            expect(
+                Object.values(properties ?? {}).every(property => Boolean(property.description)),
+                name
+            ).toBe(true);
+        }
+    });
+    it('consumes a signed account plan and revalidates its exact-origin namespace', async () => {
+        const api = new FakeSteelApi({
+            profiles: [
+                {
+                    id: 'e5bee5de-a7ca-4225-8d69-2ac76ed6e8b7',
+                    status: 'READY',
+                    createdAt: '2026-01-01T00:00:00Z',
+                    updatedAt: '2026-01-02T00:00:00Z',
+                },
+            ],
+            credentials: [
+                {
+                    namespace: 'niko',
+                    origin: 'https://example.com',
+                    createdAt: '2026-01-01T00:00:00Z',
+                    updatedAt: '2026-01-02T00:00:00Z',
+                },
+            ],
+        });
+        const h = await connect(testDeps({ api }));
+        try {
+            const options = await h.client.callTool({
+                name: 'steel_session_options',
+                arguments: { url: 'https://example.com/path', goal: 'account', needs: ['mobile'] },
+            });
+            const planned = (
+                options as { structuredContent?: { create_template?: { configuration?: string; namespace?: string } } }
+            ).structuredContent?.create_template;
+            expect(planned?.configuration).toBeTruthy();
+            expect(planned?.namespace).toBe('niko');
+            const created = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { ...planned, profile_id: 'e5bee5de-a7ca-4225-8d69-2ac76ed6e8b7' },
+            });
+            expect(isError(created)).toBe(false);
+            expect(api.created[0]).toMatchObject({
+                namespace: 'niko',
+                credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
+                profileId: 'e5bee5de-a7ca-4225-8d69-2ac76ed6e8b7',
+                deviceConfig: { device: 'mobile' },
+            });
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('rejects direct conflicts and a namespace outside the signed origin before create', async () => {
+        const api = new FakeSteelApi({
+            credentials: [
+                {
+                    namespace: 'other',
+                    origin: 'https://elsewhere.test',
+                    createdAt: '2026-01-01T00:00:00Z',
+                    updatedAt: '2026-01-01T00:00:00Z',
+                },
+            ],
+        });
+        const h = await connect(testDeps({ api }));
+        try {
+            const options = await h.client.callTool({
+                name: 'steel_session_options',
+                arguments: { url: 'https://example.com', goal: 'interact', needs: ['location'], country: 'DE' },
+            });
+            const token = (options as { structuredContent?: { create_template?: { configuration?: string } } })
+                .structuredContent?.create_template?.configuration;
+            const conflict = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { configuration: token, use_proxy: true },
+            });
+            expect(isError(conflict)).toBe(true);
+            expect(api.created).toHaveLength(0);
+        } finally {
+            await h.close();
+        }
+    });
+
+    it('creates a persistent profile and fences two writers of the same existing profile', async () => {
+        const profile = {
+            id: 'e5bee5de-a7ca-4225-8d69-2ac76ed6e8b7',
+            status: 'READY' as const,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-02T00:00:00Z',
+        };
+        const api = new FakeSteelApi({ profiles: [profile] });
+        const h = await connect(testDeps({ api }));
+        try {
+            const options = await h.client.callTool({
+                name: 'steel_session_options',
+                arguments: { url: 'https://example.com', goal: 'account', needs: ['persist_profile'] },
+            });
+            const configuration = (options as { structuredContent?: { create_template?: { configuration?: string } } })
+                .structuredContent?.create_template?.configuration;
+            const first = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { configuration, profile_id: profile.id },
+            });
+            expect(first.structuredContent).toMatchObject({ profile_id: profile.id, persist_profile: true });
+            const second = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { configuration, profile_id: profile.id },
+            });
+            expect(isError(second)).toBe(true);
+            expect(textOf(second)).toMatch(/persistent writer/i);
+            expect(api.created).toHaveLength(1);
+            const handle = (first as { structuredContent?: { session_id?: string } }).structuredContent?.session_id;
+            const released = await h.client.callTool({
+                name: 'steel_session_release',
+                arguments: { session_id: handle },
+            });
+            expect(released.structuredContent).toMatchObject({ profile_id: profile.id, persist_profile: true });
+            const third = await h.client.callTool({
+                name: 'steel_session_create',
+                arguments: { configuration, profile_id: profile.id },
+            });
+            expect(isError(third)).toBe(false);
+        } finally {
+            await h.close();
+        }
+    });
     it('mints the session id itself and sets both timeouts on every create', async () => {
         await newSession();
         const created = harness.deps.api.created[0]!;
         expect(created.sessionId).toMatch(/^[0-9a-f-]{36}$/);
-        expect(created.inactivityTimeout).toBe(120_000);
+        expect(created.inactivityTimeout).toBe(600_000);
         expect(created.timeout).toBeGreaterThan(0);
     });
 
@@ -555,16 +739,9 @@ describe('steel_session_create', () => {
 
         expect(isError(result)).toBe(false);
         expect(harness.deps.api.created[0]!.deviceConfig).toEqual({ device: 'mobile' });
-
-        const create = (await harness.client.listTools()).tools.find(tool => tool.name === 'steel_session_create');
-        const properties = (
-            create?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined
-        )?.properties;
-        expect(properties?.device?.description).toMatch(/mobile.*fingerprint.*user agent.*touch/i);
-        expect(properties?.viewport?.description).toMatch(/desktop.*1280x720.*device=mobile/i);
     });
 
-    it('keeps the idle timeout strictly below the hard timeout, which is what makes it work', async () => {
+    it('omits a separate idle timeout when the hard timeout is shorter', async () => {
         // Steel ignores inactivityTimeout when it is greater than or equal to timeout, which would
         // silently disable the only teardown layer that survives this process dying.
         const api = new FakeSteelApi({ details: { maxSessionDuration: 60_000, concurrencyLimit: 10 } });
@@ -572,8 +749,8 @@ describe('steel_session_create', () => {
         try {
             await newSession(h);
             const created = api.created[0]!;
-            expect(created.inactivityTimeout).toBeDefined();
-            expect(created.inactivityTimeout!).toBeLessThan(created.timeout);
+            expect(created.timeout).toBe(60_000);
+            expect(created.inactivityTimeout).toBeUndefined();
         } finally {
             await h.close();
         }
@@ -612,7 +789,7 @@ describe('steel_session_create', () => {
     it('reports takeover, local-file and actual inactivity capabilities on creation', async () => {
         const result = await harness.client.callTool({ name: 'steel_session_create', arguments: {} });
         expect(result.structuredContent).toMatchObject({
-            inactivity_timeout_ms: 120_000,
+            inactivity_timeout_ms: 600_000,
             takeover: { inline_viewer: true, external_player: true, exclusive_control: true },
             files: { local_upload: 'inline_viewer', model_can_read_bytes: false },
         });
@@ -620,13 +797,33 @@ describe('steel_session_create', () => {
         expect(textOf(result)).toContain('cannot be extended');
     });
 
-    it('says a loaded profile is reused but not updated', async () => {
+    it('keeps profile and namespace arguments metadata-only', async () => {
         const { tools } = await harness.client.listTools();
         const create = tools.find(tool => tool.name === 'steel_session_create');
-        const schema = create?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined;
-        expect(schema?.properties?.profile_id?.description).toMatch(
-            /stored cookies.*reused.*does not write.*back to the profile/i
-        );
+        const properties = (create?.inputSchema as { properties?: Record<string, { description?: string }> })
+            ?.properties;
+        expect(properties?.profile_id?.description).toMatch(/not secret/i);
+        expect(properties?.namespace?.description).toMatch(/not secret/i);
+    });
+
+    it('does not expose infrastructure region placement as a model choice', async () => {
+        const { tools } = await harness.client.listTools();
+        const create = tools.find(tool => tool.name === 'steel_session_create');
+        const schema = create?.inputSchema as { properties?: Record<string, unknown> } | undefined;
+
+        expect(schema?.properties).not.toHaveProperty('region');
+    });
+
+    it('activates a credential namespace with fixed safe injection options', async () => {
+        const result = await harness.client.callTool({
+            name: 'steel_session_create',
+            arguments: { namespace: 'work-account' },
+        });
+        expect(isError(result)).toBe(false);
+        expect(harness.deps.api.created.at(-1)).toMatchObject({
+            namespace: 'work-account',
+            credentials: { autoSubmit: true, blurFields: true, exactOrigin: true },
+        });
     });
 
     it('returns an opaque handle that is not the Steel session id', async () => {
@@ -640,7 +837,7 @@ describe('steel_session_create', () => {
         expect(textOf(result)).toContain('https://app.steel.dev/sessions/');
         const { tools } = await harness.client.listTools();
         const create = tools.find(tool => tool.name === 'steel_session_create');
-        expect(create?.description).toMatch(/steel_session_release/);
+        expect(create?.description).toMatch(/release/i);
         expect(create?.description).toMatch(/billed|charged|costs/i);
     });
 
@@ -680,7 +877,7 @@ describe('steel_session_release', () => {
         const { tools } = await harness.client.listTools();
         const release = tools.find(tool => tool.name === 'steel_session_release');
         expect(release?.description).toMatch(/current URL.*session-only page state.*gone/i);
-        expect(release?.description).toMatch(/loaded saved profile.*remains stored.*not updated/i);
+        expect(release?.description).toMatch(/profile.*saved only when persistence was requested/i);
     });
 
     it('captures the session context before releasing it', async () => {
@@ -721,24 +918,39 @@ describe('steel_session_release', () => {
 
 describe('stateful tools reject an unknown handle', () => {
     it('answers a handle this credential never created with a not-found error', async () => {
-        for (const name of ['steel_navigate', 'steel_snapshot', 'steel_find', 'steel_act', 'steel_wait_for']) {
+        const calls = [
+            { name: 'steel_navigate', arguments: { url: 'https://x.test' } },
+            { name: 'steel_snapshot', arguments: {} },
+            { name: 'steel_find', arguments: { text: 'x' } },
+            { name: 'steel_act', arguments: { action: 'click', target: '@e1' } },
+            { name: 'steel_wait_for', arguments: { text: 'x' } },
+        ];
+        for (const call of calls) {
             const result = await harness.client.callTool({
-                name,
-                arguments: {
-                    session_id: 'sess_someoneelse',
-                    url: 'https://x.test',
-                    action: 'click',
-                    target: '@e1',
-                    text: 'x',
-                },
+                name: call.name,
+                arguments: { session_id: 'sess_someoneelse', ...call.arguments },
             });
-            expect(isError(result), `${name} accepted an unknown handle`).toBe(true);
+            expect(isError(result), `${call.name} accepted an unknown handle`).toBe(true);
             expect(textOf(result)).toMatch(/no live browser session/i);
         }
     });
 });
 
 describe('steel_navigate', () => {
+    it('names steel_snapshot for cursor continuation and refuses cursor on navigate', async () => {
+        const handle = await newSession();
+        const first = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://example.com/', include_snapshot: true, max_tokens: 1 },
+        });
+        expect(textOf(first)).toMatch(/call steel_snapshot.*same session_id.*cursor/i);
+        const retry = await harness.client.callTool({
+            name: 'steel_navigate',
+            arguments: { session_id: handle, url: 'https://example.com/', cursor: 'wrong-tool' },
+        });
+        expect(isError(retry)).toBe(true);
+        expect(textOf(retry)).toMatch(/unrecognized.*cursor/i);
+    });
     it('reports the final URL and a change signal, with no snapshot by default', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({
@@ -848,6 +1060,18 @@ describe('steel_snapshot', () => {
 });
 
 describe('steel_find', () => {
+    it('requires a query and rejects unsafe regular expressions', async () => {
+        const handle = await newSession();
+        const empty = await harness.client.callTool({ name: 'steel_find', arguments: { session_id: handle } });
+        expect(isError(empty)).toBe(true);
+        expect(textOf(empty)).toMatch(/text.*regex.*role/i);
+        const unsafe = await harness.client.callTool({
+            name: 'steel_find',
+            arguments: { session_id: handle, regex: '(a+)+$' },
+        });
+        expect(isError(unsafe)).toBe(true);
+        expect(textOf(unsafe)).toMatch(/too long|simpler pattern/i);
+    });
     it('returns only the matching nodes, not the whole page', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({
@@ -871,6 +1095,12 @@ describe('steel_find', () => {
 });
 
 describe('steel_act', () => {
+    it('documents which actions do not need a target', async () => {
+        const tool = (await harness.client.listTools()).tools.find(entry => entry.name === 'steel_act');
+        const properties = (tool?.inputSchema as { properties?: Record<string, { description?: string }> })?.properties;
+        expect(properties?.target?.description).toMatch(/not needed.*scroll.*press.*go_back.*dismiss_overlays/i);
+    });
+
     it('clicks a ref and reports what changed', async () => {
         const handle = await newSession();
         await harness.client.callTool({ name: 'steel_snapshot', arguments: { session_id: handle } });
@@ -904,6 +1134,15 @@ describe('steel_act', () => {
 });
 
 describe('steel_wait_for', () => {
+    it('requires an explicit condition at the schema boundary', async () => {
+        const handle = await newSession();
+        const result = await harness.client.callTool({
+            name: 'steel_wait_for',
+            arguments: { session_id: handle },
+        });
+        expect(isError(result)).toBe(true);
+        expect(textOf(result)).toMatch(/text.*selector.*url/i);
+    });
     it('fails with a timeout that names the condition', async () => {
         const handle = await newSession();
         const result = await harness.client.callTool({
@@ -916,6 +1155,31 @@ describe('steel_wait_for', () => {
 });
 
 describe('steel_session_diagnostics', () => {
+    it("rediscovers only this principal's live handles without reading Steel logs", async () => {
+        const first = await newSession();
+        const second = await newSession();
+        const foreign = await harness.deps.registry.create({
+            principal: 'another-principal',
+            steelSessionId: 'foreign-steel-session',
+            expiresAt: Date.now() + 60_000,
+        });
+        const result = await harness.client.callTool({
+            name: 'steel_session_diagnostics',
+            arguments: { list_live: true },
+        });
+        expect(isError(result)).toBe(false);
+        expect(textOf(result)).toContain(first);
+        expect(textOf(result)).toContain(second);
+        expect(textOf(result)).not.toContain(foreign.handle);
+        expect(result.structuredContent).toMatchObject({
+            live_sessions: expect.arrayContaining([
+                expect.objectContaining({ session_id: first }),
+                expect.objectContaining({ session_id: second }),
+            ]),
+        });
+        expect(harness.deps.api.traceReads).toEqual([]);
+        expect(harness.deps.api.logReads).toEqual([]);
+    });
     it('advertises historical retrieval as read-only and never as a reason to create a session', async () => {
         const tool = (await harness.client.listTools()).tools.find(entry => entry.name === 'steel_session_diagnostics');
         expect(tool?.description).toMatch(/released|finished|historical/i);
@@ -1425,12 +1689,42 @@ describe('steel_session_diagnostics', () => {
 });
 
 describe('steel_batch', () => {
+    it('preflights every step before running an earlier mutation', async () => {
+        const deps = testDeps();
+        const h = await connect(deps);
+        const touched: string[] = [];
+        const realTouch = deps.registry.touch.bind(deps.registry);
+        deps.registry.touch = async candidate => {
+            touched.push(candidate);
+            return realTouch(candidate);
+        };
+        try {
+            const handle = await newSession(h);
+            touched.length = 0;
+            const result = await h.client.callTool({
+                name: 'steel_batch',
+                arguments: {
+                    session_id: handle,
+                    steps: [
+                        { tool: 'steel_navigate', arguments: { url: 'https://example.com/' } },
+                        { tool: 'steel_wait_for', arguments: { action: 'click', text: 'Later' } },
+                    ],
+                },
+            });
+            expect(isError(result)).toBe(true);
+            expect(textOf(result)).toMatch(/does not accept.*action/i);
+            expect(touched).toEqual([]);
+        } finally {
+            await h.close();
+        }
+    });
     it('limits batching to known reversible checkout steps before handoff boundaries', async () => {
         const { tools } = await harness.client.listTools();
         const batch = tools.find(tool => tool.name === 'steel_batch');
-        expect(batch?.description).toMatch(
-            /known, reversible.*checkout.*payment.*final confirmation.*steel_session_handoff/i
-        );
+        expect(batch?.description).toMatch(/known reversible.*later targets.*no fresh read/i);
+        expect(batch?.description).toMatch(/failure.*login\/challenge/i);
+        expect(batch?.description).toMatch(/hand off.*same session.*only unrun steps/i);
+        expect(batch?.description).toMatch(/payment.*final confirmation/i);
     });
 
     it('runs several steps in one call and returns one snapshot at the end', async () => {
@@ -1466,6 +1760,19 @@ describe('steel_batch', () => {
         // Rejected by the schema, before the handler runs, and the message lists every valid verb.
         expect(textOf(result), 'the caller is not told what the valid actions are').toMatch(/dismiss_overlays/);
         expect(textOf(result)).toMatch(/action/);
+    });
+
+    it('rejects a nested wait longer than the standalone wait maximum', async () => {
+        const handle = await newSession();
+        const result = await harness.client.callTool({
+            name: 'steel_batch',
+            arguments: {
+                session_id: handle,
+                steps: [{ tool: 'steel_wait_for', arguments: { text: 'Later', timeout_ms: 120_001 } }],
+            },
+        });
+        expect(isError(result)).toBe(true);
+        expect(textOf(result)).toMatch(/120000|120,000|less than or equal/i);
     });
 
     it('stops at the first failure and names the failing index', async () => {

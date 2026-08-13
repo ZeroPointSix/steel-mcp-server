@@ -10,7 +10,7 @@ through interactive sites by clicking, typing, and filling forms.
 Unlike v1's screenshot-and-numbered-box loop, v2 reads pages as markdown or accessibility trees,
 shows small screenshots through MCP image blocks without using pixels for interaction, and makes browser sessions explicit.
 
-> **Status:** `2.0.0-rc.2`. Run the server locally over stdio, or run the hosted endpoint
+> **Status:** `2.0.0-rc.4`. Run the server locally over stdio, or run the hosted endpoint
 > yourself — it is in the package and documented below. `mcp.steel.dev` is not live yet.
 
 <a href="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server"><img width="380" height="200" src="https://glama.ai/mcp/servers/steel-dev/steel-mcp-server/badge" alt="Steel MCP Server listing on Glama" /></a>
@@ -29,28 +29,57 @@ shows small screenshots through MCP image blocks without using pixels for intera
 
 ## What it exposes
 
-The default `browse` profile is fifteen tools:
+The default `browse` profile is sixteen tools:
 
 | Tool | What it does |
 |---|---|
-| `steel_scrape` | Read a page as markdown or HTML. Starts no browser session |
-| `steel_screenshot` | Capture a page; embed a bounded preview when possible and retain the attachment download link |
-| `steel_pdf` | Render a page to PDF and return a link |
+| `steel_scrape` | Read a budgeted page plus bounded links/metadata. Starts no browser session |
+| `steel_screenshot` | Capture a URL for a person or a live session for model-visible visual verification; URL captures support proxies |
+| `steel_pdf` | Render a page to PDF and return a link; supports proxies |
 | `steel_session_create` | Start a browser session you can interact with |
 | `steel_session_release` | Shut it down and stop the meter |
 | `steel_navigate` | Point a session at a URL |
 | `steel_snapshot` | Read the page as an accessibility tree with `@eN` references |
-| `steel_find` | Locate one element without reading the whole page |
+| `steel_find` | Locate elements by text, safe regex, or role without reading the whole page |
 | `steel_act` | Click, type, fill a form, select, hover, scroll, press a key, go back, dismiss overlays |
 | `steel_wait_for` | Wait for named text, a selector, or a URL |
-| `steel_session_diagnostics` | Read a live or finished session's timestamped activity without starting a browser |
+| `steel_session_diagnostics` | Read activity or rediscover this credential's live handles without starting a browser |
 | `steel_session_handoff` | Pause while you take exclusive control of the same browser, then return it to the agent |
 | `steel_session_replay` | On an explicit watch/replay request, return a finished session's safe dashboard link |
 | `steel_batch` | Run known reversible steps in one call; hand off before login, payment or final confirmation |
+| `steel_session_options` | Plan non-default setup and safely discover saved profile IDs or managed-login namespaces |
 | `steel_session_live_view` | Feeds the inline viewer its connection details. Hosts hide it from the model |
 
 Set `STEEL_PROFILE=scrape` to expose only the three stateless read tools. They never start a browser
-session. The default `browse` profile adds the twelve session tools above.
+session. The default `browse` profile adds the thirteen session tools above.
+
+### Saved identity and non-default sessions
+
+Call `steel_session_options` with an absolute target URL, a `read`, `interact`, or `account` goal,
+and only the needs the task explicitly requires. Plain reads still recommend `steel_scrape`.
+Non-default plans return a short-lived signed `configuration` for `steel_session_create`; the token
+is bound to this Steel credential and expires after ten minutes.
+
+```json
+{
+  "url": "https://example.com/account",
+  "goal": "account",
+  "needs": ["persist_profile", "location"],
+  "country": "DE"
+}
+```
+
+The account catalog exposes only profile UUID/status/timestamps and exact-origin credential
+namespace/timestamps. Stored values, cookies, fingerprints, proxy configuration, usernames,
+passwords, and TOTP secrets never enter model context. Select a `READY` profile by UUID; names are
+not guessed. Loading a profile is read-only unless `persist_profile` was explicitly planned. With
+persistence, Steel creates or updates the profile on release; it may be `UPLOADING` before it
+becomes `READY`. One existing profile cannot have two persistent writers through this MCP at once.
+Managed login uses the returned exact-origin namespace and may auto-submit a matching form.
+
+`STEEL_PROFILE=browse|scrape` selects this server's tool preset and is unrelated to saved browser
+profiles. Profile discovery, persistence, credentials, proxies, and CAPTCHA assistance are Steel
+Cloud features; self-hosted deployments return a named unsupported-capability result.
 
 ## Watching, and taking over
 
@@ -160,7 +189,7 @@ claude mcp add steel -e STEEL_LOCAL=true -- node "$PWD/dist/stdio.js"
 ```
 
 Self-hosted Steel runs one browser session at a time. It does not support Steel-managed proxies,
-browser profiles, regions, or CAPTCHA solving. The server returns a specific explanation if a tool
+browser profiles, managed credentials, or CAPTCHA solving. The server returns a specific explanation if a tool
 requests one of those cloud-only features.
 
 ## Configuration
@@ -172,11 +201,15 @@ requests one of those cloud-only features.
 | `STEEL_BASE_URL` | `https://api.steel.dev` | Steel REST base URL. A trailing `/v1` is fine either way |
 | `STEEL_PROFILE` | `browse` | `scrape` or `browse` |
 | `STEEL_SESSION_TIMEOUT_MS` | `900000` | Default immutable lifetime. A create request may choose another value up to 24 hours and the account maximum |
-| `STEEL_INACTIVITY_TIMEOUT_MS` | `120000` | Idle release. This is what frees a browser if this process dies |
+| `STEEL_INACTIVITY_TIMEOUT_MS` | `600000` | Idle release. Supports a normal handoff/continuation window but may retain an abandoned browser for about 10 minutes |
 | `STEEL_MAX_SESSIONS` | `10` | Concurrent sessions this server will hold |
 | `STEEL_CONNECT_URL` | `wss://connect.steel.dev` | CDP endpoint, derived from the base URL when self-hosted |
 
 Logs are structured JSON on stderr; stdout carries nothing but JSON-RPC.
+
+Session continuity is bounded by both inactivity and immutable `expires_at`. A visible viewer alone
+does not reserve a session. Explicit handoff suspends local idle reclamation only until hard expiry,
+and real human browser input resets Steel's inactivity clock. Release finished sessions promptly.
 
 ## Running the hosted endpoint
 
@@ -268,13 +301,14 @@ Reach for `steel_scrape` first — most questions about a page end there, and it
 session. Only create a session when you need to interact with the page.
 
 To act on a page, read it with `steel_snapshot`. If you already know what you need, use `steel_find`
-to locate that element without returning the whole page. Both tools assign `@eN` references to
+with at least one of `text`, `regex`, or `role`; unsafe regular expressions are rejected. Both tools assign `@eN` references to
 elements the server can target. Elements without a reference cannot be clicked.
 
 Actions do not return another full snapshot unless you ask for one. Instead, they report what
 changed. If an action says nothing changed, take a fresh snapshot instead of repeating it.
 `steel_session_diagnostics` accepts a live MCP `session_id`, a finished session UUID from the Steel
-dashboard, or no id to inspect the most recent released session. It never starts a browser. Direct
+dashboard, `list_live: true` to recover this credential's active handles, or no id to inspect the
+most recent released session. It never starts a browser. Direct
 clicks, scrolling and typing performed through the live viewer travel over CDP and may be absent
 from its agent-trace timeline; hidden counts refer only to routine browser network Request/Response logs.
 
@@ -317,7 +351,7 @@ balance on Launch; free credits do not count.
 **A `@eN` reference stopped working.** The error says why — the page navigated, the node was
 removed, or the element changed role or accessible name — and what to call to recover.
 
-**A session seems to have vanished.** Steel releases a session after two minutes with no activity,
+**A session seems to have vanished.** Steel releases a session after ten minutes with no activity,
 and at the plan's hard time limit. Create a new one only if you need to interact again. To read the
 old activity, call `steel_session_diagnostics` with its dashboard UUID, or omit the id for the latest
 released session.
@@ -331,7 +365,7 @@ one looks the same as a filled one.
 
 **"Concurrency limit reached" on `steel_session_create`.** Your Steel plan allows fewer simultaneous
 browsers than are open. Sessions you forgot to release count — `steel_session_release` frees one
-immediately, and Steel reclaims idle sessions after two minutes.
+immediately, and Steel reclaims idle sessions after ten minutes.
 
 **Tracing was requested but could not start.** The desktop bundle deliberately ships without the
 OpenTelemetry exporter stack. The server logs this once and serves normally; install

@@ -5,7 +5,7 @@
 **Supersedes:** the v1 Puppeteer/Web-Voyager server on `main` (`src/index.ts`, MCP SDK 1.0.1, last touched Feb 2025)
 **Evidence base:** `RESEARCH.md` in this directory — 7 research tracks, 4 adversarially fact-checked, 2026-07-27. Read it for the *why* behind any decision here.
 
-**Implementation checkpoint (2026-08-08):** stdio, the fifteen-tool core, real-browser E2E and
+**Implementation checkpoint (2026-08-13):** stdio, the sixteen-tool core, real-browser E2E and
 legacy/2026-07-28 conformance gates are passing. P2 has a web-standard `/mcp` boundary with
 request-scoped credentials, bearer-over-query precedence, credential redaction, and Host/Origin
 validation, over a hosted runtime that shares handles across requests, isolates REST/CDP clients by
@@ -179,7 +179,7 @@ when the tools do.
 
 ### Deliberately not shipping
 
-`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; use a `namespace` session param) · extension management · model-visible local paths or file bytes (the trusted viewer owns local file selection) · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · proxies/captcha/region/profiles as tools (they are session-creation parameters).
+`run_task(natural_language)` (violates the non-goal) · `steel_search` (**cloud has no `/v1/search`** — OSS-only, so it would break on cloud) · `steel_execute_js` in the hosted default (`full` profile only) · credential-management tools (routing secrets through model context defeats the feature; `steel_session_options` exposes only safe metadata and activates a namespace) · extension management · model-visible local paths or file bytes (the trusted viewer owns local file selection) · tab management (avoids per-target attach memory exhaustion) · **any catch-all `steel_request(method, path)`** — Anthropic's most-documented rejection reason · separate proxies/captcha/region/profile CRUD tools (advanced session setup stays in one deterministic planner).
 
 ## 8. Page representation and token economics
 

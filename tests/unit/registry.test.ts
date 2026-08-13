@@ -38,6 +38,19 @@ describe('principalFromCredential', () => {
     });
 });
 
+describe('profile writer reservations', () => {
+    it('fences concurrent writers and lets only the owner release the reservation', async () => {
+        const { registry } = newRegistry();
+        const until = Date.now() + 60_000;
+        await expect(registry.reserveProfileWriter(ORG_A, 'profile-1', 'owner-1', until)).resolves.toBe(true);
+        await expect(registry.reserveProfileWriter(ORG_A, 'profile-1', 'owner-2', until)).resolves.toBe(false);
+        await registry.releaseProfileWriter(ORG_A, 'profile-1', 'owner-2');
+        await expect(registry.reserveProfileWriter(ORG_A, 'profile-1', 'owner-2', until)).resolves.toBe(false);
+        await registry.releaseProfileWriter(ORG_A, 'profile-1', 'owner-1');
+        await expect(registry.reserveProfileWriter(ORG_A, 'profile-1', 'owner-2', until)).resolves.toBe(true);
+    });
+});
+
 describe('InMemoryHandleRegistry.create', () => {
     it('mints an opaque prefixed handle with at least 128 bits of entropy', async () => {
         const { registry } = newRegistry();
@@ -461,7 +474,40 @@ describe('InMemoryHandleRegistry.reap', () => {
         const b = await registry.create({ principal: ORG_A, steelSessionId: 's2', expiresAt: Date.now() + 60_000 });
         await registry.release(a.handle, ORG_A, 'explicit');
         await registry.release(b.handle, ORG_A, 'stream_close');
-        expect(registry.releaseCounts()).toMatchObject({ explicit: 1, stream_close: 1, reaper: 0 });
+        expect(registry.releaseCounts()).toMatchObject({ explicit: 1, stream_close: 1, idle: 0, hard_expiry: 0 });
+    });
+
+    it('attributes idle and hard expiry separately, with hard expiry winning', async () => {
+        vi.useFakeTimers();
+        try {
+            const registry = new InMemoryHandleRegistry({ releaseSteelSession: async () => {} });
+            await registry.create({ principal: ORG_A, steelSessionId: 'idle', expiresAt: Date.now() + 900_000 });
+            await registry.create({ principal: ORG_A, steelSessionId: 'hard', expiresAt: Date.now() + 100_000 });
+            vi.advanceTimersByTime(200_000);
+
+            expect(await registry.reap({ idleMs: 120_000 })).toBe(2);
+            expect(registry.releaseCounts()).toMatchObject({ idle: 1, hard_expiry: 1 });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps a successful release successful when its notification throws', async () => {
+        const registry = new InMemoryHandleRegistry({
+            releaseSteelSession: async () => {},
+            onReleased: () => {
+                throw new Error('telemetry unavailable');
+            },
+        });
+        const record = await registry.create({
+            principal: ORG_A,
+            steelSessionId: 's1',
+            expiresAt: Date.now() + 60_000,
+        });
+
+        await expect(registry.release(record.handle, ORG_A, 'explicit')).resolves.toBeTruthy();
+        expect(registry.releaseCounts().explicit).toBe(1);
+        expect(await registry.countLive(ORG_A)).toBe(0);
     });
 
     it('keeps releasing after one release fails, and reports the failure', async () => {
@@ -495,7 +541,7 @@ describe('InMemoryHandleRegistry.reap', () => {
 
         expect(await registry.reap({ idleMs: 1 })).toBe(1);
         expect(await registry.countLive(ORG_A)).toBe(0);
-        expect(registry.releaseCounts().reaper).toBe(1);
+        expect(registry.releaseCounts().hard_expiry).toBe(1);
     });
 });
 

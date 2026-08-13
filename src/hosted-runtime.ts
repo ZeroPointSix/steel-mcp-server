@@ -6,6 +6,7 @@ import { CdpSessionPool, type ServerDeps, type SessionPool } from './core/contex
 import { createHandoffCodec, type HandoffState } from './core/mrtr.js';
 import { InMemoryRateLimiter, type RateLimiter } from './core/rate-limit.js';
 import { connectRedis, type RedisConnection } from './core/redis.js';
+import type { ReleasePath } from './core/registry.js';
 import {
     type HandleRegistry,
     InMemoryHandleRegistry,
@@ -13,6 +14,7 @@ import {
     type RegistryDeps,
 } from './core/registry.js';
 import { RedisHandleRegistry } from './core/registry-redis.js';
+import { createSessionPlanCodec, type SessionPlanState } from './core/session-plan.js';
 import { SteelRestClient } from './core/steel/rest.js';
 import type { SteelApi } from './core/steel/types.js';
 import type { RequestDepsInput } from './http.js';
@@ -27,6 +29,7 @@ export interface HostedRuntimeOptions {
     /** Swap this for a shared-store limiter when replicas must share one budget per principal. */
     createLimiter?: ((now: () => Date) => RateLimiter) | undefined;
     onReapError?: ((error: unknown) => void) | undefined;
+    onReleased?: ((cause: ReleasePath, backend: 'memory' | 'redis') => void) | undefined;
     now?: (() => Date) | undefined;
 }
 
@@ -43,6 +46,7 @@ interface TenantClients {
      * works while one replica serves the whole flow; a multi-replica deployment must configure one.
      */
     handoffState: RequestStateCodec<HandoffState>;
+    sessionPlanState: RequestStateCodec<SessionPlanState>;
 }
 
 /**
@@ -74,6 +78,7 @@ export class HostedRuntime {
         const registryDeps: RegistryDeps = {
             releaseSteelSession: (steelSessionId, principal) => this.releaseOwnedSession(steelSessionId, principal),
             onReapError: options.onReapError,
+            onReleased: cause => options.onReleased?.(cause, this.registry.registryBackend),
         };
         this.registry = (options.createRegistry ?? (deps => new InMemoryHandleRegistry(deps)))(registryDeps);
         this.limiter = (options.createLimiter ?? (now => new InMemoryRateLimiter({ now })))(this.now);
@@ -107,6 +112,7 @@ export class HostedRuntime {
             pool,
             settleMultiplier,
             handoffState: createHandoffCodec(config.requestStateSecret),
+            sessionPlanState: createSessionPlanCodec(config.requestStateSecret, input.principal),
         };
         this.tenants.set(input.principal, tenant);
         return tenant;
@@ -121,6 +127,7 @@ export class HostedRuntime {
             registry: this.registry,
             limiter: this.limiter,
             handoffState: tenant.handoffState,
+            sessionPlanState: tenant.sessionPlanState,
             principal: input.principal,
             settleMultiplier: tenant.settleMultiplier,
             now: this.now,
@@ -148,7 +155,7 @@ export class HostedRuntime {
     }
 
     async close(): Promise<void> {
-        await this.registry.reap({ idleMs: 0 });
+        if (this.registry.shutdownScope === 'process_owned') await this.registry.releaseAll('stream_close');
         await Promise.all([...this.tenants.values()].map(tenant => tenant.pool.closeAll()));
         this.tenants.clear();
     }

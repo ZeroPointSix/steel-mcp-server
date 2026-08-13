@@ -15,6 +15,7 @@ const routes = {
             `<h1>Fixture index</h1>
              <ul>
                <li><a href="/cookie-banner">Cookie banner</a></li>
+               <li><a href="/centre-covered-button">Centre-covered button</a></li>
                <li><a href="/modal">Mid-task modal</a></li>
                <li><a href="/infinite-scroll">Infinite scroll</a></li>
                <li><a href="/login">Login wall</a></li>
@@ -48,6 +49,22 @@ const routes = {
                });
                document.getElementById('primary').addEventListener('click', () => {
                  document.getElementById('outcome').textContent = 'Added to basket';
+               });
+             </script>`
+        ),
+    }),
+
+    '/centre-covered-button': () => ({
+        body: page(
+            'Centre-covered button',
+            `<style>
+               #target { position:absolute; left:100px; top:120px; width:240px; height:80px; }
+               #cover { position:absolute; left:205px; top:145px; width:30px; height:30px; z-index:10; background:#333; }
+             </style>
+             <button id="target">Add sensible item</button><div id="cover"></div><p id="outcome"></p>
+             <script>
+               document.getElementById('target').addEventListener('click', () => {
+                 document.getElementById('outcome').textContent = 'Item added safely';
                });
              </script>`
         ),

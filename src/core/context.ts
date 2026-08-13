@@ -10,6 +10,7 @@ import type { HandoffState } from './mrtr.js';
 import { BrowserPage } from './page.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { HandleRegistry } from './registry.js';
+import type { SessionPlanState } from './session-plan.js';
 import { resolveSettleBudgets } from './settle.js';
 import { CdpConnection, type CdpSession } from './steel/cdp.js';
 import type { SteelApi } from './steel/types.js';
@@ -45,6 +46,8 @@ export interface ServerDeps {
      * has to hold the same key; a per-instance codec would reject its own flow's second round.
      */
     handoffState: RequestStateCodec<HandoffState>;
+    /** Signs planner settings for this principal; verified manually by session creation. */
+    sessionPlanState: RequestStateCodec<SessionPlanState>;
     /** The principal for this request's own credential; handles are re-authorised against it. */
     principal: string;
     /**
@@ -62,6 +65,8 @@ export interface ServerDeps {
     now(): Date;
     /** Downloads hosted screenshots so tool results can embed them for chat UIs. */
     artifactFetch?: typeof globalThis.fetch | undefined;
+    /** Test seam for the one managed-credential injection grace; production uses an abort-aware 2s wait. */
+    credentialGrace?: ((signal?: AbortSignal) => Promise<void>) | undefined;
     /** Overridable so tests get deterministic Steel session ids. */
     newSessionId?: (() => string) | undefined;
     /**

@@ -194,6 +194,7 @@ describe('what a default install pays for', () => {
         expect(Object.keys(manifest.dependencies).sort()).toEqual([
             '@modelcontextprotocol/server',
             '@opentelemetry/api',
+            'safe-regex2',
             'ws',
             'zod',
         ]);
@@ -406,7 +407,13 @@ describe('the desktop bundle dependency surface', () => {
     });
 
     it('reaches only packages the bundle is built to carry', () => {
-        expect([...required].sort()).toEqual(['@modelcontextprotocol/server', '@opentelemetry/api', 'ws', 'zod']);
+        expect([...required].sort()).toEqual([
+            '@modelcontextprotocol/server',
+            '@opentelemetry/api',
+            'safe-regex2',
+            'ws',
+            'zod',
+        ]);
     });
 
     it('declares every package the entrypoint reaches, so the pruned install resolves', () => {

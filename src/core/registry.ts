@@ -4,8 +4,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { MitigationState } from './errors.js';
 import { SteelToolError } from './errors.js';
 
-/** How a session came to be released. The Steel-backstop count is the leak metric. */
-export type ReleasePath = 'explicit' | 'stream_close' | 'reaper';
+/** Why this registry successfully finalized a browser session. */
+export type ReleasePath = 'explicit' | 'stream_close' | 'idle' | 'hard_expiry';
 
 /** Exclusive, short-lived authority for a person to drive the remote browser. */
 export interface HumanControlLease {
@@ -75,6 +75,8 @@ export interface ReapOptions {
 
 /** The storage-shaped contract; the in-memory backend is the stdio and self-host implementation. */
 export interface HandleRegistry {
+    readonly shutdownScope: 'process_owned' | 'shared';
+    readonly registryBackend: 'memory' | 'redis';
     create(input: CreateHandleInput): Promise<HandleRecord>;
     resolve(handle: string, principal: string): Promise<HandleRecord>;
     touch(handle: string): Promise<void>;
@@ -92,10 +94,19 @@ export interface HandleRegistry {
      * number and talk one extra person into the browser between them.
      */
     recordHandoff(handle: string): Promise<number>;
+    reserveProfileWriter(
+        principal: string,
+        profileId: string,
+        ownerSteelSessionId: string,
+        untilMs: number
+    ): Promise<boolean>;
+    releaseProfileWriter(principal: string, profileId: string, ownerSteelSessionId: string): Promise<void>;
     release(handle: string, principal: string, path: ReleasePath): Promise<HandleRecord | null>;
     list(principal: string): Promise<HandleRecord[]>;
     countLive(principal: string): Promise<number>;
     reap(options: ReapOptions): Promise<number>;
+    /** Releases every process-owned record during transport/runtime shutdown. Shared stores no-op. */
+    releaseAll(path: 'stream_close'): Promise<number>;
     releaseCounts(): Record<ReleasePath, number>;
 }
 
@@ -109,6 +120,8 @@ export interface RegistryDeps {
     releaseSteelSession(steelSessionId: string, principal: string): Promise<void>;
     /** Reaper failures are reported here rather than thrown, so one bad session cannot stall a sweep. */
     onReapError?: ((error: unknown) => void) | undefined;
+    /** Best-effort, low-cardinality notification after irreversible successful finalization. */
+    onReleased?: ((cause: ReleasePath) => void) | undefined;
 }
 
 /**
@@ -172,10 +185,22 @@ export function sessionReleasingError(): SteelToolError {
 
 /** In-memory handle registry. One process, one replica; the hosted deployment swaps the backend. */
 export class InMemoryHandleRegistry implements HandleRegistry {
+    readonly shutdownScope = 'process_owned' as const;
+    readonly registryBackend = 'memory' as const;
     private readonly records = new Map<string, HandleRecord>();
-    private readonly counts: Record<ReleasePath, number> = { explicit: 0, stream_close: 0, reaper: 0 };
+    private readonly profileWriters = new Map<string, { owner: string; until: number }>();
+    private readonly counts: Record<ReleasePath, number> = { explicit: 0, stream_close: 0, idle: 0, hard_expiry: 0 };
 
     constructor(private readonly deps: RegistryDeps) {}
+
+    private finalized(cause: ReleasePath): void {
+        this.counts[cause] += 1;
+        try {
+            this.deps.onReleased?.(cause);
+        } catch {
+            // Observability is best-effort after an irreversible successful release.
+        }
+    }
 
     async create(input: CreateHandleInput): Promise<HandleRecord> {
         const now = Date.now();
@@ -273,6 +298,19 @@ export class InMemoryHandleRegistry implements HandleRegistry {
         return record.handoffRounds;
     }
 
+    async reserveProfileWriter(principal: string, profileId: string, owner: string, until: number): Promise<boolean> {
+        const key = `${principal}\0${profileId}`;
+        const current = this.profileWriters.get(key);
+        if (current && current.until > Date.now() && current.owner !== owner) return false;
+        this.profileWriters.set(key, { owner, until });
+        return true;
+    }
+
+    async releaseProfileWriter(principal: string, profileId: string, owner: string): Promise<void> {
+        const key = `${principal}\0${profileId}`;
+        if (this.profileWriters.get(key)?.owner === owner) this.profileWriters.delete(key);
+    }
+
     /**
      * Releases the Steel session, then forgets the handle.
      *
@@ -298,7 +336,10 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             throw error;
         }
         this.records.delete(handle);
-        this.counts[path] += 1;
+        if (record.mitigation.persistProfile && record.mitigation.profileId) {
+            await this.releaseProfileWriter(record.principal, record.mitigation.profileId, record.steelSessionId);
+        }
+        this.finalized(path);
         return record;
     }
 
@@ -325,7 +366,14 @@ export class InMemoryHandleRegistry implements HandleRegistry {
                 record.releasing = true;
                 await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
                 this.records.delete(record.handle);
-                this.counts.reaper += 1;
+                if (record.mitigation.persistProfile && record.mitigation.profileId) {
+                    await this.releaseProfileWriter(
+                        record.principal,
+                        record.mitigation.profileId,
+                        record.steelSessionId
+                    );
+                }
+                this.finalized(expired ? 'hard_expiry' : 'idle');
                 reaped += 1;
             } catch (error) {
                 record.releasing = false;
@@ -335,6 +383,14 @@ export class InMemoryHandleRegistry implements HandleRegistry {
             }
         }
         return reaped;
+    }
+
+    async releaseAll(path: 'stream_close'): Promise<number> {
+        let released = 0;
+        for (const record of [...this.records.values()]) {
+            if (await this.release(record.handle, record.principal, path)) released += 1;
+        }
+        return released;
     }
 
     releaseCounts(): Record<ReleasePath, number> {

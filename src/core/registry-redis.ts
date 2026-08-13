@@ -102,15 +102,26 @@ function readTimestamp(raw: string | null): number | undefined {
 
 /** Handle registry over a shared Redis, so any replica can serve a handle any other replica minted. */
 export class RedisHandleRegistry implements HandleRegistry {
+    readonly shutdownScope = 'shared' as const;
+    readonly registryBackend = 'redis' as const;
     private readonly commands: RedisCommands;
     private readonly prefix: string;
     private readonly now: () => Date;
-    private readonly counts: Record<ReleasePath, number> = { explicit: 0, stream_close: 0, reaper: 0 };
+    private readonly counts: Record<ReleasePath, number> = { explicit: 0, stream_close: 0, idle: 0, hard_expiry: 0 };
 
     constructor(private readonly deps: RedisRegistryDeps) {
         this.commands = deps.commands;
         this.prefix = deps.keyPrefix ?? DEFAULT_KEY_PREFIX;
         this.now = deps.now ?? (() => new Date());
+    }
+
+    private finalized(cause: ReleasePath): void {
+        this.counts[cause] += 1;
+        try {
+            this.deps.onReleased?.(cause);
+        } catch {
+            // Observability is best-effort after the shared record has been removed.
+        }
     }
 
     private recordKey(handle: string): string {
@@ -138,6 +149,10 @@ export class RedisHandleRegistry implements HandleRegistry {
 
     private controlKey(handle: string): string {
         return `${this.recordKey(handle)}:control`;
+    }
+
+    private profileWriterKey(principal: string, profileId: string): string {
+        return `${this.prefix}:profile-writer:${principal}:${profileId}`;
     }
 
     /** Index of one principal's handles, so a count or a list never scans another tenant's records. */
@@ -364,6 +379,18 @@ export class RedisHandleRegistry implements HandleRegistry {
         return rounds;
     }
 
+    async reserveProfileWriter(principal: string, profileId: string, owner: string, until: number): Promise<boolean> {
+        return this.commands.setIfAbsent(
+            this.profileWriterKey(principal, profileId),
+            owner,
+            Math.max(1, until - this.now().getTime())
+        );
+    }
+
+    async releaseProfileWriter(principal: string, profileId: string, owner: string): Promise<void> {
+        await this.commands.compareDelete(this.profileWriterKey(principal, profileId), owner);
+    }
+
     /**
      * Releases the Steel session, then forgets the handle.
      *
@@ -393,7 +420,12 @@ export class RedisHandleRegistry implements HandleRegistry {
             await this.commands.compareDelete(this.controlKey(handle), marker);
             throw error;
         }
-        if (await this.forget(principal, handle)) this.counts[path] += 1;
+        if (await this.forget(principal, handle)) {
+            if (record.mitigation.persistProfile && record.mitigation.profileId) {
+                await this.releaseProfileWriter(record.principal, record.mitigation.profileId, record.steelSessionId);
+            }
+            this.finalized(path);
+        }
         return record;
     }
 
@@ -452,7 +484,14 @@ export class RedisHandleRegistry implements HandleRegistry {
                 if (!(await this.commands.setIfAbsent(this.controlKey(handle), marker, 120_000))) continue;
                 await this.deps.releaseSteelSession(record.steelSessionId, record.principal);
                 if (await this.forget(record.principal, handle)) {
-                    this.counts.reaper += 1;
+                    if (record.mitigation.persistProfile && record.mitigation.profileId) {
+                        await this.releaseProfileWriter(
+                            record.principal,
+                            record.mitigation.profileId,
+                            record.steelSessionId
+                        );
+                    }
+                    this.finalized(expired ? 'hard_expiry' : 'idle');
                     reaped += 1;
                 }
             } catch (error) {
@@ -463,6 +502,11 @@ export class RedisHandleRegistry implements HandleRegistry {
             }
         }
         return reaped;
+    }
+
+    async releaseAll(_path: 'stream_close'): Promise<number> {
+        // One hosted replica does not own deployment-wide records in the shared store.
+        return 0;
     }
 
     /** This replica's own counts. The leak metric is their sum across the fleet. */

@@ -93,6 +93,27 @@ describe('tool-call spans', () => {
     });
 });
 
+describe('session-release spans', () => {
+    it('records one allow-listed lifecycle cause and no session identity', async () => {
+        const created = await harness.client.callTool({ name: 'steel_session_create', arguments: {} });
+        const sessionId = (created as { structuredContent?: { session_id?: string } }).structuredContent?.session_id;
+        harness.tracing.reset();
+
+        await harness.client.callTool({ name: 'steel_session_release', arguments: { session_id: sessionId } });
+
+        const release = harness.tracing.span('steel session released');
+        expect(release.kind).toBe(SpanKind.INTERNAL);
+        expect(release.attributes).toEqual({
+            'steel.session.release_cause': 'explicit',
+            'steel.deployment': 'cloud',
+            'steel.registry.backend': 'memory',
+        });
+        expect(JSON.stringify(release.attributes)).not.toMatch(
+            /handle|principal|profile|url|page|credential|token|cookie/i
+        );
+    });
+});
+
 describe('inbound trace context', () => {
     it('parents the tool span on the traceparent the client put in _meta', async () => {
         await harness.client.callTool({

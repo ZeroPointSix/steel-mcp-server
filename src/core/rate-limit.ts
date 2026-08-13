@@ -56,6 +56,7 @@ export const TOOL_COSTS: Readonly<Record<string, number>> = {
     steel_pdf: 1,
     steel_session_handoff: 1,
     steel_session_replay: 1,
+    steel_session_options: 3,
     // App control heartbeats must not consume the model's browser budget.
     steel_session_live_view: 0,
     steel_session_release: 0,
@@ -82,8 +83,8 @@ export interface RateLimitPolicy {
  * 20 units/minute is Steel's per-org Browser Tools cap expressed in units, so a caller doing
  * nothing but `steel_scrape` paces exactly at that limit instead of collecting 429s. The 40-unit
  * bucket is two minutes of budget, which absorbs an agent's opening burst while still capping
- * sustained `steel_session_create` at two per minute — roughly the rate at which ten Launch
- * concurrency slots turn over at the five-minute session default.
+ * sustained `steel_session_create` at two per minute. Steel enforces the independent concurrency
+ * ceiling, while the MCP budget prevents a caller from hammering session creation up to that edge.
  */
 export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = { refillPerMinute: 20, burstCapacity: 40 };
 

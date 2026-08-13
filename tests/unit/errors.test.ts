@@ -415,9 +415,14 @@ describe('nextMitigationRung', () => {
         expect(nextMitigationRung({ profileId: 'p1' }).rung).toBe('pacing');
         expect(nextMitigationRung({ profileId: 'p1', paced: true }).rung).toBe('proxies');
         expect(nextMitigationRung({ profileId: 'p1', paced: true, useProxy: true }).rung).toBe('captcha');
-        expect(nextMitigationRung({ profileId: 'p1', paced: true, useProxy: true, solveCaptcha: true }).rung).toBe(
-            'stealth'
-        );
+        const stealth = nextMitigationRung({
+            profileId: 'p1',
+            paced: true,
+            useProxy: true,
+            solveCaptcha: true,
+        });
+        expect(stealth.rung).toBe('stealth');
+        expect(stealth.advice).not.toMatch(/\bregion\b/i);
     });
 });
 
@@ -444,11 +449,19 @@ describe('staleRefError', () => {
 });
 
 describe('clickBlockedError', () => {
-    it('names the covering element so the agent can dismiss it', () => {
+    it('names the blocker, bounds recovery and escalates a repeated failure', () => {
         const err = clickBlockedError('@e7', 'div#consent-banner');
         expect(err.code).toBe('click_blocked');
         expect(err.message).toContain('div#consent-banner');
         expect(err.message).toMatch(/dismiss_overlays/);
+        expect(err.message).toMatch(/steel_find|steel_snapshot/);
+        expect(err.message).toMatch(/retry once/i);
+        expect(err.message).toMatch(/session_handoff.*repeating the same loop/i);
+
+        const repeated = clickBlockedError('@e7', 'div#consent-banner', true);
+        expect(repeated.message).toMatch(/still blocked after a recovery attempt/i);
+        expect(repeated.message).toMatch(/do not retry/i);
+        expect(repeated.message).toMatch(/another candidate|session_handoff/i);
     });
 });
 
@@ -463,7 +476,6 @@ describe('selfHostUnsupportedError', () => {
     it('names each missing cloud capability instead of failing opaquely', () => {
         expect(selfHostUnsupportedError('use_proxy').message).toMatch(/Steel-managed prox/i);
         expect(selfHostUnsupportedError('solve_captcha').message).toMatch(/CAPTCHA solving/i);
-        expect(selfHostUnsupportedError('region').message).toMatch(/region/i);
         expect(selfHostUnsupportedError('profile_id').message).toMatch(/profile/i);
     });
 });

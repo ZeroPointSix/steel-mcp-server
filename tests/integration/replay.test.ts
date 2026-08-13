@@ -95,10 +95,10 @@ describe('steel_session_replay descriptor', () => {
         ).toBeUndefined();
 
         const schema = replay?.inputSchema as
-            | { properties?: Record<string, { format?: string }>; required?: string[]; additionalProperties?: boolean }
+            | { properties?: Record<string, { pattern?: string }>; required?: string[]; additionalProperties?: boolean }
             | undefined;
         expect(Object.keys(schema?.properties ?? {})).toEqual(['steel_session_id']);
-        expect(schema?.properties?.steel_session_id?.format).toBe('uuid');
+        expect(schema?.properties?.steel_session_id?.pattern).toMatch(/0-9a-f/);
         expect(schema?.required ?? []).toEqual([]);
         expect(schema?.additionalProperties).toBe(false);
     });

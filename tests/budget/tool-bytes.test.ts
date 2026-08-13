@@ -13,6 +13,7 @@ import { testDeps } from '../helpers/fakes.js';
 interface BudgetFile {
     instructionsBytes: number;
     profiles: Record<string, { tools: number; bytes: number }>;
+    toolBytes?: Record<string, number>;
 }
 
 const budgets = JSON.parse(
@@ -56,4 +57,26 @@ describe('server instructions budget', () => {
         // 2048 is where hosts truncate; the budget must never be raised past it.
         expect(budgets.instructionsBytes).toBeLessThanOrEqual(2048);
     });
+});
+
+describe('progressively disclosed tool budgets', () => {
+    for (const [name, cap] of Object.entries(budgets.toolBytes ?? {})) {
+        it(`${name} stays within ${cap} bytes`, async () => {
+            const server = createSteelMcpServer(testDeps());
+            const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+            const client = new Client({ name: 'budget', version: '1.0.0' });
+            await server.connect(serverTransport);
+            await client.connect(clientTransport);
+            try {
+                const tool = (await client.listTools()).tools.find(candidate => candidate.name === name);
+                expect(tool).toBeTruthy();
+                const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
+                process.stdout.write(`  ${name}: ${bytes} bytes (budget ${cap})\n`);
+                expect(bytes).toBeLessThanOrEqual(cap);
+            } finally {
+                await client.close();
+                await server.close();
+            }
+        });
+    }
 });

@@ -10,7 +10,7 @@ if (!stage) {
     exit(2);
 }
 
-const EXPECTED_TOOL_COUNT = 15;
+const EXPECTED_TOOL_COUNT = 16;
 const TIMEOUT_MS = 20_000;
 
 const child = spawn('node', [`${stage}/dist/stdio.js`], {
@@ -84,6 +84,10 @@ if (tools.length !== EXPECTED_TOOL_COUNT) {
 const replay = tools.find(tool => tool.name === 'steel_session_replay');
 if (!replay) fail('the staged server omitted steel_session_replay from the fifteen-tool contract');
 if (replay._meta?.ui?.resourceUri) fail('dashboard-only replay unexpectedly declares an app resource');
+if (!tools.some(tool => tool.name === 'steel_session_handoff')) fail('the staged server omitted session handoff');
+const create = tools.find(tool => tool.name === 'steel_session_create');
+if (!create) fail('the staged server omitted session create');
+if (create.inputSchema?.properties?.region !== undefined) fail('session create still exposes infrastructure region');
 
 const resources = await send(3, 'resources/list');
 if (resources.error) fail(`resources/list returned an error: ${JSON.stringify(resources.error)}`);
@@ -105,6 +109,21 @@ clearTimeout(timeout);
 child.kill();
 
 const version = initialized.result?.serverInfo?.version ?? 'unknown';
+const startup = stderrText
+    .split('\n')
+    .filter(Boolean)
+    .map(line => {
+        try {
+            return JSON.parse(line);
+        } catch {
+            return undefined;
+        }
+    })
+    .find(entry => entry?.message === 'steel-mcp listening on stdio');
+if (startup?.server_version !== version) fail('the startup log and initialize versions disagree');
+if (startup?.session_timeout_ms !== 900_000 || startup?.inactivity_timeout_ms !== 600_000) {
+    fail('the staged server does not use the expected 15-minute hard and 10-minute idle defaults');
+}
 processStderr.write(
-    `    staged server ${version} listed ${tools.length} tools and no retired replay app from its pruned bundle\n`
+    `    staged server ${version} listed ${tools.length} tools with 900000ms hard and 600000ms idle defaults\n`
 );

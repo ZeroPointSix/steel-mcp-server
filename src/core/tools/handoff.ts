@@ -56,11 +56,13 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
             title: 'Hand the browser to a person',
             description:
                 'Pause for a person to take exclusive control of this same live browser, then resume only after hand-back. Use for sensitive input, local files, review, or any manual step.',
-            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-            inputSchema: z.object({
-                session_id: sessionIdSchema,
-                reason: z.enum(reasons).describe('Why a person needs control.'),
-            }),
+            annotations: { destructiveHint: true, openWorldHint: true },
+            inputSchema: z
+                .object({
+                    session_id: sessionIdSchema,
+                    reason: z.enum(reasons).describe('Why a person needs control.'),
+                })
+                .strict(),
         },
         async (args, ctx) =>
             guard(deps, 'steel_session_handoff', ctx.mcpReq, async () => {
@@ -103,11 +105,13 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 const requestState = await deps.handoffState.mint(state, ctx);
                 const until = Math.min(deps.now().getTime() + HANDOFF_GRACE_MS, record.expiresAt);
                 const reason = `A person needs to ${REASON_TEXT[args.reason]}${origin ? ` on ${origin}` : ''}.`;
+                const deadline = ` Finish before ${new Date(record.expiresAt).toISOString()}; handoff cannot extend it.`;
 
                 if (supportsInlineViewer(serverCtx) && supportsElicitation(serverCtx)) {
                     const message =
                         `${reason} Use the existing live browser viewer and finish this step by hand. ` +
-                        'When finished, choose Hand back in the viewer, then accept the pending handoff prompt so the agent can re-read the page and continue.';
+                        'When finished, choose Hand back in the viewer, then accept the pending handoff prompt so the agent can re-read the page and continue.' +
+                        deadline;
                     await deps.registry.awaitInput(args.session_id, until);
                     return inputRequired({
                         requestState,
@@ -127,7 +131,8 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                     if (!url) throw noHandoffRoute();
                     const message =
                         `${reason} Open the linked live browser and finish this step by hand. When finished, ` +
-                        'choose Hand back in the viewer, then return here and accept the pending handoff prompt so the agent can re-read the page and continue.';
+                        'choose Hand back in the viewer, then return here and accept the pending handoff prompt so the agent can re-read the page and continue.' +
+                        deadline;
                     await deps.registry.awaitInput(args.session_id, until);
                     return inputRequired({
                         requestState,
@@ -138,7 +143,8 @@ export function registerSessionHandoff(host: ToolHost, deps: ServerDeps): void {
                 if (supportsInlineViewer(serverCtx)) {
                     const message =
                         `${reason} Use the existing live browser viewer and finish this step by hand. ` +
-                        'When finished, choose Hand back in the viewer, then tell the agent to continue.';
+                        'When finished, choose Hand back in the viewer, then tell the agent to continue.' +
+                        deadline;
                     await deps.registry.awaitInput(args.session_id, until);
                     return successResult(
                         {

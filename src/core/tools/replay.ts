@@ -4,11 +4,11 @@ import { z } from 'zod';
 import type { ServerDeps, ToolHost } from '../context.js';
 import { SteelToolError } from '../errors.js';
 import type { SteelSession } from '../steel/types.js';
-import { guard, successResult } from './shared.js';
+import { guard, successResult, uuidSchema } from './shared.js';
 
 const replayInputSchema = z
     .object({
-        steel_session_id: z.string().uuid().optional().describe('Finished Steel UUID; omit for latest released.'),
+        steel_session_id: uuidSchema.optional().describe('Finished Steel UUID; omit for latest released.'),
     })
     .strict();
 

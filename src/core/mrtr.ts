@@ -18,6 +18,7 @@ import {
     type InteractiveBlockKind,
     interactiveBlockError,
 } from './errors.js';
+import { HANDOFF_GRACE_MS } from './lifecycle.js';
 import type { BrowserPage } from './page.js';
 import type { HandleRecord } from './registry.js';
 import { UI_EXTENSION_NAME } from './server.js';
@@ -44,7 +45,7 @@ export const MAX_HANDOFF_ROUNDS = 3;
  * Matches the SDK's human-paced per-leg timeout, and the registry clamps it to the handle's own
  * hard expiry, so this can never keep a slot past the session's Steel-enforced lifetime.
  */
-export const HANDOFF_GRACE_MS = 600_000;
+export { HANDOFF_GRACE_MS } from './lifecycle.js';
 
 /**
  * The state a retried call carries.
@@ -238,6 +239,18 @@ async function pageEvidence(page: BrowserPage): Promise<HandoffBlockEvidence> {
     };
 }
 
+/** A structural block assessment that does not start or mutate a handoff round. */
+export interface InteractiveBlockInspection {
+    verdict: ReturnType<typeof assessInteractiveBlock>;
+    finalUrl: string;
+}
+
+/** Reuses the handoff classifier without eliciting, pinning, or exposing page evidence. */
+export async function inspectInteractiveBlock(page: BrowserPage): Promise<InteractiveBlockInspection> {
+    const evidence = await pageEvidence(page);
+    return { verdict: assessInteractiveBlock(evidence), finalUrl: evidence.finalUrl };
+}
+
 /**
  * Decides what a tool should do about a page only a person can get past.
  *
@@ -249,15 +262,38 @@ async function pageEvidence(page: BrowserPage): Promise<HandoffBlockEvidence> {
  */
 export async function resolveHumanHandoff(request: HandoffRequest): Promise<InputRequiredResult | undefined> {
     const { deps, ctx, handle, record, tool } = request;
-    const evidence = await pageEvidence(request.page);
-    const verdict = assessInteractiveBlock(evidence);
     const prior = ctx.mcpReq.requestState<HandoffState>();
+    let inspection = await inspectInteractiveBlock(request.page);
+    if (
+        inspection.verdict?.block.kind === 'login_wall' &&
+        record.mitigation.managedCredentials &&
+        prior === undefined
+    ) {
+        const wait =
+            deps.credentialGrace ??
+            (signal =>
+                new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        signal?.removeEventListener('abort', abort);
+                        resolve();
+                    }, 2_000);
+                    const abort = () => {
+                        clearTimeout(timer);
+                        reject(new Error('credential injection wait cancelled'));
+                    };
+                    if (signal?.aborted) abort();
+                    else signal?.addEventListener('abort', abort, { once: true });
+                }));
+        await wait(ctx.mcpReq.signal);
+        inspection = await inspectInteractiveBlock(request.page);
+    }
+    const { verdict } = inspection;
 
     if (!verdict) return undefined;
 
     // Annotated on the binding, not only the arrow, so control-flow analysis knows a call ends here.
     const fail: () => never = () => {
-        throw interactiveBlockError(verdict.block, evidence.finalUrl, record.mitigation);
+        throw interactiveBlockError(verdict.block, inspection.finalUrl, record.mitigation);
     };
 
     // Page text alone is never enough to open a drivable browser to a person; the page has to hold
@@ -292,9 +328,10 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     // result shape it never said it could handle.
     if (supportsInlineViewer(ctx) && supportsElicitation(ctx)) {
         const round = await deps.registry.recordHandoff(handle);
-        const origin = handoffOrigin(evidence.finalUrl);
+        const origin = handoffOrigin(inspection.finalUrl);
         const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
         const requestState = await deps.handoffState.mint(state, ctx);
+        const deadline = ` Finish before ${new Date(record.expiresAt).toISOString()}; handoff cannot extend it.`;
         // Pinned as late as the handler can: the inline path has no further gate, so a call that
         // reaches here does ask the person, and the slot survives the sweep while they work.
         await deps.registry.awaitInput(handle, Math.min(now + HANDOFF_GRACE_MS, record.expiresAt));
@@ -306,7 +343,8 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
                         `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Take control ` +
                         'in the live browser viewer above and finish this step by hand. When finished, choose Hand back ' +
                         'in the viewer, then accept the pending handoff prompt. I will re-read the page and carry on ' +
-                        'only if the way is actually clear.',
+                        'only if the way is actually clear.' +
+                        deadline,
                     // No fields: the person signals "done" with the elicitation's accept action, and
                     // the retried call re-reads the page itself, so no structured input is needed.
                     requestedSchema: { type: 'object', properties: {} },
@@ -321,9 +359,10 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
     if (url === undefined) fail();
 
     const round = await deps.registry.recordHandoff(handle);
-    const origin = handoffOrigin(evidence.finalUrl);
+    const origin = handoffOrigin(inspection.finalUrl);
     const state: HandoffState = { handle, tool, block: verdict.block.kind, origin: origin ?? '', round };
     const requestState = await deps.handoffState.mint(state, ctx);
+    const deadline = ` Finish before ${new Date(record.expiresAt).toISOString()}; handoff cannot extend it.`;
 
     // Set as late as the handler can: every reason to degrade to the error has been ruled out by
     // here, so a call that never asks anyone to do anything does not leave a slot pinned. The
@@ -339,7 +378,8 @@ export async function resolveHumanHandoff(request: HandoffRequest): Promise<Inpu
                     `${describeBlock(verdict.block)}${origin === undefined ? '' : ` on ${origin}`}. Open the live ` +
                     'browser and finish this step by hand. When finished, choose Hand back in the viewer, then return ' +
                     'here and accept the pending handoff prompt. The tool re-reads the page and carries on only if ' +
-                    'the way is actually clear.',
+                    'the way is actually clear.' +
+                    deadline,
                 url,
             }),
         },

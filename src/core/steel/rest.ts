@@ -4,6 +4,7 @@ import { type Tracer, trace } from '@opentelemetry/api';
 import type { SteelConfig } from '../config.js';
 import { mapSteelHttpError, type SteelErrorBody, type SteelOperation, SteelToolError } from '../errors.js';
 import { activeTraceparent, resolveTracer, withSteelCallSpan } from '../telemetry.js';
+import { stripInvisible } from '../untrusted.js';
 import type {
     AccountDetails,
     AgentTraceTimeline,
@@ -16,8 +17,58 @@ import type {
     SessionListResponse,
     SessionLogTimeline,
     SteelApi,
+    SteelCredentialSummary,
+    SteelProfileSummary,
     SteelSession,
 } from './types.js';
+
+function object(value: unknown): Record<string, unknown> | undefined {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+}
+
+function safeMetadata(value: string, max: number): string {
+    return stripInvisible(value).slice(0, max);
+}
+
+function profile(value: unknown): SteelProfileSummary | undefined {
+    const item = object(value);
+    if (!item) return undefined;
+    const { id, status, createdAt, updatedAt } = item;
+    if (
+        typeof id !== 'string' ||
+        (status !== 'READY' && status !== 'UPLOADING' && status !== 'FAILED') ||
+        typeof createdAt !== 'string' ||
+        typeof updatedAt !== 'string'
+    )
+        return undefined;
+    return {
+        id: safeMetadata(id, 64),
+        status,
+        createdAt: safeMetadata(createdAt, 40),
+        updatedAt: safeMetadata(updatedAt, 40),
+    };
+}
+
+function credential(value: unknown): SteelCredentialSummary | undefined {
+    const item = object(value);
+    if (!item) return undefined;
+    const { namespace, origin, createdAt, updatedAt } = item;
+    if (
+        typeof namespace !== 'string' ||
+        typeof origin !== 'string' ||
+        typeof createdAt !== 'string' ||
+        typeof updatedAt !== 'string'
+    )
+        return undefined;
+    return {
+        namespace: safeMetadata(namespace, 100),
+        origin: safeMetadata(origin, 2_048),
+        createdAt: safeMetadata(createdAt, 40),
+        updatedAt: safeMetadata(updatedAt, 40),
+    };
+}
 
 /** The subset of `fetch` this client uses, so a test can supply a plain function. */
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -247,6 +298,51 @@ export class SteelRestClient implements SteelApi {
             operation: 'account',
             signal,
         });
+    }
+
+    async listProfiles(signal?: AbortSignal): Promise<SteelProfileSummary[]> {
+        const raw = await this.requireJson<unknown>({ method: 'GET', path: '/profiles', operation: 'account', signal });
+        const items = object(raw)?.profiles;
+        if (!Array.isArray(items))
+            throw new SteelToolError('Steel returned an invalid profile catalog.', { code: 'steel_error' });
+        return items.map(profile).filter((item): item is SteelProfileSummary => item !== undefined);
+    }
+
+    async getProfile(profileId: string, signal?: AbortSignal): Promise<SteelProfileSummary> {
+        const raw = await this.requireJson<unknown>({
+            method: 'GET',
+            path: `/profiles/${encodeURIComponent(profileId)}`,
+            operation: 'account',
+            signal,
+        });
+        const projected = profile(raw);
+        if (!projected) throw new SteelToolError('Steel returned invalid profile metadata.', { code: 'steel_error' });
+        return projected;
+    }
+
+    async listCredentials(
+        request: { origin: string; namespace?: string },
+        signal?: AbortSignal
+    ): Promise<SteelCredentialSummary[]> {
+        const query = new URLSearchParams({ origin: request.origin });
+        if (request.namespace !== undefined) query.set('namespace', request.namespace);
+        const raw = await this.requireJson<unknown>({
+            method: 'GET',
+            path: `/credentials?${query}`,
+            operation: 'account',
+            signal,
+        });
+        const items = object(raw)?.credentials;
+        if (!Array.isArray(items))
+            throw new SteelToolError('Steel returned an invalid credential catalog.', { code: 'steel_error' });
+        return items
+            .map(credential)
+            .filter(
+                (item): item is SteelCredentialSummary =>
+                    item !== undefined &&
+                    item.origin === request.origin &&
+                    (request.namespace === undefined || item.namespace === request.namespace)
+            );
     }
 
     /**

@@ -62,10 +62,18 @@ export interface CreateSessionRequest {
      */
     inactivityTimeout?: number | undefined;
     region?: string | undefined;
-    useProxy?: boolean | undefined;
+    useProxy?: boolean | { geolocation: { country: string } } | undefined;
     solveCaptcha?: boolean | undefined;
+    stealthConfig?: { autoCaptchaSolving: false } | undefined;
+    optimizeBandwidth?: { blockImages: true; blockMedia: true; blockStylesheets: false } | undefined;
     profileId?: string | undefined;
+    persistProfile?: true | undefined;
     namespace?: string | undefined;
+    credentials?: {
+        autoSubmit: boolean;
+        blurFields: boolean;
+        exactOrigin: boolean;
+    };
     dimensions?: { width: number; height: number } | undefined;
     deviceConfig?: { device: 'desktop' | 'mobile' } | undefined;
     blockAds?: boolean | undefined;
@@ -91,7 +99,26 @@ export interface SteelSession {
     websocketUrl?: string;
     /** Viewport the session runs at, in CSS pixels. Absent on deployments that do not report it. */
     dimensions?: { width?: number; height?: number };
+    profileId?: string;
     [key: string]: unknown;
+}
+
+export type SteelProfileStatus = 'READY' | 'UPLOADING' | 'FAILED';
+
+/** Safe projection of a saved profile. Rich fingerprint and proxy fields never cross this boundary. */
+export interface SteelProfileSummary {
+    id: string;
+    status: SteelProfileStatus;
+    createdAt: string;
+    updatedAt: string;
+}
+
+/** Safe projection of credential metadata. Stored values are never returned by this API. */
+export interface SteelCredentialSummary {
+    namespace: string;
+    origin: string;
+    createdAt: string;
+    updatedAt: string;
 }
 
 /** The terminal and live states accepted by `GET /v1/sessions`. */
@@ -232,6 +259,12 @@ export interface SteelApi {
     getSession(sessionId: string, signal?: AbortSignal): Promise<SteelSession>;
     getSessionHls(sessionId: string, signal?: AbortSignal): Promise<string>;
     getDetails(signal?: AbortSignal): Promise<AccountDetails>;
+    listProfiles(signal?: AbortSignal): Promise<SteelProfileSummary[]>;
+    getProfile(profileId: string, signal?: AbortSignal): Promise<SteelProfileSummary>;
+    listCredentials(
+        request: { origin: string; namespace?: string },
+        signal?: AbortSignal
+    ): Promise<SteelCredentialSummary[]>;
     getAgentTraces(sessionId: string, signal?: AbortSignal): Promise<AgentTraceTimeline>;
     getSessionLogs(sessionId: string, signal?: AbortSignal): Promise<SessionLogTimeline>;
 }

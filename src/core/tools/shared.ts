@@ -19,8 +19,14 @@ export const maxTokensSchema = z
     .number()
     .int()
     .positive()
+    .max(100_000)
     .optional()
     .describe(`Cap on the text returned, in tokens. Defaults to ${DEFAULT_MAX_TOKENS}.`);
+
+/** Compact wire representation of a UUID while retaining strict runtime validation. */
+export const uuidSchema = z
+    .string()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
 export const cursorSchema = z
     .string()

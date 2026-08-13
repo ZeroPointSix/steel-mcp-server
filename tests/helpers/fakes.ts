@@ -6,6 +6,7 @@ import type { ServerDeps, SessionPool } from '../../src/core/context.js';
 import { createHandoffCodec } from '../../src/core/mrtr.js';
 import { BrowserPage } from '../../src/core/page.js';
 import { type HandleRegistry, InMemoryHandleRegistry, principalFromCredential } from '../../src/core/registry.js';
+import { createSessionPlanCodec } from '../../src/core/session-plan.js';
 import type {
     AccountDetails,
     AgentTraceTimeline,
@@ -18,8 +19,11 @@ import type {
     SessionListResponse,
     SessionLogTimeline,
     SteelApi,
+    SteelCredentialSummary,
+    SteelProfileSummary,
     SteelSession,
 } from '../../src/core/steel/types.js';
+import { recordSessionReleased, resolveTracer } from '../../src/core/telemetry.js';
 import { type FixturePage, fixtureSession } from './cdp-fixture.js';
 
 export interface FakeSteelApiOptions {
@@ -28,6 +32,8 @@ export interface FakeSteelApiOptions {
     traces?: AgentTraceTimeline;
     logs?: SessionLogTimeline;
     sessions?: SessionListResponse;
+    profiles?: SteelProfileSummary[];
+    credentials?: SteelCredentialSummary[];
     failTracesWith?: Error;
     failLogsWith?: Error;
     failCreateWith?: Error;
@@ -63,6 +69,7 @@ export class FakeSteelApi implements SteelApi {
     readonly hlsReads: string[] = [];
     /** Every historical-session listing request, in order. */
     readonly sessionLists: SessionListRequest[] = [];
+    readonly credentialLists: Array<{ origin: string; namespace?: string }> = [];
     /** Session ids sent to the two diagnostics endpoints, kept separately to catch wrong-session reads. */
     readonly traceReads: string[] = [];
     readonly logReads: string[] = [];
@@ -97,6 +104,8 @@ export class FakeSteelApi implements SteelApi {
             id: request.sessionId,
             status: 'live',
             createdAt: '2026-07-27T10:00:00.000Z',
+            profileId:
+                request.profileId ?? (request.persistProfile ? '11111111-1111-4111-8111-111111111111' : undefined),
             sessionViewerUrl: `https://app.steel.dev/sessions/${request.sessionId}`,
             // The self-contained player, which is what a person without a Steel login can open.
             debugUrl:
@@ -144,6 +153,25 @@ export class FakeSteelApi implements SteelApi {
 
     async getDetails(): Promise<AccountDetails> {
         return this.options.details ?? { maxSessionDuration: 900_000, concurrencyLimit: 10, plan: 'launch' };
+    }
+
+    async listProfiles(): Promise<SteelProfileSummary[]> {
+        return this.options.profiles ?? [];
+    }
+
+    async getProfile(profileId: string): Promise<SteelProfileSummary> {
+        const found = this.options.profiles?.find(item => item.id === profileId);
+        if (!found) throw new Error('Profile not found');
+        return found;
+    }
+
+    async listCredentials(request: { origin: string; namespace?: string }): Promise<SteelCredentialSummary[]> {
+        this.credentialLists.push(request);
+        return (this.options.credentials ?? []).filter(
+            item =>
+                item.origin === request.origin &&
+                (request.namespace === undefined || item.namespace === request.namespace)
+        );
     }
 
     async listSessions(request: SessionListRequest): Promise<SessionListResponse> {
@@ -452,15 +480,23 @@ export function testDeps(options: TestDepsOptions = {}): ServerDeps & {
                 await pool.close(id);
                 await api.releaseSession(id);
             },
+            onReleased: cause =>
+                recordSessionReleased(resolveTracer(options.tracer), {
+                    cause,
+                    deployment: config.deployment,
+                    registryBackend: 'memory',
+                }),
         });
 
+    const principal = principalFromCredential(TEST_API_KEY);
     return {
         config,
         api,
         pool,
         registry,
         handoffState: createHandoffCodec(config.requestStateSecret),
-        principal: principalFromCredential(TEST_API_KEY),
+        sessionPlanState: createSessionPlanCodec(config.requestStateSecret, principal),
+        principal,
         settleMultiplier: 1,
         // Real time: the registry checks handle expiry against the real clock.
         now: () => new Date(),

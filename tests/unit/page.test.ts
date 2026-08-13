@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for the page controller: click hit-testing that names the covering element,
 // ABOUTME: ref staleness on action, keyboard and form input, overlay dismissal and explicit waits.
 import { describe, expect, it } from 'vitest';
-import type { SteelToolError } from '../../src/core/errors.js';
+import { SteelToolError } from '../../src/core/errors.js';
 import { BrowserPage } from '../../src/core/page.js';
 import { resolveSettleBudgets } from '../../src/core/settle.js';
 import { type FixtureNode, type FixturePage, type FixtureSession, fixtureSession } from '../helpers/cdp-fixture.js';
@@ -154,6 +154,21 @@ describe('BrowserPage.navigate', () => {
     });
 });
 
+describe('BrowserPage.pageSummary', () => {
+    it('reads only the frame and title instead of capturing a full snapshot', async () => {
+        const fixture = fixtureSession(page([]));
+        fixture.stub('Runtime.evaluate', () => ({ result: { value: 'Current title' } }));
+        const browserPage = await openPage(fixture);
+
+        await expect(browserPage.pageSummary()).resolves.toEqual({
+            url: 'https://example.com/',
+            title: 'Current title',
+        });
+        expect(fixture.sent.some(call => call.method === 'Accessibility.getFullAXTree')).toBe(false);
+        expect(fixture.sent.some(call => call.method === 'DOMSnapshot.captureSnapshot')).toBe(false);
+    });
+});
+
 describe('BrowserPage.act — click', () => {
     it('scrolls the target into view and dispatches a press and a release at its centre', async () => {
         const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
@@ -167,6 +182,42 @@ describe('BrowserPage.act — click', () => {
         expect(mouse[0]?.params).toMatchObject({ x: 140, y: 220 });
     });
 
+    it('uses the interpolated centre of a transformed content quad', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        fixture.stub('DOM.getBoxModel', () => ({
+            model: { content: [100, 100, 200, 100, 260, 200, 100, 200] },
+        }));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        await browserPage.act({ action: 'click', target: '@e1' });
+
+        const mouse = fixture.sent.filter(call => call.method === 'Input.dispatchMouseEvent');
+        expect(mouse[0]?.params).toMatchObject({ x: 165, y: 150 });
+    });
+
+    it('uses a clear inset point when another element covers the centre', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        fixture.stub('DOM.getNodeForLocation', params => ({
+            backendNodeId: params.x === 140 && params.y === 220 ? 77 : 10,
+        }));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        await browserPage.act({ action: 'click', target: '@e1' });
+
+        const hitTests = fixture.sent.filter(call => call.method === 'DOM.getNodeForLocation');
+        expect(hitTests[0]?.params).toMatchObject({ x: 140, y: 220 });
+        const mouse = fixture.sent.filter(call => call.method === 'Input.dispatchMouseEvent');
+        expect(mouse.map(call => call.params.type)).toEqual(['mousePressed', 'mouseReleased']);
+        expect(mouse[0]?.params).not.toMatchObject({ x: 140, y: 220 });
+        expect(Number(mouse[0]?.params.x)).toBeGreaterThan(100);
+        expect(Number(mouse[0]?.params.x)).toBeLessThan(180);
+        expect(Number(mouse[0]?.params.y)).toBeGreaterThan(200);
+        expect(Number(mouse[0]?.params.y)).toBeLessThan(240);
+        expect(mouse[1]?.params).toMatchObject({ x: mouse[0]?.params.x, y: mouse[0]?.params.y });
+    });
+
     it('names the covering element when the click would not reach the target', async () => {
         const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
             hitBackendNodeId: 77,
@@ -178,6 +229,201 @@ describe('BrowserPage.act — click', () => {
         const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
         expect(error.code).toBe('click_blocked');
         expect(error.message).toContain('div#consent-banner');
+        const points = fixture.sent
+            .filter(call => call.method === 'DOM.getNodeForLocation')
+            .map(call => `${call.params.x}:${call.params.y}`);
+        expect(new Set(points).size).toBeGreaterThan(1);
+        expect(fixture.sent.filter(call => call.method === 'DOM.resolveNode')).toHaveLength(2);
+        expect(fixture.sent.filter(call => call.method === 'DOM.describeNode')).toHaveLength(1);
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+    });
+
+    it('escalates instead of encouraging a repeated blocked-click loop', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            hitBackendNodeId: 77,
+            contains: false,
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        await browserPage.snapshot({});
+
+        const repeated = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(repeated.code).toBe('click_blocked');
+        expect(repeated.message).toMatch(/still blocked after a recovery attempt/i);
+        expect(repeated.message).toMatch(/do not retry/i);
+        expect(repeated.message).toMatch(/another candidate|session_handoff/i);
+    });
+
+    it('bounds one recovery episode across related targets covered by the same node', async () => {
+        const buttons: FixtureNode[] = [
+            SAVE_BUTTON,
+            { ...SAVE_BUTTON, backendNodeId: 11, name: 'Save wrapper', bounds: [100, 250, 80, 40] },
+            { ...SAVE_BUTTON, backendNodeId: 12, name: 'Save label', bounds: [100, 300, 80, 40] },
+        ];
+        const fixture = actionFixture(fixtureSession(page(buttons)), { hitBackendNodeId: 77, contains: false });
+        const browserPage = await openPage(fixture);
+        const snapshot = await browserPage.snapshot({});
+        const refs = snapshot.nodes.filter(node => node.role === 'button').map(node => node.ref!);
+
+        const first = await catchAsync(browserPage.act({ action: 'click', target: refs[0] }));
+        const second = await catchAsync(browserPage.act({ action: 'click', target: refs[1] }));
+        const third = await catchAsync(browserPage.act({ action: 'click', target: refs[2] }));
+
+        expect(first.message).toMatch(/retry once/i);
+        expect(second.message).toMatch(/retry once/i);
+        expect(third.message).toMatch(/related controls.*multiple safe recovery attempts/i);
+        expect(third.message).toMatch(/stop trying click variants/i);
+        expect(third.details).toMatchObject({ reason: 'click_recovery_exhausted' });
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+    });
+
+    it('preserves recovery state when a reachable retry fails during pointer dispatch', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), { contains: false });
+        let hit = 77;
+        fixture.stub('DOM.getNodeForLocation', () => ({ backendNodeId: hit }));
+        let dispatchFails = false;
+        fixture.stub('Input.dispatchMouseEvent', () => {
+            if (dispatchFails) throw new Error('pointer dispatch failed');
+            return {};
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        hit = 10;
+        dispatchFails = true;
+        await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        hit = 77;
+        dispatchFails = false;
+
+        const repeated = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(repeated.message).toMatch(/still blocked after a recovery attempt/i);
+    });
+
+    it('does not carry repeated-failure escalation into a new document that reuses the node id', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])), {
+            hitBackendNodeId: 77,
+            contains: false,
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+        await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+
+        fixture.setPage(page([SAVE_BUTTON], { loaderId: 'loader-2' }));
+        const current = await browserPage.snapshot({});
+        const newRef = current.nodes.find(node => node.backendNodeId === SAVE_BUTTON.backendNodeId)?.ref;
+        expect(newRef).toBeTruthy();
+
+        const firstOnNewDocument = await catchAsync(browserPage.act({ action: 'click', target: newRef! }));
+        expect(firstOnNewDocument.message).toMatch(/retry once/i);
+        expect(firstOnNewDocument.message).not.toMatch(/still blocked after a recovery attempt|do not retry/i);
+    });
+
+    it('bounds retries when the same target remains hidden or collapsed', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        fixture.stub('DOM.getBoxModel', () => ({}));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const first = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(first.code).toBe('click_blocked');
+        expect(first.message).toMatch(/no layout box.*retry once/i);
+        await browserPage.snapshot({});
+
+        const repeated = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(repeated.message).toMatch(/still has no clickable layout/i);
+        expect(repeated.message).toMatch(/do not retry/i);
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+    });
+
+    it('re-reads layout once when hit-testing finds no node on a moving page', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        let boxReads = 0;
+        fixture.stub('DOM.getBoxModel', () => {
+            boxReads += 1;
+            return boxReads === 1
+                ? { model: { content: [100, 200, 180, 200, 180, 240, 100, 240] } }
+                : { model: { content: [300, 200, 380, 200, 380, 240, 300, 240] } };
+        });
+        fixture.stub('DOM.getNodeForLocation', params => {
+            if (Number(params.x) < 300) {
+                throw new SteelToolError('DOM.getNodeForLocation failed: No node found at the given location', {
+                    code: 'steel_error',
+                });
+            }
+            return { backendNodeId: 10 };
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        await browserPage.act({ action: 'click', target: '@e1' });
+
+        expect(boxReads).toBe(2);
+        const mouse = fixture.sent.filter(call => call.method === 'Input.dispatchMouseEvent');
+        expect(mouse[0]?.params).toMatchObject({ x: 340, y: 220 });
+    });
+
+    it('normalizes a persistent no-node hit test after one layout retry', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        let boxReads = 0;
+        fixture.stub('DOM.getBoxModel', () => {
+            boxReads += 1;
+            return { model: { content: [100, 200, 180, 200, 180, 240, 100, 240] } };
+        });
+        fixture.stub('DOM.getNodeForLocation', () => {
+            throw new SteelToolError('DOM.getNodeForLocation failed: No node found at the given location', {
+                code: 'steel_error',
+            });
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+
+        expect(error.code).toBe('click_blocked');
+        expect(error.message).toMatch(/steel_find|steel_snapshot/);
+        expect(error.message).not.toContain('DOM.getNodeForLocation');
+        expect(boxReads).toBe(2);
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+
+        await browserPage.snapshot({});
+        const repeated = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+        expect(repeated.message).toMatch(/still unstable after a fresh recovery/i);
+        expect(repeated.message).toMatch(/do not retry/i);
+        expect(boxReads).toBe(4);
+    });
+
+    it('never dispatches an unverified click when hit-testing returns no node id', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        fixture.stub('DOM.getNodeForLocation', () => ({}));
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+
+        expect(error.code).toBe('click_blocked');
+        expect(error.message).toMatch(/no page node/i);
+        expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
+    });
+
+    it('does not hide unrelated CDP failures or retry their layout', async () => {
+        const fixture = actionFixture(fixtureSession(page([SAVE_BUTTON])));
+        let boxReads = 0;
+        fixture.stub('DOM.getBoxModel', () => {
+            boxReads += 1;
+            return { model: { content: [100, 200, 180, 200, 180, 240, 100, 240] } };
+        });
+        fixture.stub('DOM.getNodeForLocation', () => {
+            throw new SteelToolError('DOM.getNodeForLocation failed: Target closed', { code: 'steel_error' });
+        });
+        const browserPage = await openPage(fixture);
+        await browserPage.snapshot({});
+
+        const error = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
+
+        expect(error.message).toContain('Target closed');
+        expect(boxReads).toBe(1);
         expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
     });
 

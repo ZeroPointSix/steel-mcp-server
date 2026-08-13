@@ -8,6 +8,7 @@ import {
     normalizeBaseUrl,
     resolveInactivityTimeout,
 } from '../../src/core/config.js';
+import { resolveRegistryIdleMs } from '../../src/core/lifecycle.js';
 
 describe('normalizeBaseUrl', () => {
     it('strips a trailing /v1 so the CLI-style and SDK-style values agree', () => {
@@ -31,6 +32,8 @@ describe('loadConfig', () => {
         expect(config.deployment).toBe('cloud');
         expect(config.profile).toBe('browse');
         expect(config.apiKey).toBe('ste-abc');
+        expect(config.inactivityTimeoutMs).toBe(600_000);
+        expect(resolveRegistryIdleMs(config.inactivityTimeoutMs)).toBe(630_000);
     });
 
     it('does not treat a lookalike domain as Steel Cloud', () => {
@@ -143,25 +146,17 @@ describe('loadConfig', () => {
 
 describe('resolveInactivityTimeout', () => {
     it('keeps the configured idle timeout when it is safely below the hard timeout', () => {
-        expect(resolveInactivityTimeout(120_000, 900_000)).toBe(120_000);
+        expect(resolveInactivityTimeout(600_000, 900_000)).toBe(600_000);
     });
 
-    it('never returns a value equal to the hard timeout, which Steel treats as inert', () => {
-        expect(resolveInactivityTimeout(120_000, 120_000)).not.toBe(120_000);
-        expect(resolveInactivityTimeout(120_000, 120_000)!).toBeLessThan(120_000);
-    });
-
-    it('stays strictly below a hard timeout shorter than the configured idle timeout', () => {
-        for (const timeout of [119_999, 60_000, 30_000, 5_000, 2_000]) {
-            const idle = resolveInactivityTimeout(120_000, timeout);
-            expect(idle, `no idle timeout produced for a ${timeout}ms session`).toBeDefined();
-            expect(idle!, `idle timeout ${idle} is inert against a ${timeout}ms hard timeout`).toBeLessThan(timeout);
-            expect(idle!).toBeGreaterThan(0);
+    it('relies on hard expiry when configured inactivity is not strictly shorter', () => {
+        for (const timeout of [600_000, 599_999, 60_000, 2_000]) {
+            expect(resolveInactivityTimeout(600_000, timeout)).toBeUndefined();
         }
     });
 
     it('omits the idle timeout rather than sending a uselessly small one', () => {
-        expect(resolveInactivityTimeout(120_000, 500)).toBeUndefined();
+        expect(resolveInactivityTimeout(600_000, 500)).toBeUndefined();
     });
 });
 
