@@ -50,15 +50,15 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
         'steel_session_create',
         {
             title: 'Start session',
-            description: 'Start billed browser; release promptly.',
+            description: 'Billed browser; profiles/credentials: use session_options; release promptly.',
             annotations: { destructiveHint: true, openWorldHint: true },
             inputSchema: z
                 .object({
-                    configuration: z.string().optional().describe('Signed options token.'),
+                    configuration: z.string().optional().describe('Signed setup token.'),
                     use_proxy: z.boolean().optional().describe('Proxy.'),
                     solve_captcha: z.boolean().optional().describe('Solve CAPTCHA.'),
-                    profile_id: z.string().optional().describe('READY UUID from options; not secret.'),
-                    namespace: z.string().optional().describe('Options credential; not secret.'),
+                    profile_id: z.string().optional().describe('READY UUID; not secret.'),
+                    namespace: z.string().optional().describe('Credential; not secret.'),
                     block_ads: z.boolean().optional().describe('Block ads.'),
                     device: z.enum(['desktop', 'mobile']).optional().describe('Device class.'),
                     viewport: z
@@ -67,14 +67,14 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             height: z.number().int().min(1).max(10_000),
                         })
                         .optional()
-                        .describe('CSS viewport.'),
+                        .describe('Viewport.'),
                     timeout_ms: z
                         .number()
                         .int()
                         .positive()
                         .max(86_400_000)
                         .optional()
-                        .describe('Immutable lifetime ms; may clamp.'),
+                        .describe('Lifetime ms; immutable.'),
                 })
                 .strict(),
             // A host that supports MCP Apps renders the live viewer beside this result. A host that
@@ -272,6 +272,11 @@ export function registerSessionCreate(host: ToolHost, deps: ServerDeps): void {
                             ...(args.namespace
                                 ? [
                                       'Managed credential injection was requested; this does not prove the site authenticated. Verify the page. If sign-in remains, do not guess another namespace: use steel_session_options before creating a replacement, or hand off this session. Never request or type a password.',
+                                  ]
+                                : []),
+                            ...(!args.profile_id && !args.namespace
+                                ? [
+                                      'No saved identity was requested, so this is a fresh guest browser. If the task needs a saved login, call steel_session_options before creating the session.',
                                   ]
                                 : []),
                         ],

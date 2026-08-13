@@ -4,13 +4,14 @@ import type { ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps, ToolHost } from '../context.js';
 import { SteelToolError } from '../errors.js';
-import { resolveHumanHandoff } from '../mrtr.js';
+import { type HandoffState, resolveHumanHandoff } from '../mrtr.js';
 import { ACTIONS, type ActRequest, type BrowserPage } from '../page.js';
 import { DEFAULT_MAX_TOKENS, paginate } from '../pagination.js';
 import type { HandleRecord } from '../registry.js';
 import type { SnapshotNode } from '../snapshot.js';
 import { renderSnapshot } from '../snapshot.js';
 import { fenceUntrusted } from '../untrusted.js';
+import { resolveManualHandoff } from './handoff.js';
 import {
     cursorSchema,
     maxTokensSchema,
@@ -290,13 +291,46 @@ export function registerAct(host: ToolHost, deps: ServerDeps): void {
         },
         async (args, ctx) =>
             withPage(deps, 'steel_act', ctx.mcpReq, args.session_id, async (page, record) => {
+                const prior = ctx.mcpReq.requestState<HandoffState>();
+                if (prior?.tool === 'steel_act' && prior.block === 'manual_step') {
+                    return resolveManualHandoff({
+                        host,
+                        deps,
+                        ctx: ctx as ServerContext,
+                        handle: args.session_id,
+                        record,
+                        reason: 'manual_step',
+                        tool: 'steel_act',
+                    });
+                }
                 const request: ActRequest = {
                     action: args.action,
                     target: args.target,
                     value: args.value,
                     fields: args.fields,
                 };
-                const outcome = await page.act(request);
+                let outcome: Awaited<ReturnType<BrowserPage['act']>>;
+                try {
+                    outcome = await page.act(request);
+                } catch (error) {
+                    if (
+                        error instanceof SteelToolError &&
+                        error.code === 'click_blocked' &&
+                        error.details?.handoff_required === true
+                    ) {
+                        return resolveManualHandoff({
+                            host,
+                            deps,
+                            ctx: ctx as ServerContext,
+                            handle: args.session_id,
+                            record,
+                            reason: 'manual_step',
+                            tool: 'steel_act',
+                            unavailableError: error,
+                        });
+                    }
+                    throw error;
+                }
                 const handedOff = await handoff(ctx, args.session_id, record, page);
                 if (handedOff) return handedOff;
 

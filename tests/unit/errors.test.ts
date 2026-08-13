@@ -462,6 +462,7 @@ describe('clickBlockedError', () => {
         expect(repeated.message).toMatch(/still blocked after a recovery attempt/i);
         expect(repeated.message).toMatch(/do not retry/i);
         expect(repeated.message).toMatch(/another candidate|session_handoff/i);
+        expect(repeated.details).toMatchObject({ handoff_required: true });
     });
 });
 

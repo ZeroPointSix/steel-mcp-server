@@ -62,10 +62,19 @@ describe.skipIf(!available)(`browsing the adversarial fixture site (${reason})`,
 
         const error = await page.act({ action: 'click', target: primary!.ref! }).then(
             () => null,
-            (thrown: unknown) => thrown as { code?: string; message?: string }
+            (thrown: unknown) => thrown as { code?: string; message?: string; details?: Record<string, unknown> }
         );
         expect(error?.code).toBe('click_blocked');
         expect(error?.message).toMatch(/consent-banner/);
+
+        await page.snapshot({});
+        const [again] = await page.find({ text: 'Add to basket' });
+        const repeated = await page.act({ action: 'click', target: again!.ref! }).then(
+            () => null,
+            (thrown: unknown) => thrown as { code?: string; message?: string; details?: Record<string, unknown> }
+        );
+        expect(repeated?.message).toMatch(/do not retry/i);
+        expect(repeated?.details).toMatchObject({ handoff_required: true });
     });
 
     it('dismisses the overlay and then completes the click it was blocking', async () => {

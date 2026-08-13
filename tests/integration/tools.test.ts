@@ -609,6 +609,24 @@ describe('steel_session_create', () => {
         expect(tools.find(tool => tool.name === 'steel_session_options')?.description).toMatch(
             /profiles.*credentials.*plan/i
         );
+        expect(tools.find(tool => tool.name === 'steel_session_create')?.description).toMatch(
+            /profile.*credentials.*session_options/i
+        );
+    });
+
+    it('plainly identifies a create with no saved identity as a guest session', async () => {
+        const h = await connect(testDeps());
+        try {
+            const created = await h.client.callTool({ name: 'steel_session_create', arguments: {} });
+            expect(isError(created)).toBe(false);
+            expect(textOf(created)).toMatch(/fresh guest browser/i);
+            expect(textOf(created)).toMatch(/saved login.*steel_session_options/i);
+            expect(created.structuredContent).toMatchObject({
+                managed_credentials: { requested: false, authentication_confirmed: false },
+            });
+        } finally {
+            await h.close();
+        }
     });
     it('consumes a signed account plan and revalidates its exact-origin namespace', async () => {
         const api = new FakeSteelApi({

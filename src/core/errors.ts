@@ -538,6 +538,7 @@ export function clickBlockedError(
                 ref,
                 covering: coveringDescription,
                 ...(episodeExhausted ? { reason: 'click_recovery_exhausted' } : {}),
+                ...(repeated || episodeExhausted ? { handoff_required: true } : {}),
             },
         }
     );
@@ -553,7 +554,15 @@ export function clickHitTestUnstableError(ref: string, repeated = false): SteelT
     return new SteelToolError(
         `Could not safely click ${ref}: Chrome found no page node at any point inside it after re-reading its ` +
             `layout. The control may be moving or outside the viewport. ${recovery}`,
-        { code: 'click_blocked', details: { ref, reason: 'no_node_at_location' } }
+        {
+            code: 'click_blocked',
+            details: {
+                ref,
+                reason: 'no_node_at_location',
+                diagnostic: { candidate_points: 5, layout_reads: 2, pointer_dispatched: false },
+                ...(repeated ? { handoff_required: true } : {}),
+            },
+        }
     );
 }
 
@@ -566,7 +575,7 @@ export function clickLayoutUnavailableError(ref: string, repeated = false): Stee
           'still has no layout, change strategy or call steel_session_handoff instead of repeating the same loop.';
     return new SteelToolError(`Could not safely click ${ref}: the target has no layout box. ${recovery}`, {
         code: 'click_blocked',
-        details: { ref, reason: 'no_layout_box' },
+        details: { ref, reason: 'no_layout_box', ...(repeated ? { handoff_required: true } : {}) },
     });
 }
 

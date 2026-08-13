@@ -384,6 +384,10 @@ describe('BrowserPage.act — click', () => {
         expect(error.code).toBe('click_blocked');
         expect(error.message).toMatch(/steel_find|steel_snapshot/);
         expect(error.message).not.toContain('DOM.getNodeForLocation');
+        expect(error.details).toMatchObject({
+            reason: 'no_node_at_location',
+            diagnostic: { candidate_points: 5, layout_reads: 2, pointer_dispatched: false },
+        });
         expect(boxReads).toBe(2);
         expect(fixture.sent.some(call => call.method === 'Input.dispatchMouseEvent')).toBe(false);
 
@@ -391,6 +395,7 @@ describe('BrowserPage.act — click', () => {
         const repeated = await catchAsync(browserPage.act({ action: 'click', target: '@e1' }));
         expect(repeated.message).toMatch(/still unstable after a fresh recovery/i);
         expect(repeated.message).toMatch(/do not retry/i);
+        expect(repeated.details).toMatchObject({ handoff_required: true });
         expect(boxReads).toBe(4);
     });
 

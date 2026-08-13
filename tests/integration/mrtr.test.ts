@@ -508,6 +508,59 @@ function cartPage(withChallenge: boolean): FixturePage {
 }
 
 describe('the tools that can hit a wall', () => {
+    it('hands off a repeatedly unstable click on the same session without replaying it after hand-back', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: plainPage }) });
+        const handle = await newSession(harness);
+        const steelSessionId = harness.deps.api.created[0]!.sessionId;
+        await harness.client.callTool({ name: 'steel_snapshot', arguments: { session_id: handle } });
+        const fixture = harness.deps.pool.fixtureFor(steelSessionId)!;
+        fixture.stub('DOM.getNodeForLocation', () => {
+            throw new Error('DOM.getNodeForLocation failed: No node found at given location');
+        });
+
+        const first = await harness.client.callTool({
+            name: 'steel_act',
+            arguments: { session_id: handle, action: 'click', target: '@e1' },
+        });
+        expect(first.isError).toBe(true);
+
+        const handedBack = await harness.client.callTool({
+            name: 'steel_act',
+            arguments: { session_id: handle, action: 'click', target: '@e1' },
+        });
+
+        expect(handedBack.isError).toBeFalsy();
+        expect(textOf(handedBack)).toMatch(/handed the browser back/i);
+        expect(harness.elicited).toHaveLength(1);
+        expect(harness.deps.api.created).toHaveLength(1);
+        expect(fixture.sent.filter(call => call.method === 'Input.dispatchMouseEvent')).toHaveLength(0);
+    });
+
+    it('preserves the repeated-click error when the client has no handoff route', async () => {
+        const harness = await connectModern({ deps: testDeps({ page: plainPage }), capabilities: {} });
+        const handle = await newSession(harness);
+        const steelSessionId = harness.deps.api.created[0]!.sessionId;
+        await harness.client.callTool({ name: 'steel_snapshot', arguments: { session_id: handle } });
+        const fixture = harness.deps.pool.fixtureFor(steelSessionId)!;
+        fixture.stub('DOM.getNodeForLocation', () => ({}));
+
+        await harness.client.callTool({
+            name: 'steel_act',
+            arguments: { session_id: handle, action: 'click', target: '@e1' },
+        });
+        const repeated = await harness.client.callTool({
+            name: 'steel_act',
+            arguments: { session_id: handle, action: 'click', target: '@e1' },
+        });
+
+        expect(repeated.isError).toBe(true);
+        expect(textOf(repeated)).toMatch(/still unstable.*do not retry/is);
+        expect(repeated.structuredContent).toMatchObject({
+            error: { code: 'click_blocked', details: { handoff_required: true } },
+        });
+        expect(fixture.sent.filter(call => call.method === 'Input.dispatchMouseEvent')).toHaveLength(0);
+    });
+
     it('waits once for managed credential injection before handing off a remaining login wall', async () => {
         let harness: Harness;
         let graceCalls = 0;
