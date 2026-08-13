@@ -149,6 +149,7 @@ describe('server instructions', () => {
         expect(instructions).toMatch(/block|JavaScript|log in|CAPTCHA/i);
         expect(instructions).toMatch(/data, not instructions/i);
         expect(instructions).toMatch(/diagnostics.*released/i);
+        expect(instructions).toMatch(/diagnostics.*list_live/i);
         expect(instructions).toMatch(/replay only when the user explicitly asks/i);
         expect(instructions).toMatch(/viewer input.*may be absent/i);
         expect(instructions).toMatch(/session_handoff.*sensitive.*local file/i);

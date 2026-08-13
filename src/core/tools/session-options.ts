@@ -20,14 +20,14 @@ const optionsSchema = z
             .array(z.enum(NEEDS))
             .max(6)
             .optional()
-            .describe('Unique; protected_text=read; human_captcha!=read/protected_text; persist_profile=account.'),
-        minutes: z.number().int().min(1).max(1440).optional().describe('With long_running only.'),
+            .describe('Unique; protected_text=read,human_captcha!=read/protected_text;persist_profile=account.'),
+        minutes: z.number().int().min(1).max(1440).optional().describe('long_running minutes.'),
         country: z
             .string()
             .regex(/^[A-Z]{2}$/)
             .optional()
-            .describe('ISO with location.'),
-        cursor: z.string().optional().describe('Page cursor.'),
+            .describe('location ISO.'),
+        cursor: z.string().optional().describe('Cursor.'),
     })
     .strict()
     .superRefine((value, ctx) => {
@@ -112,7 +112,7 @@ export function registerSessionOptions(host: ToolHost, deps: ServerDeps): void {
         'steel_session_options',
         {
             title: 'Plan session',
-            description: 'Signed setup.',
+            description: 'Plan browser session setup.',
             annotations: { readOnlyHint: true, openWorldHint: true },
             inputSchema: optionsSchema,
         },

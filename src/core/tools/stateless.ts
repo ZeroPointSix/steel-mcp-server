@@ -3,7 +3,7 @@
 import type { ContentBlock } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps, ToolHost } from '../context.js';
-import { botDetectionError, detectBotBlock, SteelToolError } from '../errors.js';
+import { botDetectionError, detectBotBlock } from '../errors.js';
 import type { ScrapeFormat } from '../steel/types.js';
 import { type Provenance, stripHtmlComments, stripInvisible } from '../untrusted.js';
 import { cursorSchema, fencedSection, guard, maxTokensSchema, successResult, withPage } from './shared.js';
@@ -281,16 +281,6 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                 }),
         },
         async (args, ctx) => {
-            if (args.session_id && args.inline === false) {
-                return guard(deps, 'steel_screenshot', ctx.mcpReq, async () => {
-                    throw new SteelToolError(
-                        'Session screenshots are returned directly and have no hosted download link. Omit ' +
-                            'inline=false, or capture a URL when you need a link-only result.',
-                        { code: 'invalid_argument' }
-                    );
-                });
-            }
-
             // The session branch goes through withPage so there is exactly one path that resolves
             // a handle and marks it as used; screenshotting in a loop must not let the reaper
             // reclaim the session out from under the agent doing it.
@@ -306,14 +296,10 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
             }
 
             return guard(deps, 'steel_screenshot', ctx.mcpReq, async () => {
-                if (!args.url) {
-                    throw new SteelToolError('steel_screenshot needs either a url or a session_id.', {
-                        code: 'invalid_argument',
-                    });
-                }
+                const url = args.url as string;
 
                 const artifact = await deps.api.screenshot(
-                    { url: args.url, fullPage: args.full_page, useProxy: args.use_proxy },
+                    { url, fullPage: args.full_page, useProxy: args.use_proxy },
                     ctx.mcpReq.signal
                 );
                 const inline = args.inline ?? true;
@@ -334,7 +320,7 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                     title: 'Page screenshot',
                     mimeType: 'image/png',
                     size: downloaded?.state === 'embedded' ? downloaded.size : undefined,
-                    description: `Screenshot of ${args.url}`,
+                    description: `Screenshot of ${url}`,
                     annotations: { audience: ['user'] },
                 });
                 const fallbackNote =
@@ -343,8 +329,8 @@ export function registerScreenshot(host: ToolHost, deps: ServerDeps): void {
                     {
                         result:
                             downloaded?.state === 'embedded'
-                                ? `Captured ${args.url}. The screenshot is attached inline and linked below.`
-                                : `Captured ${args.url}. The screenshot is linked below.`,
+                                ? `Captured ${url}. The screenshot is attached inline and linked below.`
+                                : `Captured ${url}. The screenshot is linked below.`,
                         notes: fallbackNote ? [fallbackNote] : undefined,
                     },
                     { url: artifact.url },
