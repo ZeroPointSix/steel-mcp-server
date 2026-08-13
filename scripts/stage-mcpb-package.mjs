@@ -11,7 +11,7 @@ import { argv, exit, stderr } from 'node:process';
  * the hosted-only packages are optional peers. So this is a second line of defence rather than the
  * only one: if a hosted package ever lands back in `dependencies`, the bundle still does not ship it.
  */
-const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/server', '@opentelemetry/api', 'ws', 'zod'];
+const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/server', '@opentelemetry/api', 'safe-regex2', 'ws', 'zod'];
 
 const stage = argv[2];
 if (!stage) {

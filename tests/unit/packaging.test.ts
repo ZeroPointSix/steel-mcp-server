@@ -156,6 +156,17 @@ describe('the shipped launch paths all point at the real entrypoint', () => {
         expect(read('scripts/verify-mcpb-stage.mjs')).toContain("relative.endsWith('.map')");
     });
 
+    it('verifies the Desktop bundle outside the repository dependency tree', () => {
+        const pack = read('scripts/pack-mcpb.sh');
+        expect(pack).toContain('mktemp -d');
+        expect(pack).toMatch(/verify-mcpb-stage\.mjs" "\$VERIFY_STAGE/);
+
+        const stagePackage = read('scripts/stage-mcpb-package.mjs');
+        for (const dependency of Object.keys(manifest.dependencies)) {
+            expect(stagePackage, `the Desktop bundle omits ${dependency}`).toContain(`'${dependency}'`);
+        }
+    });
+
     it('documents every tool the browse profile registers', () => {
         // A reviewer reads the README's table and calls what it lists. An undocumented tool, or a
         // documented one that no longer exists, is the drift this catches.

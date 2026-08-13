@@ -39,7 +39,12 @@ npm --prefix "$STAGE" install --omit=dev --omit=optional --ignore-scripts --no-a
 find "$STAGE" -type f -name '*.map' -delete
 
 echo "==> Verifying the staged server starts and lists its tools"
-node "$ROOT/scripts/verify-mcpb-stage.mjs" "$STAGE"
+# Verify from outside the repository tree. Otherwise Node can resolve a dependency omitted from the
+# bundle through ROOT/node_modules and turn a broken Desktop install into a false-positive pass.
+VERIFY_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/steel-mcp-verify.XXXXXX")"
+trap 'rm -rf "$VERIFY_STAGE"' EXIT
+cp -R "$STAGE/." "$VERIFY_STAGE/"
+node "$ROOT/scripts/verify-mcpb-stage.mjs" "$VERIFY_STAGE"
 
 echo "==> Validating the manifest"
 $MCPB validate "$STAGE/manifest.json"

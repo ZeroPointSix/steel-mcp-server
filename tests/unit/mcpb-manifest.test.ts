@@ -167,6 +167,7 @@ describe('the pack script', () => {
         expect([...declared.matchAll(/'([^']+)'/g)].map(match => match[1])).toEqual([
             '@modelcontextprotocol/server',
             '@opentelemetry/api',
+            'safe-regex2',
             'ws',
             'zod',
         ]);
