@@ -59,5 +59,4 @@ COPY --from=builder /app/package.json /app/package.json
 #
 # The base URL is deliberately unset, so an unconfigured container talks to Steel Cloud and says what
 # it needs rather than silently pointing at a self-hosted browser that is not there.
-ENTRYPOINT ["node"]
-CMD ["dist/hosted.js"]
+CMD ["node", "dist/hosted.js"]
